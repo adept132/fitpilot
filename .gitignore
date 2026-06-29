@@ -1,0 +1,27 @@
+# === Python & Виртуальные окружения ===
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# === Переменные окружения (КРИТИЧНО!) ===
+.env
+.env.*
+
+# === Firebase и Ключи ===
+# Обязательно убедись, что файл с ключами (например, firebase-adminsdk.json) подпадает под эту маску
+*firebase*.json
+*serviceAccount*.json
+credentials.json
+
+# === PyCharm и IDE ===
+.idea/
+.vscode/
+*.swp
+
+# === Базы данных и Логи ===
+*.sqlite3
+*.log

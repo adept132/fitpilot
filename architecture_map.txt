@@ -1,0 +1,2212 @@
+================================================================================
+PROJECT ARCHITECTURE MAP
+================================================================================
+
+BACKEND: C:\Users\Admin\PycharmProjects\FitPilotBot\api
+├── __pycache__
+├── core
+│   ├── __pycache__
+│   └── firebase_admin.py
+│       ├── FUNCTIONS
+│       └──   - def verify_firebase_token()
+├── firebase
+├── routers
+│   ├── __pycache__
+│   ├── auth.py
+│   │   ├── ROUTES
+│   │   ├──   - @router.get(path='/me', response_model=AppUserResponse)
+│   │   ├── FUNCTIONS
+│   │   └──   - async def get_me()
+│   ├── calendar.py
+│   │   ├── ROUTES
+│   │   ├──   - @router.get(path='/day/{local_date}')
+│   │   ├──   - @router.get(path='/range')
+│   │   ├──   - @router.get(path='/day-by-id/{day_id}')
+│   │   ├── FUNCTIONS
+│   │   ├──   - async def get_day_context()
+│   │   ├──   - async def get_calendar_range()
+│   │   └──   - async def get_day_by_id()
+│   ├── exercises.py
+│   │   ├── ROUTES
+│   │   ├──   - @router.get(path='/exercises', response_model=list[ExerciseListItemResponse])
+│   │   ├──   - @router.get(path='/exercises/{exercise_id}', response_model=ExerciseDetailResponse)
+│   │   ├──   - @router.get(path='/exercises/{exercise_id}/history', response_model=list[ExerciseHistoryItemResponse])
+│   │   ├──   - @router.get(path='/exercises/{exercise_id}/history/{workout_id}', response_model=ExerciseHistoryWorkoutDetailResponse)
+│   │   ├──   - @router.get(path='/exercises/{exercise_id}/last-performance', response_model=Optional[ExerciseLastPerformanceResponse])
+│   │   ├──   - @router.get(path='/search', response_model=list[ExerciseSearchItem])
+│   │   ├──   - @router.get(path='/muscle-groups', response_model=list[MuscleGroupItem])
+│   │   ├──   - @router.get(path='/last-for-context', response_model=LastWorkoutResponse)
+│   │   ├──   - @router.get(path='/{exercise_id}/alternatives', response_model=List[ExerciseAlternativeResponse])
+│   │   ├──   - @router.post(path='/sessions/{session_id}/exercises/{session_ex_id}/replace')
+│   │   ├──   - @router.post(path='/exercises', response_model=ExerciseSearchItem, status_code=status.HTTP_201_CREATED)
+│   │   ├── FUNCTIONS
+│   │   ├──   - async def list_exercises()
+│   │   ├──   - async def get_exercise_detail()
+│   │   ├──   - async def get_exercise_history()
+│   │   ├──   - async def get_exercise_history_workout_detail()
+│   │   ├──   - async def get_exercise_last_performance()
+│   │   ├──   - async def search_exercises()
+│   │   ├──   - async def get_muscle_groups()
+│   │   ├──   - async def get_last_for_context()
+│   │   ├──   - async def get_exercise_alternatives()
+│   │   ├──   - async def replace_session_exercise()
+│   │   └──   - async def create_custom_exercise()
+│   ├── mesocycles.py
+│   │   ├── ROUTES
+│   │   ├──   - @router.get(path='/')
+│   │   ├──   - @router.post(path='/', status_code=status.HTTP_201_CREATED)
+│   │   ├──   - @router.get(path='/{mesocycle_id}')
+│   │   ├──   - @router.delete(path='/{mesocycle_id}')
+│   │   ├── FUNCTIONS
+│   │   ├──   - async def get_mesocycles()
+│   │   ├──   - async def create_mesocycle()
+│   │   ├──   - async def get_mesocycle()
+│   │   └──   - async def delete_mesocycle()
+│   ├── microcycles.py
+│   │   ├── ROUTES
+│   │   ├──   - @router.get(path='/')
+│   │   ├──   - @router.post(path='/', status_code=status.HTTP_201_CREATED)
+│   │   ├──   - @router.get(path='/{micro_id}')
+│   │   ├──   - @router.put(path='/{micro_id}')
+│   │   ├──   - @router.delete(path='/{micro_id}')
+│   │   ├── FUNCTIONS
+│   │   ├──   - async def get_microcycles()
+│   │   ├──   - async def create_microcycle()
+│   │   ├──   - async def get_microcycle()
+│   │   ├──   - async def update_microcycle()
+│   │   └──   - async def delete_microcycle()
+│   ├── plans.py
+│   │   ├── ROUTES
+│   │   ├──   - @router.get(path='/')
+│   │   ├──   - @router.get(path='/{plan_id}')
+│   │   ├──   - @router.post(path='/', status_code=status.HTTP_201_CREATED)
+│   │   ├──   - @router.put(path='/{plan_id}')
+│   │   ├──   - @router.delete(path='/{plan_id}')
+│   │   ├──   - @router.post(path='/{plan_id}/apply')
+│   │   ├── FUNCTIONS
+│   │   ├──   - def get_plans()
+│   │   ├──   - async def get_plan()
+│   │   ├──   - async def create_workout_plan()
+│   │   ├──   - def update_workout_plan()
+│   │   ├──   - def delete_plan()
+│   │   └──   - async def apply_plan_to_calendar()
+│   ├── profile.py
+│   │   ├── ROUTES
+│   │   ├──   - @router.get(path='/users/me/profile', response_model=ProfileResponse)
+│   │   ├──   - @router.patch(path='/profile/me', response_model=ProfileResponse)
+│   │   ├──   - @router.get(path='/profile')
+│   │   ├──   - @router.patch(path='/profile/settings')
+│   │   ├──   - @router.patch(path='/profile/onboarding')
+│   │   ├──   - @router.put(path='/profile/budget')
+│   │   ├── FUNCTIONS
+│   │   ├──   - async def get_profile_me()
+│   │   ├──   - async def update_profile_me()
+│   │   ├──   - async def get_my_profile()
+│   │   ├──   - async def update_profile_settings()
+│   │   ├──   - async def update_profile_onboarding()
+│   │   └──   - async def update_custom_budget()
+│   ├── progress.py
+│   │   ├── ROUTES
+│   │   ├──   - @router.get(path='/api/progress/volume-overview')
+│   │   ├──   - @router.get(path='/progress/exercise-history/{exercise_id}', response_model=ExerciseFullHistoryResponse)
+│   │   ├──   - @router.get(path='/progress/fatigue/{muscle_group}', response_model=FatigueArchitectureResponse)
+│   │   ├── FUNCTIONS
+│   │   ├──   - async def get_volume_overview()
+│   │   ├──   - async def get_exercise_history()
+│   │   └──   - async def get_fatigue_architecture()
+│   ├── scheduling.py
+│   │   ├── ROUTES
+│   │   ├──   - @router.post(path='/preview', response_model=SchedulePreviewResponse)
+│   │   ├── FUNCTIONS
+│   │   └──   - async def generate_schedule_preview()
+│   ├── splits.py
+│   │   ├── ROUTES
+│   │   ├──   - @router.get(path='/blueprints', response_model=List[SplitBlueprintOut])
+│   │   ├──   - @router.get(path='/days', response_model=List[DayBlueprintOut])
+│   │   ├──   - @router.post(path='/active')
+│   │   ├──   - @router.post(path='/custom')
+│   │   ├──   - @router.delete(path='/{blueprint_id}', status_code=status.HTTP_204_NO_CONTENT)
+│   │   ├──   - @router.patch(path='/{blueprint_id}')
+│   │   ├──   - @router.post(path='/days/custom')
+│   │   ├──   - @router.delete(path='/days/{day_id}', status_code=status.HTTP_204_NO_CONTENT)
+│   │   ├──   - @router.patch(path='/days/{day_id}')
+│   │   ├──   - @router.post(path='/launch', status_code=status.HTTP_200_OK)
+│   │   ├──   - @router.get(path='/active')
+│   │   ├──   - @router.get(path='/{blueprint_id}', response_model=SplitBlueprintOut)
+│   │   ├──   - @router.post(path='/preview', response_model=SchedulePreviewResponse)
+│   │   ├── FUNCTIONS
+│   │   ├──   - async def get_available_splits()
+│   │   ├──   - async def get_available_days()
+│   │   ├──   - async def activate_split()
+│   │   ├──   - async def create_custom_split()
+│   │   ├──   - async def delete_custom_split()
+│   │   ├──   - async def update_custom_split()
+│   │   ├──   - async def create_custom_day()
+│   │   ├──   - async def delete_custom_day()
+│   │   ├──   - async def update_custom_day()
+│   │   ├──   - async def launch_split()
+│   │   ├──   - async def get_active_split()
+│   │   ├──   - async def get_custom_split_details()
+│   │   └──   - async def generate_schedule_preview()
+│   ├── workout_center.py
+│   │   ├── ROUTES
+│   │   ├──   - @router.get(path='/workout-center/context', response_model=WorkoutCenterContextRead)
+│   │   ├──   - @router.patch(path='/workout-center/split', response_model=WorkoutCenterContextRead)
+│   │   ├──   - @router.patch(path='/workout-center/split-day', response_model=WorkoutCenterContextRead)
+│   │   ├──   - @router.post(path='/workouts/start', response_model=StartWorkoutResponse)
+│   │   ├──   - @router.post(path='/workouts/{workout_id}/finish', response_model=FinishWorkoutResponse)
+│   │   ├──   - @router.patch(path='/workout-center/context/mesocycle', response_model=WorkoutCenterContextRead)
+│   │   ├──   - @router.patch(path='/workout-center/context/plan', response_model=WorkoutCenterContextRead)
+│   │   ├──   - @router.post(path='/workout-center/active-mesocycle/phase')
+│   │   ├──   - @router.get(path='/workout-center/plan-builder/volume-targets', response_model=VolumeTargetsResponse)
+│   │   ├──   - @router.patch(path='/workout-center/context/microcycle', response_model=WorkoutCenterContextRead)
+│   │   ├── FUNCTIONS
+│   │   ├──   - def build_split_day_read()
+│   │   ├──   - async def get_or_create_user_split()
+│   │   ├──   - async def get_active_workout()
+│   │   ├──   - async def build_context()
+│   │   ├──   - async def get_workout_center_context()
+│   │   ├──   - async def update_workout_center_split()
+│   │   ├──   - async def update_workout_center_split_day()
+│   │   ├──   - async def start_workout()
+│   │   ├──   - async def finish_workout()
+│   │   ├──   - async def update_workout_center_mesocycle()
+│   │   ├──   - async def update_workout_center_plan()
+│   │   ├──   - async def set_active_mesocycle_phase()
+│   │   ├──   - async def get_volume_targets()
+│   │   └──   - async def update_workout_center_microcycle()
+│   ├── workout_supersets.py
+│   │   ├── ROUTES
+│   │   ├──   - @router.get(path='/{superset_group}', response_model=SupersetFlowResponse)
+│   │   ├──   - @router.post(path='/{superset_group}/members')
+│   │   ├──   - @router.post(path='/{superset_group}/add-exercise')
+│   │   ├──   - @router.post(path='/{superset_group}/remove-member')
+│   │   ├──   - @router.delete(path='/{superset_group}')
+│   │   ├──   - @router.post(path='/session-exercises/{session_exercise_id}/start', response_model=StartSupersetResponse)
+│   │   ├── FUNCTIONS
+│   │   ├──   - async def get_superset_flow()
+│   │   ├──   - async def add_existing_exercise_to_superset()
+│   │   ├──   - async def add_new_exercise_to_superset()
+│   │   ├──   - async def remove_exercise_from_superset()
+│   │   ├──   - async def delete_superset()
+│   │   ├──   - async def start_superset_endpoint()
+│   │   └──   - async def ensure_exercise_not_duplicated_in_superset()
+│   └── workouts.py
+│       ├── ROUTES
+│       ├──   - @router.get(path='/workouts/active', response_model=WorkoutSessionDetailResponse)
+│       ├──   - @router.get(path='/workouts/{workout_id}', response_model=WorkoutSessionDetailResponse)
+│       ├──   - @router.post(path='/workouts/{workout_id}/exercises', response_model=WorkoutSessionDetailResponse)
+│       ├──   - @router.post(path='/workout-session-exercises/{session_exercise_id}/sets', response_model=AddWorkoutSetResponse)
+│       ├──   - @router.patch(path='/workout-session-sets/{set_id}', response_model=AddWorkoutSetResponse)
+│       ├──   - @router.post(path='/workout-session-sets/{set_id}/repeat', response_model=AddWorkoutSetResponse)
+│       ├──   - @router.delete(path='/workout-session-exercises/{session_exercise_id}', status_code=status.HTTP_204_NO_CONTENT)
+│       ├──   - @router.delete(path='/workout-session-sets/{set_id}', status_code=status.HTTP_204_NO_CONTENT)
+│       ├──   - @router.post(path='/workouts/{workout_id}/supersets')
+│       ├──   - @router.patch(path='/workouts/{workout_id}/structure')
+│       ├── FUNCTIONS
+│       ├──   - def _workout_session_options()
+│       ├──   - def _renumber_sets()
+│       ├──   - async def get_active_workout()
+│       ├──   - async def get_workout_detail()
+│       ├──   - async def add_exercise_to_workout()
+│       ├──   - async def add_set_to_session_exercise()
+│       ├──   - async def get_active_workout_for_user()
+│       ├──   - async def update_workout_session_set()
+│       ├──   - async def repeat_workout_session_set()
+│       ├──   - async def delete_workout_session_exercise()
+│       ├──   - async def delete_workout_session_set()
+│       ├──   - async def create_superset()
+│       └──   - async def reorder_workout_structure()
+├── schemas
+│   ├── __pycache__
+│   ├── app_user.py
+│   ├── auth.py
+│   ├── exercises.py
+│   ├── mesocycle.py
+│   ├── microcycle.py
+│   ├── plan.py
+│   ├── profile.py
+│   ├── progress.py
+│   ├── splits.py
+│   ├── supersets.py
+│   ├── workout_center.py
+│   ├── workouts.py
+│   └── оnboarding.py
+│       ├── FUNCTIONS
+│       └──   - def check_frequency_bounds()
+├── services
+│   ├── __pycache__
+│   ├── app_user_service.py
+│   │   ├── FUNCTIONS
+│   │   ├──   - async def get_or_create_app_user()
+│   │   └──   - async def get_current_app_user()
+│   ├── calculate_exercise_recommendation.py
+│   │   ├── FUNCTIONS
+│   │   └──   - async def calculate_exercise_recommendations()
+│   ├── day_template.py
+│   ├── exercise_matcher.py
+│   │   ├── FUNCTIONS
+│   │   ├──   - async def find_or_create_exercise()
+│   │   ├──   - async def _find_exact_matches()
+│   │   ├──   - async def _find_similar_exercises()
+│   │   ├──   - def _calculate_similarity()
+│   │   └──   - def _normalize_string()
+│   ├── exercise_pattern_tags.py
+│   ├── exercise_search_service.py
+│   │   ├── FUNCTIONS
+│   │   ├──   - def normalize_exercise_type()
+│   │   ├──   - def normalize_equipment_values()
+│   │   ├──   - def classify_equipment()
+│   │   ├──   - def matches_equipment_filter()
+│   │   ├──   - async def _get_recent_exercise_ids()
+│   │   ├──   - async def search_exercises()
+│   │   ├──   - async def get_muscle_groups()
+│   │   ├──   - async def get_last_workout_for_context()
+│   │   └──   - async def get_exercise_analytics_history()
+│   ├── exercise_utils.py
+│   │   ├── FUNCTIONS
+│   │   └──   - def get_base_exercise_query()
+│   ├── fatigue_tiers.py
+│   │   ├── FUNCTIONS
+│   │   ├──   - def get_muscle_score()
+│   │   ├──   - def get_equipment_score()
+│   │   └──   - def calculate_fatigue_tier()
+│   ├── heuristics.py
+│   │   ├── FUNCTIONS
+│   │   └──   - def classify_exercise()
+│   ├── mesocycle_engine.py
+│   │   ├── FUNCTIONS
+│   │   └──   - def generate_interstellar_queue()
+│   ├── mesocycle_phase.py
+│   ├── models.py
+│   │   ├── FUNCTIONS
+│   │   └──   - def muscle_target_names()
+│   ├── resolvers.py
+│   │   ├── FUNCTIONS
+│   │   ├──   - def resolve_rep_range()
+│   │   └──   - def resolve_rir()
+│   ├── scheduling.py
+│   ├── scheduling_engine.py
+│   │   ├── FUNCTIONS
+│   │   ├──   - def _score_and_find_best_plan()
+│   │   ├──   - async def launch_and_unroll_plan()
+│   │   └──   - async def ensure_horizon()
+│   ├── statistics_service.py
+│   │   ├── FUNCTIONS
+│   │   └──   - async def get_weekly_performed_sets()
+│   ├── validator.py
+│   │   ├── FUNCTIONS
+│   │   ├──   - def validate_mesocycle_sequence()
+│   │   └──   - def validate_workout_plan()
+│   ├── volume_calculator.py
+│   │   ├── FUNCTIONS
+│   │   └──   - def calculate_volume_budget()
+│   ├── volume_service.py
+│   │   ├── FUNCTIONS
+│   │   └──   - async def calculate_session_targets()
+│   ├── volume_tables.py
+│   │   ├── FUNCTIONS
+│   │   ├──   - def get_default_weekly_volume()
+│   │   ├──   - def get_split_definition()
+│   │   ├──   - def get_pattern_for_week()
+│   │   ├──   - def compute_weekly_frequency()
+│   │   ├──   - def get_sets_per_muscle_per_workout()
+│   │   ├──   - def _parse_muscle()
+│   │   ├──   - def _min_sets_for_muscle()
+│   │   ├──   - def _apply_min_sets()
+│   │   ├──   - def _distribute_weekly_volume_to_session()
+│   │   ├──   - def _compute_occurrence_index_for_day()
+│   │   ├──   - def get_ranges()
+│   │   ├──   - def get_distribution()
+│   │   └──   - def get_proportional_pool()
+│   └── workout_superset_service.py
+│       ├── FUNCTIONS
+│       ├──   - def ensure_unique_exercise_ids_for_new_superset()
+│       ├──   - def _set_weight_to_float()
+│       ├──   - def _sets_count()
+│       ├──   - def _volume_total()
+│       ├──   - def _rounds_completed()
+│       ├──   - def _sets_total()
+│       ├──   - def _volume_group_total()
+│       ├──   - def _has_incomplete_round()
+│       ├──   - def _first_incomplete_session_exercise_id()
+│       ├──   - def _superset_label_map()
+│       ├──   - def _serialize_set()
+│       ├──   - async def _get_last_performance_sets()
+│       ├──   - async def get_workout_session_exercises()
+│       ├──   - async def build_workout_structure()
+│       ├──   - async def create_superset()
+│       ├──   - async def add_existing_exercise_to_superset()
+│       ├──   - async def add_new_exercise_to_superset()
+│       ├──   - async def remove_exercise_from_superset()
+│       ├──   - async def get_superset_flow()
+│       ├──   - async def cleanup_single_member_supersets()
+│       ├──   - async def delete_superset()
+│       ├──   - async def get_workout_session_exercises_map()
+│       ├──   - async def cleanup_superset_groups_after_reorder()
+│       ├──   - async def reorder_workout_structure()
+│       ├──   - async def move_exercise_to_superset()
+│       ├──   - async def move_exercise_out_of_superset()
+│       └──   - async def start_superset()
+├── deps.py
+│   ├── FUNCTIONS
+│   ├──   - async def get_db()
+│   └──   - async def get_current_firebase_claims()
+├── main.py
+│   ├── FUNCTIONS
+│   └──   - async def health()
+├── migration.py
+│   ├── FUNCTIONS
+│   └──   - async def run_auto_tagger()
+└── seed_splits.py
+    ├── FUNCTIONS
+    └──   - async def seed_data()
+
+================================================================================
+
+FRONTEND: C:\Users\Admin\fitpilot-mobile
+├── app
+│   ├── (auth)
+│   │   ├── _layout.tsx
+│   │   ├── login.tsx
+│   │   │   ├──   - const styles
+│   │   │   ├──   - const normalizedEmail
+│   │   │   └──   - const createStyles
+│   │   ├── register.tsx
+│   │   │   ├──   - const styles
+│   │   │   ├──   - const normalizedEmail
+│   │   │   ├──   - const normalizedDisplayName
+│   │   │   └──   - const createStyles
+│   │   └── reset-password.tsx
+│   │       ├──   - const styles
+│   │       ├──   - const normalizedEmail
+│   │       └──   - const createStyles
+│   ├── (tabs)
+│   │   ├── _layout.tsx
+│   │   ├── exercises.tsx
+│   │   │   ├──   - const styles
+│   │   │   ├──   - const router
+│   │   │   ├──   - const withToken
+│   │   │   ├──   - const token
+│   │   │   ├──   - const loadExercises
+│   │   │   ├──   - const data
+│   │   │   └──   - const createStyles
+│   │   ├── home.tsx
+│   │   │   ├──   - type HomeProfileData
+│   │   │   ├──   - type ActiveSplitData
+│   │   │   ├──   - type TodayContextData
+│   │   │   ├──   - type ActiveSessionData
+│   │   │   ├──   - const getLocalYYYYMMDD
+│   │   │   ├──   - const styles
+│   │   │   ├──   - const router
+│   │   │   ├──   - const fetchHomeData
+│   │   │   ├──   - const token
+│   │   │   ├──   - const todayStr
+│   │   │   ├──   - const today
+│   │   │   ├──   - const formattedDate
+│   │   │   ├──   - const isOnboardingComplete
+│   │   │   ├──   - const handleOpenTelegram
+│   │   │   ├──   - const url
+│   │   │   ├──   - const supported
+│   │   │   └──   - const createStyles
+│   │   ├── profile.tsx
+│   │   │   ├──   - type UserProfile
+│   │   │   ├──   - const styles
+│   │   │   ├──   - const router
+│   │   │   ├──   - const fetchProfile
+│   │   │   ├──   - const token
+│   │   │   ├──   - const data
+│   │   │   └──   - const createStyles
+│   │   ├── progress.tsx
+│   │   │   ├──   - type ActionableInsightsProps
+│   │   │   ├──   - const GRAPH_WIDTH
+│   │   │   ├──   - const GRAPH_HEIGHT
+│   │   │   ├──   - const PADDING_LEFT
+│   │   │   ├──   - const PADDING_BOTTOM
+│   │   │   ├──   - const PADDING_TOP
+│   │   │   ├──   - const PADDING_RIGHT
+│   │   │   ├──   - const INNER_WIDTH
+│   │   │   ├──   - const INNER_HEIGHT
+│   │   │   ├──   - const styles
+│   │   │   ├──   - const safeTarget
+│   │   │   ├──   - const progress
+│   │   │   ├──   - const size
+│   │   │   ├──   - const strokeWidth
+│   │   │   ├──   - const radius
+│   │   │   ├──   - const circumference
+│   │   │   ├──   - const strokeDashoffset
+│   │   │   ├──   - const isIsolation
+│   │   │   ├──   - const metricName
+│   │   │   ├──   - const metricUnit
+│   │   │   ├──   - const chartData
+│   │   │   ├──   - const latestValue
+│   │   │   ├──   - const firstValue
+│   │   │   ├──   - const delta
+│   │   │   ├──   - const isPositive
+│   │   │   ├──   - const isNegative
+│   │   │   ├──   - const values
+│   │   │   ├──   - const min
+│   │   │   ├──   - const max
+│   │   │   ├──   - const range
+│   │   │   ├──   - const paddedMin
+│   │   │   ├──   - const paddedMax
+│   │   │   ├──   - const paddedRange
+│   │   │   ├──   - const yTicks
+│   │   │   ├──   - const yPos
+│   │   │   ├──   - const xTicks
+│   │   │   ├──   - const x
+│   │   │   ├──   - const y
+│   │   │   ├──   - const line
+│   │   │   ├──   - const area
+│   │   │   ├──   - const formatDate
+│   │   │   ├──   - const cols
+│   │   │   ├──   - const rows
+│   │   │   ├──   - const matrix
+│   │   │   ├──   - const getColor
+│   │   │   ├──   - const totalPerformedSets
+│   │   │   ├──   - const totalTargetSets
+│   │   │   ├──   - const EXERCISE_STORAGE_KEY
+│   │   │   ├──   - const loadSavedExercise
+│   │   │   ├──   - const saved
+│   │   │   ├──   - const loadScreenData
+│   │   │   ├──   - const token
+│   │   │   ├──   - const data
+│   │   │   ├──   - const isBudgetEmpty
+│   │   │   ├──   - const defaultBudget
+│   │   │   ├──   - const loadExerciseData
+│   │   │   ├──   - const createStyles
+│   │   │   ├──   - let pathString
+│   │   │   ├──   - let xPos
+│   │   │   └──   - let textAnchor
+│   │   └── workout.tsx
+│   │       ├──   - type FinishWorkoutResponse
+│   │       ├──   - type WorkoutCenterContextResponse
+│   │       ├──   - type WorkoutCenterSplit
+│   │       ├──   - type WorkoutCenterSplitDay
+│   │       ├──   - type CenterView
+│   │       ├──   - type LoadMapMode
+│   │       ├──   - type SelectorType
+│   │       ├──   - type PlannedDayContext
+│   │       ├──   - const styles
+│   │       ├──   - const router
+│   │       ├──   - const slideAnim
+│   │       ├──   - const isConfigured
+│   │       ├──   - const activeWorkout
+│   │       ├──   - const parsedSummary
+│   │       ├──   - const withToken
+│   │       ├──   - const token
+│   │       ├──   - const loadContext
+│   │       ├──   - const refreshContext
+│   │       ├──   - const data
+│   │       ├──   - const handleDeletePlan
+│   │       ├──   - const handleDeleteMesocycle
+│   │       ├──   - const handleEditPlan
+│   │       ├──   - const handleEditMesocycle
+│   │       ├──   - const handleEditMicrocycle
+│   │       ├──   - const handleDeleteMicrocycle
+│   │       ├──   - const handleCreateMicrocycle
+│   │       ├──   - const workout
+│   │       ├──   - const summary
+│   │       ├──   - const handleCloseSummary
+│   │       ├──   - const handleCreatePlan
+│   │       ├──   - const handleCreateMesocycle
+│   │       ├──   - const translateY
+│   │       ├──   - const realQueue
+│   │       ├──   - const requiresSchedule
+│   │       ├──   - const currentSplitId
+│   │       ├──   - const nextHeight
+│   │       ├──   - const weekNum
+│   │       ├──   - const isRestDay
+│   │       ├──   - const isDayOverridden
+│   │       ├──   - const isPlanOverridden
+│   │       ├──   - const periodizationWeekValue
+│   │       ├──   - const phaseName
+│   │       └──   - const createStyles
+│   ├── exercises
+│   │   ├── [id]
+│   │   │   └── history.tsx
+│   │   │       ├──   - type ExerciseHistoryItem
+│   │   │       ├──   - type ExerciseHistoryWorkoutDetail
+│   │   │       ├──   - const styles
+│   │   │       ├──   - const exerciseId
+│   │   │       ├──   - const withToken
+│   │   │       ├──   - const token
+│   │   │       ├──   - const data
+│   │   │       ├──   - const handleToggleWorkout
+│   │   │       ├──   - const detail
+│   │   │       ├──   - const isExpanded
+│   │   │       ├──   - const isDetailLoading
+│   │   │       └──   - const createStyles
+│   │   ├── [id].tsx
+│   │   │   ├──   - type ExerciseDetailResponse
+│   │   │   ├──   - const styles
+│   │   │   ├──   - const router
+│   │   │   ├──   - const exerciseId
+│   │   │   ├──   - const withToken
+│   │   │   ├──   - const token
+│   │   │   ├──   - const data
+│   │   │   └──   - const createStyles
+│   │   ├── create.tsx
+│   │   │   ├──   - const MUSCLE_OPTIONS
+│   │   │   ├──   - const EQUIPMENT_OPTIONS
+│   │   │   ├──   - const styles
+│   │   │   ├──   - const isSelected
+│   │   │   ├──   - const router
+│   │   │   ├──   - const handleSelect
+│   │   │   ├──   - const handleSubmit
+│   │   │   ├──   - const token
+│   │   │   ├──   - const renderSelectionText
+│   │   │   └──   - const createStyles
+│   │   └── my.tsx
+│   │       ├──   - const styles
+│   │       ├──   - const router
+│   │       ├──   - const loadMyExercises
+│   │       ├──   - const token
+│   │       ├──   - const data
+│   │       └──   - const createStyles
+│   ├── profile
+│   │   └── settingsScreen.tsx
+│   │       ├──   - const styles
+│   │       ├──   - const router
+│   │       ├──   - const insets
+│   │       ├──   - const timerMode
+│   │       ├──   - const setTimerMode
+│   │       ├──   - const fixedSeconds
+│   │       ├──   - const setFixedSecondsStore
+│   │       ├──   - const currentEmail
+│   │       ├──   - const isVerified
+│   │       ├──   - const fetchProfile
+│   │       ├──   - const token
+│   │       ├──   - const data
+│   │       ├──   - const timerId
+│   │       ├──   - const handleFixedTimeBlur
+│   │       ├──   - const handleSaveProfile
+│   │       ├──   - const handleEffortModeChange
+│   │       ├──   - const handleSendVerification
+│   │       ├──   - const handlePasswordReset
+│   │       ├──   - const handleSignOut
+│   │       ├──   - const effortLabels
+│   │       ├──   - const isSelected
+│   │       ├──   - const labels
+│   │       ├──   - const createStyles
+│   │       └──   - let val
+│   ├── settings
+│   │   └── training.tsx
+│   │       ├──   - type FullProfileSettings
+│   │       ├──   - const router
+│   │       ├──   - const fetchProfile
+│   │       ├──   - const token
+│   │       ├──   - const data
+│   │       └──   - const styles
+│   ├── setup
+│   │   ├── mesocycle.tsx
+│   │   │   ├──   - type EffortTier
+│   │   │   ├──   - type Phase
+│   │   │   ├──   - const styles
+│   │   │   ├──   - const router
+│   │   │   ├──   - const tierLabels
+│   │   │   ├──   - const handleTierChange
+│   │   │   ├──   - const updated
+│   │   │   ├──   - const addPhase
+│   │   │   ├──   - const handleSaveMesocycle
+│   │   │   ├──   - const token
+│   │   │   ├──   - const systemCode
+│   │   │   ├──   - const formattedPhases
+│   │   │   ├──   - const renderPhaseConfig
+│   │   │   ├──   - const isActive
+│   │   │   └──   - const createStyles
+│   │   └── microcycle.tsx
+│   │       ├──   - type DayMapping
+│   │       ├──   - const styles
+│   │       ├──   - const router
+│   │       ├──   - const params
+│   │       ├──   - const editMicrocycleId
+│   │       ├──   - const loadAllData
+│   │       ├──   - const token
+│   │       ├──   - const context
+│   │       ├──   - const realSplitDays
+│   │       ├──   - const microcycle
+│   │       ├──   - const restoredDays
+│   │       ├──   - const generateDaysMapping
+│   │       ├──   - const newMapping
+│   │       ├──   - const splitLength
+│   │       ├──   - const globalDayNum
+│   │       ├──   - const isRest
+│   │       ├──   - const tagSuffix
+│   │       ├──   - const finalTag
+│   │       ├──   - const previousType
+│   │       ├──   - const defaultType
+│   │       ├──   - const handleCyclesCountChange
+│   │       ├──   - const handleDayTypeChange
+│   │       ├──   - const handleDayTagChange
+│   │       ├──   - const handleSaveMicrocycle
+│   │       ├──   - const mappedDaysStr
+│   │       ├──   - const physicalLength
+│   │       ├──   - const payload
+│   │       ├──   - const renderDayConfig
+│   │       ├──   - const dayData
+│   │       ├──   - const createStyles
+│   │       └──   - let currentSplitLength
+│   ├── splits
+│   │   ├── _layout.tsx
+│   │   │   └──   - const router
+│   │   ├── builder.tsx
+│   │   │   ├──   - type DayBlueprint
+│   │   │   ├──   - type WarningLevel
+│   │   │   ├──   - const MUSCLE_NAMES
+│   │   │   ├──   - const messages
+│   │   │   ├──   - const isRest
+│   │   │   ├──   - const filledSlots
+│   │   │   ├──   - const hasRestDays
+│   │   │   ├──   - const doubleCycle
+│   │   │   ├──   - const axialHeavy
+│   │   │   ├──   - const today
+│   │   │   ├──   - const tomorrow
+│   │   │   ├──   - const overlappingMuscles
+│   │   │   ├──   - const majorOverlaps
+│   │   │   ├──   - const styles
+│   │   │   ├──   - const router
+│   │   │   ├──   - const lengthDays
+│   │   │   ├──   - const token
+│   │   │   ├──   - const splitData
+│   │   │   ├──   - const loadedSlots
+│   │   │   ├──   - const idx
+│   │   │   ├──   - const days
+│   │   │   ├──   - const freshDay
+│   │   │   ├──   - const handleAssignDay
+│   │   │   ├──   - const newSlots
+│   │   │   ├──   - const submitAndPrompt
+│   │   │   ├──   - const newBlueprintId
+│   │   │   ├──   - const handleSave
+│   │   │   ├──   - const submitToBackend
+│   │   │   ├──   - const dayIds
+│   │   │   ├──   - const finalName
+│   │   │   ├──   - const result
+│   │   │   ├──   - const handleDeleteDay
+│   │   │   ├──   - const analysis
+│   │   │   ├──   - const isActive
+│   │   │   ├──   - const hasWarning
+│   │   │   ├──   - const oldMuscles
+│   │   │   ├──   - const createStyles
+│   │   │   ├──   - let level
+│   │   │   ├──   - let canSave
+│   │   │   ├──   - let maxStreak
+│   │   │   └──   - let currentStreak
+│   │   ├── day-builder.tsx
+│   │   │   ├──   - const MUSCLE_GROUPS
+│   │   │   ├──   - const styles
+│   │   │   ├──   - const router
+│   │   │   ├──   - const toggleMuscle
+│   │   │   ├──   - const handleSave
+│   │   │   ├──   - const token
+│   │   │   ├──   - const isSelected
+│   │   │   └──   - const createStyles
+│   │   └── index.tsx
+│   │       ├──   - type SplitBlueprint
+│   │       ├──   - const styles
+│   │       ├──   - const router
+│   │       ├──   - const loadSplits
+│   │       ├──   - const token
+│   │       ├──   - const data
+│   │       ├──   - const handleActivate
+│   │       ├──   - const openMenu
+│   │       ├──   - const closeMenu
+│   │       ├──   - const handleDelete
+│   │       ├──   - const openRenameModal
+│   │       ├──   - const handleRenameSave
+│   │       ├──   - const updatedName
+│   │       ├──   - const handleEdit
+│   │       └──   - const createStyles
+│   ├── workout
+│   │   ├── exercise
+│   │   │   └── [sessionExerciseId].tsx
+│   │   │       ├──   - type ExerciseLastPerformanceResponse
+│   │   │       ├──   - type WorkoutSessionDetailResponse
+│   │   │       ├──   - const value
+│   │   │       ├──   - const parsed
+│   │   │       ├──   - const styles
+│   │   │       ├──   - const router
+│   │   │       ├──   - const params
+│   │   │       ├──   - const sessionExerciseId
+│   │   │       ├──   - const currentExercise
+│   │   │       ├──   - const loadScreenData
+│   │   │       ├──   - const token
+│   │   │       ├──   - const activeWorkout
+│   │   │       ├──   - const currentSessionExercise
+│   │   │       ├──   - const latestPerformance
+│   │   │       ├──   - const withMutation
+│   │   │       └──   - const createStyles
+│   │   ├── session
+│   │   │   └── [id].tsx
+│   │   │       ├──   - const raw
+│   │   │       ├──   - const parsed
+│   │   │       ├──   - const styles
+│   │   │       ├──   - const router
+│   │   │       ├──   - const params
+│   │   │       ├──   - const workoutId
+│   │   │       ├──   - const withToken
+│   │   │       ├──   - const token
+│   │   │       ├──   - const isPrimaryButtonVisible
+│   │   │       ├──   - const showFloatingButton
+│   │   │       ├──   - const currentWorkoutExerciseIds
+│   │   │       ├──   - const activeSupersetExercises
+│   │   │       ├──   - const targetGroup
+│   │   │       ├──   - const handleExitPress
+│   │   │       ├──   - const handleOpenExercise
+│   │   │       ├──   - const sessionExercise
+│   │   │       ├──   - const handleAddExercisePress
+│   │   │       ├──   - const handlePrimaryPress
+│   │   │       ├──   - const deleted
+│   │   │       ├──   - const summary
+│   │   │       ├──   - const handleCancelWorkoutPress
+│   │   │       ├──   - const handleDeleteExercisePress
+│   │   │       ├──   - const handleOpenReplaceModal
+│   │   │       ├──   - const handleReplaceExercise
+│   │   │       ├──   - const handleOpenSuperset
+│   │   │       ├──   - const handleDeleteSupersetPress
+│   │   │       ├──   - const handleOpenRemoveSupersetExercise
+│   │   │       ├──   - const handleRemoveSupersetExerciseSelect
+│   │   │       ├──   - const handleStartSuperset
+│   │   │       ├──   - const handleAddExerciseToSuperset
+│   │   │       ├──   - const handleCloseSupersetAddMenu
+│   │   │       ├──   - const handleAddExistingToSuperset
+│   │   │       ├──   - const handleAddNewToSuperset
+│   │   │       └──   - const createStyles
+│   │   ├── superset
+│   │   │   └── [supersetGroup].tsx
+│   │   │       ├──   - const styles
+│   │   │       ├──   - const router
+│   │   │       ├──   - const scrollRef
+│   │   │       ├──   - const params
+│   │   │       ├──   - const supersetGroup
+│   │   │       ├──   - const handleOpenAddExerciseMenu
+│   │   │       ├──   - const handleCloseAddExerciseMenu
+│   │   │       ├──   - const handleAddNewExercise
+│   │   │       ├──   - const workoutId
+│   │   │       ├──   - const handleAddExistingExercise
+│   │   │       ├──   - const handleMomentumScrollEnd
+│   │   │       ├──   - const offsetX
+│   │   │       ├──   - const nextIndex
+│   │   │       ├──   - const incompleteWarningText
+│   │   │       ├──   - const result
+│   │   │       └──   - const createStyles
+│   │   ├── _layout.tsx
+│   │   ├── add-exercise.tsx
+│   │   │   ├──   - type ExerciseSearchItem
+│   │   │   ├──   - type LastWorkoutExerciseItem
+│   │   │   ├──   - type MuscleGroupItem
+│   │   │   ├──   - type ScreenMode
+│   │   │   ├──   - type RouteModeList
+│   │   │   ├──   - const styles
+│   │   │   ├──   - const router
+│   │   │   ├──   - const params
+│   │   │   ├──   - const routeMode
+│   │   │   ├──   - const supersetGroupFromRoute
+│   │   │   ├──   - const isAddToExistingSuperset
+│   │   │   ├──   - const raw
+│   │   │   ├──   - const parsed
+│   │   │   ├──   - const withToken
+│   │   │   ├──   - const token
+│   │   │   ├──   - const workoutId
+│   │   │   ├──   - const debouncedQuery
+│   │   │   ├──   - const loadGroups
+│   │   │   ├──   - const data
+│   │   │   ├──   - const loadExercises
+│   │   │   ├──   - const loadSearch
+│   │   │   ├──   - const loadLastWorkout
+│   │   │   ├──   - const handleSelectGroup
+│   │   │   ├──   - const handleOpenExerciseDetails
+│   │   │   ├──   - const handleAddExercise
+│   │   │   ├──   - const renderGroupItem
+│   │   │   ├──   - const renderExerciseItem
+│   │   │   ├──   - const showLastWorkout
+│   │   │   └──   - const createStyles
+│   │   ├── create-superset.tsx
+│   │   │   ├──   - type WorkoutSessionDetailResponse
+│   │   │   ├──   - const raw
+│   │   │   ├──   - const parsed
+│   │   │   ├──   - const styles
+│   │   │   ├──   - const router
+│   │   │   ├──   - const params
+│   │   │   ├──   - const workoutId
+│   │   │   ├──   - const sourceSessionExerciseId
+│   │   │   ├──   - const mode
+│   │   │   ├──   - const supersetGroup
+│   │   │   ├──   - const isAddExistingToSuperset
+│   │   │   ├──   - const withToken
+│   │   │   ├──   - const token
+│   │   │   ├──   - const data
+│   │   │   ├──   - const sourceExercise
+│   │   │   ├──   - const currentSupersetExerciseIds
+│   │   │   ├──   - const availableExercises
+│   │   │   ├──   - const isAlreadyInCurrentSuperset
+│   │   │   ├──   - const isInAnySuperset
+│   │   │   ├──   - const isSource
+│   │   │   ├──   - const toggleSelection
+│   │   │   ├──   - const handleSubmit
+│   │   │   ├──   - const result
+│   │   │   ├──   - const headerTitle
+│   │   │   ├──   - const headerSubtitle
+│   │   │   ├──   - const isSelected
+│   │   │   └──   - const createStyles
+│   │   └── select-existing-for-superset.tsx
+│   │       ├──   - type WorkoutSessionDetailResponse
+│   │       ├──   - const raw
+│   │       ├──   - const parsed
+│   │       ├──   - const styles
+│   │       ├──   - const router
+│   │       ├──   - const params
+│   │       ├──   - const workoutId
+│   │       ├──   - const supersetGroup
+│   │       ├──   - const withToken
+│   │       ├──   - const token
+│   │       ├──   - const availableExercises
+│   │       ├──   - const handleAddExistingExercise
+│   │       ├──   - const isSubmitting
+│   │       └──   - const createStyles
+│   ├── _layout.tsx
+│   │   ├──   - const handleNotificationAction
+│   │   ├──   - const timerStore
+│   │   ├──   - const pathToReturn
+│   │   ├──   - const segments
+│   │   ├──   - const navRouter
+│   │   ├──   - const pendingRoute
+│   │   ├──   - const setPendingRoute
+│   │   ├──   - const initialNotification
+│   │   ├──   - const store
+│   │   ├──   - const inAuthGroup
+│   │   └──   - const unsubscribe
+│   ├── index.tsx
+│   ├── modal.tsx
+│   │   └──   - const styles
+│   ├── plan-builder.tsx
+│   │   ├──   - type GroupedDraft
+│   │   ├──   - const styles
+│   │   ├──   - const router
+│   │   ├──   - const params
+│   │   ├──   - const editPlanId
+│   │   ├──   - const exercises
+│   │   ├──   - const toggleSupersetWithPrevious
+│   │   ├──   - const setExercises
+│   │   ├──   - const fetchPlan
+│   │   ├──   - const token
+│   │   ├──   - const plan
+│   │   ├──   - const restoredExercises
+│   │   ├──   - const showEvt
+│   │   ├──   - const hideEvt
+│   │   ├──   - const showSub
+│   │   ├──   - const hideSub
+│   │   ├──   - const groupedData
+│   │   ├──   - const groups
+│   │   ├──   - const prevEx
+│   │   ├──   - const handleDragEnd
+│   │   ├──   - const flattened
+│   │   ├──   - const availableSplitDays
+│   │   ├──   - const fetchTargets
+│   │   ├──   - const data
+│   │   ├──   - const handleSave
+│   │   ├──   - const handleApplyPlan
+│   │   ├──   - const formattedExercises
+│   │   ├──   - const payload
+│   │   ├──   - const planRes
+│   │   ├──   - const todayIso
+│   │   ├──   - const detail
+│   │   ├──   - const message
+│   │   ├──   - const handleAddExercise
+│   │   ├──   - const currentVolume
+│   │   ├──   - const maxCap
+│   │   ├──   - const draftId
+│   │   ├──   - const hasSecondary
+│   │   ├──   - const renderItem
+│   │   ├──   - const index
+│   │   ├──   - const isGroup
+│   │   ├──   - const createStyles
+│   │   ├──   - let currentGroup
+│   │   └──   - let currentPlanId
+│   ├── schedule-setup.tsx
+│   │   ├──   - const theme
+│   │   ├──   - const WEEKDAYS
+│   │   ├──   - const MONTH_NAMES
+│   │   ├──   - const getLocalYYYYMMDD
+│   │   ├──   - const getDaysInMonth
+│   │   ├──   - const getFirstDayOffset
+│   │   ├──   - const day
+│   │   ├──   - const TODAY_STR
+│   │   ├──   - const styles
+│   │   ├──   - const router
+│   │   ├──   - const params
+│   │   ├──   - const blueprintId
+│   │   ├──   - const token
+│   │   ├──   - const splitData
+│   │   ├──   - const payload
+│   │   ├──   - const response
+│   │   ├──   - const map
+│   │   ├──   - const toggleBlackoutDay
+│   │   ├──   - const handleCellPress
+│   │   ├──   - const handleSave
+│   │   ├──   - const viewYear
+│   │   ├──   - const viewMonth
+│   │   ├──   - const daysInMonth
+│   │   ├──   - const firstDayOffset
+│   │   ├──   - const emptyCells
+│   │   ├──   - const monthDays
+│   │   ├──   - const isBanned
+│   │   ├──   - const dateStr
+│   │   ├──   - const dayData
+│   │   ├──   - const isPastBeforeStart
+│   │   ├──   - const isStartDay
+│   │   ├──   - const createStyles
+│   │   ├──   - let itemStyle
+│   │   ├──   - let textStyle
+│   │   └──   - let cellContent
+│   └── settings.tsx
+│       ├──   - type ProfileResponse
+│       ├──   - const styles
+│       ├──   - const timerMode
+│       ├──   - const setTimerMode
+│       ├──   - const fixedSeconds
+│       ├──   - const setFixedSecondsStore
+│       ├──   - const withToken
+│       ├──   - const token
+│       ├──   - const loadProfile
+│       ├──   - const data
+│       ├──   - const timerId
+│       ├──   - const handleFixedTimeBlur
+│       ├──   - const handleSaveProfile
+│       ├──   - const handleSendVerification
+│       ├──   - const handlePasswordReset
+│       ├──   - const email
+│       ├──   - const handleSignOut
+│       ├──   - const createStyles
+│       └──   - let val
+├── components
+│   ├── ui
+│   │   ├── collapsible.tsx
+│   │   │   ├──   - export function Collapsible()
+│   │   │   ├──   - const theme
+│   │   │   └──   - const styles
+│   │   ├── icon-symbol.ios.tsx
+│   │   │   └──   - export function IconSymbol()
+│   │   └── icon-symbol.tsx
+│   │       ├──   - type IconMapping
+│   │       ├──   - type IconSymbolName
+│   │       ├──   - export function IconSymbol()
+│   │       └──   - const MAPPING
+│   ├── DoubleProgressBar.tsx
+│   │   ├──   - type Props
+│   │   ├──   - export function DoubleProgressBar()
+│   │   ├──   - const styles
+│   │   ├──   - const safeMaxCap
+│   │   ├──   - const directPercent
+│   │   ├──   - const formattedIndirect
+│   │   └──   - const createStyles
+│   ├── exerciseCard.tsx
+│   │   ├──   - type ExerciseCardProps
+│   │   ├──   - export function ExerciseCard()
+│   │   ├──   - const styles
+│   │   └──   - const createStyles
+│   ├── ExerciseSearchModal.tsx
+│   │   ├──   - const styles
+│   │   ├──   - const fetchExercises
+│   │   ├──   - const token
+│   │   ├──   - const data
+│   │   ├──   - const timeoutId
+│   │   ├──   - const renderItem
+│   │   └──   - const createStyles
+│   ├── external-link.tsx
+│   │   ├──   - type Props
+│   │   └──   - export function ExternalLink()
+│   ├── FatigueWidget.tsx
+│   │   ├──   - export function FatigueWidget()
+│   │   ├──   - const MUSCLE_NAMES_RU
+│   │   ├──   - const MUSCLE_GROUPS
+│   │   ├──   - const WEEKS_TO_SHOW
+│   │   ├──   - const ACCENT_COLOR
+│   │   ├──   - const ACCENT_INDIRECT
+│   │   ├──   - const styles
+│   │   ├──   - const loadData
+│   │   ├──   - const token
+│   │   ├──   - const result
+│   │   ├──   - const maxVolume
+│   │   ├──   - const chartData
+│   │   ├──   - const padded
+│   │   ├──   - const targetIndex
+│   │   ├──   - const displayInsight
+│   │   ├──   - const week
+│   │   ├──   - const total
+│   │   ├──   - const latestWeek
+│   │   ├──   - const indirectPercent
+│   │   ├──   - const handleBarPress
+│   │   ├──   - const directHeight
+│   │   ├──   - const indirectHeight
+│   │   ├──   - const isFaded
+│   │   └──   - const createStyles
+│   ├── FullChartModal.tsx
+│   │   ├──   - const MODAL_PADDING
+│   │   ├──   - const MIN_GRAPH_WIDTH
+│   │   ├──   - const GRAPH_HEIGHT
+│   │   ├──   - const PADDING_LEFT
+│   │   ├──   - const PADDING_BOTTOM
+│   │   ├──   - const PADDING_TOP
+│   │   ├──   - const PADDING_RIGHT
+│   │   ├──   - const INNER_HEIGHT
+│   │   ├──   - const styles
+│   │   ├──   - const isIsolation
+│   │   ├──   - const metricName
+│   │   ├──   - const metricUnit
+│   │   ├──   - const scrollViewRef
+│   │   ├──   - const chartData
+│   │   ├──   - const onPinchGestureEvent
+│   │   ├──   - const onPinchHandlerStateChange
+│   │   ├──   - const newSpacing
+│   │   ├──   - const currentSpacing
+│   │   ├──   - const calculatedWidth
+│   │   ├──   - const actualGraphWidth
+│   │   ├──   - const innerWidth
+│   │   ├──   - const values
+│   │   ├──   - const min
+│   │   ├──   - const max
+│   │   ├──   - const range
+│   │   ├──   - const paddedMin
+│   │   ├──   - const paddedMax
+│   │   ├──   - const paddedRange
+│   │   ├──   - const yTicks
+│   │   ├──   - const xTicks
+│   │   ├──   - const computedPoints
+│   │   ├──   - const x
+│   │   ├──   - const y
+│   │   ├──   - const line
+│   │   ├──   - const area
+│   │   ├──   - const yPos
+│   │   ├──   - const xPos
+│   │   ├──   - const isActive
+│   │   ├──   - const createStyles
+│   │   └──   - let pathString
+│   ├── haptic-tab.tsx
+│   │   └──   - export function HapticTab()
+│   ├── hello-wave.tsx
+│   │   └──   - export function HelloWave()
+│   ├── LimboState.tsx
+│   │   ├──   - export function LimboState()
+│   │   ├──   - const theme
+│   │   ├──   - const styles
+│   │   ├──   - const dateObj
+│   │   ├──   - const formattedDate
+│   │   └──   - const createStyles
+│   ├── parallax-scroll-view.tsx
+│   │   ├──   - type Props
+│   │   ├──   - const HEADER_HEIGHT
+│   │   ├──   - const backgroundColor
+│   │   ├──   - const colorScheme
+│   │   ├──   - const scrollRef
+│   │   ├──   - const scrollOffset
+│   │   ├──   - const headerAnimatedStyle
+│   │   └──   - const styles
+│   ├── QueueTimeline.tsx
+│   │   ├──   - type QueueItem
+│   │   ├──   - export function QueueTimeline()
+│   │   ├──   - const styles
+│   │   ├──   - const isCompleted
+│   │   ├──   - const isSkipped
+│   │   ├──   - const isPending
+│   │   └──   - const createStyles
+│   ├── ScheduleModal.tsx
+│   │   ├──   - const WEEKDAYS
+│   │   ├──   - const MONTH_NAMES
+│   │   ├──   - const getDaysInMonth
+│   │   ├──   - const getFirstDayOffset
+│   │   ├──   - const day
+│   │   ├──   - const safeDateStr
+│   │   ├──   - const styles
+│   │   ├──   - const router
+│   │   ├──   - const cleanStr
+│   │   ├──   - const token
+│   │   ├──   - const cleanStartDate
+│   │   ├──   - const endObj
+│   │   ├──   - const cleanEndDate
+│   │   ├──   - const response
+│   │   ├──   - const map
+│   │   ├──   - const viewYear
+│   │   ├──   - const viewMonth
+│   │   ├──   - const daysInMonth
+│   │   ├──   - const firstDayOffset
+│   │   ├──   - const emptyCells
+│   │   ├──   - const monthDays
+│   │   ├──   - const safeStartStr
+│   │   ├──   - const todayStr
+│   │   ├──   - const handleEditPress
+│   │   ├──   - const dateStr
+│   │   ├──   - const dayData
+│   │   ├──   - const createStyles
+│   │   ├──   - let itemStyle
+│   │   ├──   - let textStyle
+│   │   └──   - let content
+│   ├── themed-text.tsx
+│   │   ├──   - type ThemedTextProps
+│   │   ├──   - export function ThemedText()
+│   │   ├──   - const color
+│   │   └──   - const styles
+│   ├── themed-view.tsx
+│   │   ├──   - type ThemedViewProps
+│   │   ├──   - export function ThemedView()
+│   │   └──   - const backgroundColor
+│   ├── VolumeDetailsModal.tsx
+│   │   ├──   - type ViewMode
+│   │   ├──   - const REGIONS_MAP
+│   │   ├──   - const UPPER_LOWER_MAP
+│   │   ├──   - const MUSCLE_NAMES_RU
+│   │   ├──   - const RU_TO_EN_MAP
+│   │   ├──   - const ALL_MUSCLE_KEYS
+│   │   ├──   - const styles
+│   │   ├──   - const FIXED_GROUP_COLORS
+│   │   ├──   - const loadTrackedMuscles
+│   │   ├──   - const saved
+│   │   ├──   - const handleSaveTracked
+│   │   ├──   - const toggleGroup
+│   │   ├──   - const toggleTrackedMuscle
+│   │   ├──   - const normalizedPerformedSets
+│   │   ├──   - const normalized
+│   │   ├──   - const chartData
+│   │   ├──   - const aggregated
+│   │   ├──   - const dataArray
+│   │   ├──   - const groupedList
+│   │   ├──   - const groups
+│   │   ├──   - const isSelected
+│   │   ├──   - const radius
+│   │   ├──   - const strokeWidth
+│   │   ├──   - const circumference
+│   │   ├──   - const totalSets
+│   │   ├──   - const strokeLength
+│   │   ├──   - const offset
+│   │   ├──   - const isCollapsed
+│   │   ├──   - const groupColor
+│   │   ├──   - const progress
+│   │   ├──   - const rowColor
+│   │   ├──   - const createStyles
+│   │   ├──   - let safeKey
+│   │   ├──   - let groupName
+│   │   └──   - let currentOffset
+│   └── WorkoutTimerWidget.tsx
+│       ├──   - export function WorkoutTimerWidget()
+│       ├──   - const RING_SIZE
+│       ├──   - const RING_STROKE
+│       ├──   - const RING_RADIUS
+│       ├──   - const RING_CIRCUMFERENCE
+│       ├──   - const styles
+│       ├──   - const pan
+│       ├──   - const panVal
+│       ├──   - const listenerId
+│       ├──   - const pillPanResponder
+│       ├──   - const sheetPanResponder
+│       ├──   - const tick
+│       ├──   - const diffMs
+│       ├──   - const currentRemaining
+│       ├──   - const intervalId
+│       ├──   - const isOvertime
+│       ├──   - const progress
+│       ├──   - const strokeDashoffset
+│       ├──   - const handleStop
+│       └──   - const createStyles
+├── features
+│   ├── auth
+│   │   ├── authContext.tsx
+│   │   │   ├──   - type AuthContextValue
+│   │   │   ├──   - export function AuthProvider()
+│   │   │   ├──   - export function useAuth()
+│   │   │   ├──   - const AuthContext
+│   │   │   ├──   - const unsubscribe
+│   │   │   ├──   - const credential
+│   │   │   ├──   - const normalizedEmail
+│   │   │   ├──   - const value
+│   │   │   └──   - const context
+│   │   ├── authStorage.ts
+│   │   │   ├──   - const ACCESS_TOKEN_KEY
+│   │   │   └──   - const REFRESH_TOKEN_KEY
+│   │   └── types.ts
+│   │       ├──   - type AppUser
+│   │       ├──   - type AuthTokens
+│   │       ├──   - type AuthResponse
+│   │       ├──   - type RegisterPayload
+│   │       ├──   - type LoginPayload
+│   │       └──   - type RefreshPayload
+│   ├── exercise-search
+│   │   └── components
+│   │       ├── ExerciseCard.tsx
+│   │       │   ├──   - type Props
+│   │       │   ├──   - export function ExerciseCard()
+│   │       │   ├──   - const styles
+│   │       │   ├──   - const secondaryText
+│   │       │   └──   - const createStyles
+│   │       ├── FiltersBar.tsx
+│   │       │   ├──   - type Props
+│   │       │   ├──   - export function FiltersBar()
+│   │       │   ├──   - const styles
+│   │       │   ├──   - const activeCount
+│   │       │   └──   - const createStyles
+│   │       ├── LastWorkoutSection.tsx
+│   │       │   ├──   - type LastWorkoutExerciseItem
+│   │       │   ├──   - type Props
+│   │       │   ├──   - export function LastWorkoutSection()
+│   │       │   ├──   - const styles
+│   │       │   └──   - const createStyles
+│   │       ├── MuscleGroupCard.tsx
+│   │       │   ├──   - type Props
+│   │       │   ├──   - export function MuscleGroupCard()
+│   │       │   ├──   - const styles
+│   │       │   └──   - const createStyles
+│   │       └── RecentToggle.tsx
+│   │           ├──   - export function RecentToggle()
+│   │           ├──   - const styles
+│   │           └──   - const createStyles
+│   ├── home
+│   │   ├── components
+│   │   │   ├── HomeTileCard.tsx
+│   │   │   │   ├──   - type Props
+│   │   │   │   ├──   - export function HomeTileCard()
+│   │   │   │   ├──   - const meta
+│   │   │   │   ├──   - const isEmpty
+│   │   │   │   └──   - const styles
+│   │   │   └── TilePickerModal.tsx
+│   │   │       ├──   - type Props
+│   │   │       ├──   - export function TilePickerModal()
+│   │   │       └──   - const styles
+│   │   ├── hooks
+│   │   │   └── useHomeTiles.ts
+│   │   │       ├──   - export function useHomeTiles()
+│   │   │       └──   - const filledCount
+│   │   ├── config.ts
+│   │   │   ├──   - export function getTileMeta()
+│   │   │   ├──   - const HOME_TILE_OPTIONS
+│   │   │   └──   - const HOME_PRESET_TILES
+│   │   └── types.ts
+│   │       ├──   - type TileType
+│   │       ├──   - type HomeTile
+│   │       ├──   - type FilledTileType
+│   │       ├──   - type TileMeta
+│   │       └──   - type TileOption
+│   ├── i18n
+│   │   ├── index.ts
+│   │   │   ├──   - type SupportedLanguage
+│   │   │   ├──   - type TranslationKey
+│   │   │   ├──   - type Params
+│   │   │   ├──   - export function t()
+│   │   │   ├──   - const currentLanguage
+│   │   │   └──   - let value
+│   │   └── translations.ts
+│   │       ├──   - type SupportedLanguage
+│   │       ├──   - type TranslationKey
+│   │       └──   - const translations
+│   ├── shared
+│   │   └── hooks
+│   │       └── useDebounce.ts
+│   │           └──   - const id
+│   └── workout
+│       ├── components
+│       │   ├── superset-flow
+│       │   │   ├── SupersetAddExerciseMenu.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function SupersetAddExerciseMenu()
+│       │   │   │   ├──   - const styles
+│       │   │   │   └──   - const createStyles
+│       │   │   ├── SupersetDots.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function SupersetDots()
+│       │   │   │   ├──   - const styles
+│       │   │   │   ├──   - const isActive
+│       │   │   │   ├──   - const isCompleted
+│       │   │   │   └──   - const createStyles
+│       │   │   ├── SupersetExerciseSlide.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function SupersetExerciseSlide()
+│       │   │   │   ├──   - const styles
+│       │   │   │   ├──   - const normalizedSets
+│       │   │   │   ├──   - const lastPerformanceData
+│       │   │   │   ├──   - const SupersetHeaderBlock
+│       │   │   │   └──   - const createStyles
+│       │   │   ├── SupersetFlowHeader.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function SupersetFlowHeader()
+│       │   │   │   ├──   - const styles
+│       │   │   │   └──   - const createStyles
+│       │   │   ├── SupersetIncompleteBanner.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function SupersetIncompleteBanner()
+│       │   │   │   ├──   - const styles
+│       │   │   │   └──   - const createStyles
+│       │   │   ├── SupersetPagerTabs.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function SupersetPagerTabs()
+│       │   │   │   ├──   - const styles
+│       │   │   │   ├──   - const isActive
+│       │   │   │   └──   - const createStyles
+│       │   │   ├── SupersetRoundBanner.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function SupersetRoundBanner()
+│       │   │   │   ├──   - const styles
+│       │   │   │   └──   - const createStyles
+│       │   │   └── SupersetSetModal.tsx
+│       │   │       ├──   - type EffortLevel
+│       │   │       ├──   - type Props
+│       │   │       ├──   - export function SupersetSetModal()
+│       │   │       ├──   - const EFFORT_OPTIONS
+│       │   │       ├──   - const styles
+│       │   │       ├──   - const isDisabled
+│       │   │       ├──   - const parsedWeight
+│       │   │       ├──   - const parsedReps
+│       │   │       ├──   - const isActive
+│       │   │       └──   - const createStyles
+│       │   ├── workout-screen
+│       │   │   ├── CreateSupersetButton.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function CreateSupersetButton()
+│       │   │   │   ├──   - const styles
+│       │   │   │   └──   - const createStyles
+│       │   │   ├── CreateSupersetMenu.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function CreateSupersetMenu()
+│       │   │   │   ├──   - const styles
+│       │   │   │   └──   - const createStyles
+│       │   │   ├── ExerciseRowMenu.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function ExerciseRowMenu()
+│       │   │   │   ├──   - const styles
+│       │   │   │   └──   - const createStyles
+│       │   │   ├── RemoveSupersetExerciseSheet.tsx
+│       │   │   │   ├──   - type ExerciseItem
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function RemoveSupersetExerciseSheet()
+│       │   │   │   ├──   - const styles
+│       │   │   │   └──   - const createStyles
+│       │   │   ├── SupersetBlock.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function SupersetBlock()
+│       │   │   │   ├──   - const styles
+│       │   │   │   ├──   - const warningText
+│       │   │   │   └──   - const createStyles
+│       │   │   ├── SupersetMenu.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function SupersetMenu()
+│       │   │   │   ├──   - const styles
+│       │   │   │   └──   - const createStyles
+│       │   │   ├── WorkoutBottomBar.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function WorkoutBottomBar()
+│       │   │   │   ├──   - const styles
+│       │   │   │   └──   - const createStyles
+│       │   │   ├── WorkoutExerciseRow.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function WorkoutExerciseRow()
+│       │   │   │   ├──   - const styles
+│       │   │   │   └──   - const createStyles
+│       │   │   ├── WorkoutExercisesTable.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function WorkoutExercisesTable()
+│       │   │   │   ├──   - const styles
+│       │   │   │   └──   - const createStyles
+│       │   │   ├── WorkoutScreenHeader.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function WorkoutScreenHeader()
+│       │   │   │   ├──   - const styles
+│       │   │   │   └──   - const createStyles
+│       │   │   ├── WorkoutScreenMenu.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function WorkoutScreenMenu()
+│       │   │   │   ├──   - const styles
+│       │   │   │   └──   - const createStyles
+│       │   │   ├── WorkoutSetMiniTable.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function WorkoutSetMiniTable()
+│       │   │   │   ├──   - const numeric
+│       │   │   │   ├──   - const styles
+│       │   │   │   └──   - const createStyles
+│       │   │   ├── WorkoutStatsSection.tsx
+│       │   │   │   ├──   - type Props
+│       │   │   │   ├──   - export function WorkoutStatsSection()
+│       │   │   │   ├──   - const styles
+│       │   │   │   └──   - const createStyles
+│       │   │   └── WorkoutStructureList.tsx
+│       │   │       ├──   - type Props
+│       │   │       ├──   - export function WorkoutStructureList()
+│       │   │       ├──   - const styles
+│       │   │       ├──   - const tableItem
+│       │   │       ├──   - const shouldShowCreateSupersetButton
+│       │   │       └──   - const createStyles
+│       │   ├── ActiveWorkoutVolumeTracker.tsx
+│       │   │   ├──   - type Props
+│       │   │   ├──   - export function ActiveWorkoutVolumeTracker()
+│       │   │   ├──   - const EN_TO_RU
+│       │   │   ├──   - const RU_TO_EN
+│       │   │   ├──   - const styles
+│       │   │   ├──   - const currentVolume
+│       │   │   ├──   - const result
+│       │   │   ├──   - const relevantSets
+│       │   │   ├──   - const setsCount
+│       │   │   ├──   - const rawPrimary
+│       │   │   ├──   - const primaryKey
+│       │   │   ├──   - const rawSecondary
+│       │   │   ├──   - const cleanSec
+│       │   │   ├──   - const secondaryKey
+│       │   │   ├──   - const stats
+│       │   │   ├──   - const createStyles
+│       │   │   └──   - let secondaryList
+│       │   ├── ExerciseHeader.tsx
+│       │   │   ├──   - type ExerciseHeaderProps
+│       │   │   ├──   - export function ExerciseHeader()
+│       │   │   ├──   - const styles
+│       │   │   └──   - const createStyles
+│       │   ├── ExerciseRecommendations.tsx
+│       │   │   ├──   - type ExerciseRecommendationsProps
+│       │   │   ├──   - export function ExerciseRecommendations()
+│       │   │   ├──   - const styles
+│       │   │   ├──   - const repsText
+│       │   │   ├──   - const rirText
+│       │   │   ├──   - const shouldShowSets
+│       │   │   └──   - const createStyles
+│       │   ├── ExerciseReplacementModal.tsx
+│       │   │   ├──   - type ExerciseAlternativeResponse
+│       │   │   ├──   - type Props
+│       │   │   ├──   - export function ExerciseReplacementModal()
+│       │   │   ├──   - const styles
+│       │   │   ├──   - const token
+│       │   │   ├──   - const data
+│       │   │   ├──   - const topAlternatives
+│       │   │   ├──   - const renderBadge
+│       │   │   ├──   - const createStyles
+│       │   │   └──   - let isMounted
+│       │   ├── ExerciseWorkspace.tsx
+│       │   │   ├──   - type ExerciseWorkspaceProps
+│       │   │   ├──   - export function ExerciseWorkspace()
+│       │   │   ├──   - const HIDE_DELETE_CONFIRMATION_STORAGE_KEY
+│       │   │   ├──   - const scrollRef
+│       │   │   ├──   - const defaultWeightMode
+│       │   │   ├──   - const persistDeletePreference
+│       │   │   ├──   - const handleOpenCreate
+│       │   │   ├──   - const lastSet
+│       │   │   ├──   - const handleOpenEdit
+│       │   │   ├──   - const handlePreviousSetPress
+│       │   │   ├──   - const handleSubmitDraft
+│       │   │   ├──   - const nextPayload
+│       │   │   ├──   - const handleDeleteSetPress
+│       │   │   ├──   - const handleRepeatSetPress
+│       │   │   └──   - const styles
+│       │   ├── PreviousPerformanceSection.tsx
+│       │   │   ├──   - type PreviousPerformanceSectionProps
+│       │   │   ├──   - export function PreviousPerformanceSection()
+│       │   │   ├──   - const date
+│       │   │   ├──   - const styles
+│       │   │   ├──   - const formattedDate
+│       │   │   └──   - const createStyles
+│       │   ├── SetEditorModal.tsx
+│       │   │   ├──   - type SetEditorModalProps
+│       │   │   ├──   - export function SetEditorModal()
+│       │   │   ├──   - const styles
+│       │   │   ├──   - const weightInputRef
+│       │   │   ├──   - const repsInputRef
+│       │   │   ├──   - const title
+│       │   │   ├──   - const EFFORT_LEVELS
+│       │   │   ├──   - const handleSubmitPress
+│       │   │   ├──   - const isActive
+│       │   │   ├──   - const displayLabel
+│       │   │   └──   - const createStyles
+│       │   ├── SetRow.tsx
+│       │   │   ├──   - type SetRowProps
+│       │   │   ├──   - export function SetRow()
+│       │   │   ├──   - const parsed
+│       │   │   ├──   - const numericValue
+│       │   │   ├──   - const scale
+│       │   │   ├──   - const opacity
+│       │   │   ├──   - const styles
+│       │   │   ├──   - const swipeableRef
+│       │   │   ├──   - const content
+│       │   │   └──   - const createStyles
+│       │   ├── SetsTable.tsx
+│       │   │   ├──   - type SetsTableProps
+│       │   │   ├──   - export function SetsTable()
+│       │   │   ├──   - const styles
+│       │   │   ├──   - const handleRepeat
+│       │   │   └──   - const createStyles
+│       │   └── SwipeHelpModal.tsx
+│       │       ├──   - type SwipeHelpModalProps
+│       │       ├──   - export function SwipeHelpModal()
+│       │       ├──   - const styles
+│       │       └──   - const createStyles
+│       ├── hooks
+│       │   ├── useSetEditor.ts
+│       │   │   ├──   - type UseSetEditorParams
+│       │   │   ├──   - type OpenCreateArgs
+│       │   │   ├──   - type OpenEditArgs
+│       │   │   ├──   - type UseSetEditorResult
+│       │   │   ├──   - export function useSetEditor()
+│       │   │   ├──   - const close
+│       │   │   ├──   - const openCreate
+│       │   │   ├──   - const openEdit
+│       │   │   ├──   - const openCreateFromPrevious
+│       │   │   ├──   - const setWeightMode
+│       │   │   ├──   - const setWeight
+│       │   │   ├──   - const sanitized
+│       │   │   ├──   - const setReps
+│       │   │   ├──   - const setEffortLevel
+│       │   │   ├──   - const increaseWeight
+│       │   │   ├──   - const decreaseWeight
+│       │   │   ├──   - const increaseReps
+│       │   │   ├──   - const decreaseReps
+│       │   │   ├──   - const handleSetCompleted
+│       │   │   ├──   - const store
+│       │   │   └──   - let restSeconds
+│       │   ├── useSupersetFlow.ts
+│       │   │   ├──   - type AddOrUpdateWorkoutSetPayload
+│       │   │   ├──   - export function useSupersetFlow()
+│       │   │   ├──   - const shouldSkipAutoIndex
+│       │   │   ├──   - const withToken
+│       │   │   ├──   - const token
+│       │   │   ├──   - const loadSuperset
+│       │   │   ├──   - const response
+│       │   │   ├──   - const nextIndex
+│       │   │   ├──   - const refresh
+│       │   │   ├──   - const goToExercise
+│       │   │   ├──   - const goToNextExercise
+│       │   │   ├──   - const next
+│       │   │   ├──   - const goToPreviousExercise
+│       │   │   ├──   - const goToFirstExercise
+│       │   │   ├──   - const activeExercise
+│       │   │   ├──   - const title
+│       │   │   ├──   - const progressLabel
+│       │   │   ├──   - const roundLabel
+│       │   │   ├──   - const submitSet
+│       │   │   ├──   - const wasLastExercise
+│       │   │   ├──   - const normalizedPayload
+│       │   │   ├──   - const updateSet
+│       │   │   ├──   - const deleteSet
+│       │   │   └──   - const repeatSet
+│       │   └── useWorkoutScreen.ts
+│       │       ├──   - type WorkoutSessionDetailResponse
+│       │       ├──   - type WorkoutTableItemWithSupersetAction
+│       │       ├──   - export function useWorkoutScreen()
+│       │       ├──   - const startedMs
+│       │       ├──   - const diffMs
+│       │       ├──   - const totalSeconds
+│       │       ├──   - const hours
+│       │       ├──   - const minutes
+│       │       ├──   - const seconds
+│       │       ├──   - const withToken
+│       │       ├──   - const token
+│       │       ├──   - const loadWorkout
+│       │       ├──   - const data
+│       │       ├──   - const intervalId
+│       │       ├──   - const openCreateSupersetMenu
+│       │       ├──   - const closeCreateSupersetMenu
+│       │       ├──   - const currentExerciseId
+│       │       ├──   - const currentExercise
+│       │       ├──   - const lastTouchedExerciseId
+│       │       ├──   - const exercises
+│       │       ├──   - const sorted
+│       │       ├──   - const aTime
+│       │       ├──   - const bTime
+│       │       ├──   - const standaloneExercises
+│       │       ├──   - const lastStandaloneExerciseId
+│       │       ├──   - const supersetCreationExercise
+│       │       ├──   - const supersetCreationExerciseId
+│       │       ├──   - const canCreateSuperset
+│       │       ├──   - const baseTableItems
+│       │       ├──   - const tableItems
+│       │       ├──   - const sourceExercise
+│       │       ├──   - const hasNoSets
+│       │       ├──   - const isInSuperset
+│       │       ├──   - const isLastTouched
+│       │       ├──   - const isLastStandalone
+│       │       ├──   - const tableItemsById
+│       │       ├──   - const hasAnySupersetInWorkout
+│       │       ├──   - const fallbackStructureItems
+│       │       ├──   - const effectiveStructureItems
+│       │       ├──   - const hasStructuredItems
+│       │       ├──   - const stats
+│       │       ├──   - const isWorkoutEmpty
+│       │       ├──   - const subtitle
+│       │       ├──   - const elapsedLabel
+│       │       ├──   - const refresh
+│       │       ├──   - const reloadWorkout
+│       │       ├──   - const toggleExerciseExpand
+│       │       ├──   - const openTopMenu
+│       │       ├──   - const closeTopMenu
+│       │       ├──   - const openExerciseMenu
+│       │       ├──   - const closeExerciseMenu
+│       │       ├──   - const openSupersetMenu
+│       │       ├──   - const closeSupersetMenu
+│       │       ├──   - const handleFinishWorkout
+│       │       ├──   - const summary
+│       │       ├──   - const handleCancelWorkout
+│       │       ├──   - const handleDeleteExercise
+│       │       ├──   - const targetSessionExerciseId
+│       │       └──   - const handleDeleteSuperset
+│       ├── types
+│       │   ├── superset.ts
+│       │   │   ├──   - type WorkoutStructureListItem
+│       │   │   ├──   - type SupersetOverviewItem
+│       │   │   ├──   - type SupersetFlowData
+│       │   │   └──   - type SupersetFlowExercise
+│       │   ├── supersetFlow.ts
+│       │   │   └──   - type SupersetSlideItem
+│       │   └── workoutScreen.ts
+│       │       ├──   - type WorkoutExerciseRowStatus
+│       │       ├──   - type WorkoutSetMiniRow
+│       │       ├──   - type WorkoutExerciseTableItem
+│       │       └──   - type WorkoutScreenStats
+│       ├── utils
+│       │   ├── buildWorkoutStructureFallback.ts
+│       │   │   ├──   - type TableItemsById
+│       │   │   ├──   - export function buildWorkoutStructureFallback()
+│       │   │   ├──   - const sortedExercises
+│       │   │   ├──   - const groupedBySuperset
+│       │   │   ├──   - const key
+│       │   │   ├──   - const current
+│       │   │   ├──   - const supersetLabels
+│       │   │   ├──   - const emittedSupersets
+│       │   │   ├──   - const items
+│       │   │   ├──   - const tableItem
+│       │   │   ├──   - const supersetGroup
+│       │   │   ├──   - const members
+│       │   │   ├──   - const memberRows
+│       │   │   ├──   - const memberTableItem
+│       │   │   ├──   - const setsCounts
+│       │   │   ├──   - const roundsCompleted
+│       │   │   ├──   - const setsTotal
+│       │   │   ├──   - const volumeTotal
+│       │   │   └──   - const hasIncompleteRound
+│       │   ├── setEditor.ts
+│       │   │   ├──   - export function roundToSingleDecimal()
+│       │   │   ├──   - export function normalizeWeightInput()
+│       │   │   ├──   - export function parseWeightValue()
+│       │   │   ├──   - export function parseRepsValue()
+│       │   │   ├──   - export function getWeightStep()
+│       │   │   ├──   - export function incrementWeight()
+│       │   │   ├──   - export function incrementReps()
+│       │   │   ├──   - export function inferWeightModeFromEquipment()
+│       │   │   ├──   - export function createEmptyDraft()
+│       │   │   ├──   - export function createDraftFromCurrentSet()
+│       │   │   ├──   - export function createDraftFromPreviousSet()
+│       │   │   ├──   - export function createPrefilledDraft()
+│       │   │   ├──   - export function buildSetPayload()
+│       │   │   ├──   - export function hasAtLeastOneSetValue()
+│       │   │   ├──   - const MACHINE_STEP_KG
+│       │   │   ├──   - const FREE_WEIGHT_STEP_KG
+│       │   │   ├──   - const REPS_STEP
+│       │   │   ├──   - const normalized
+│       │   │   ├──   - const parsed
+│       │   │   ├──   - const step
+│       │   │   ├──   - const current
+│       │   │   ├──   - const next
+│       │   │   └──   - const rounded
+│       │   ├── superset.ts
+│       │   │   ├──   - export function formatSupersetTitle()
+│       │   │   ├──   - export function formatSupersetSets()
+│       │   │   ├──   - export function getSupersetWarningText()
+│       │   │   ├──   - export function getFirstIncompleteExerciseIndex()
+│       │   │   ├──   - export function getCompletedExercisesInCurrentRound()
+│       │   │   ├──   - export function formatSupersetProgress()
+│       │   │   ├──   - export function getIncompleteRoundWarning()
+│       │   │   ├──   - export function getNextExerciseIndex()
+│       │   │   ├──   - const index
+│       │   │   └──   - const completed
+│       │   ├── timer.ts
+│       │   │   ├──   - export function calculateRestTime()
+│       │   │   ├──   - export function formatTimer()
+│       │   │   ├──   - const isNegative
+│       │   │   ├──   - const absSec
+│       │   │   ├──   - const m
+│       │   │   ├──   - const s
+│       │   │   ├──   - let baseSeconds
+│       │   │   └──   - let modifier
+│       │   └── workoutScreen.ts
+│       │       ├──   - type WorkoutSetLike
+│       │       ├──   - type WorkoutExerciseLike
+│       │       ├──   - type SupersetCreationExerciseLike
+│       │       ├──   - export function getExerciseVolume()
+│       │       ├──   - export function getExerciseSetsCount()
+│       │       ├──   - export function getWorkoutStats()
+│       │       ├──   - export function getCurrentExerciseId()
+│       │       ├──   - export function getExerciseStatus()
+│       │       ├──   - export function formatWorkoutSubtitle()
+│       │       ├──   - export function formatEffortShortLabel()
+│       │       ├──   - export function formatVolume()
+│       │       ├──   - export function mapWorkoutExercisesToTableItems()
+│       │       ├──   - export function mapTableItemsById()
+│       │       ├──   - export function getSupersetCreationExerciseId()
+│       │       ├──   - const parsed
+│       │       ├──   - const weight
+│       │       ├──   - const reps
+│       │       ├──   - const exercisesWithSets
+│       │       ├──   - const sorted
+│       │       ├──   - const aDate
+│       │       ├──   - const bDate
+│       │       ├──   - const rounded
+│       │       ├──   - const currentExerciseId
+│       │       ├──   - const current
+│       │       └──   - const firstStandaloneExercise
+│       └── types.ts
+│           ├──   - type SetEditorMode
+│           ├──   - type SetEditorDraft
+│           ├──   - type CurrentWorkoutSetRow
+│           ├──   - type PreviousWorkoutSetRow
+│           ├──   - type AnyWorkoutSetRow
+│           ├──   - type SetSwipeAction
+│           ├──   - type SwipeHelpItem
+│           ├──   - const EFFORT_OPTIONS
+│           └──   - const SWIPE_HELP_ITEMS
+├── hooks
+│   ├── use-color-scheme.ts
+│   ├── use-color-scheme.web.ts
+│   │   ├──   - export function useColorScheme()
+│   │   └──   - const colorScheme
+│   └── use-theme-color.ts
+│       ├──   - export function useThemeColor()
+│       ├──   - const theme
+│       └──   - const colorFromProps
+├── store
+│   ├── usePlanBuilderStore.ts
+│   │   ├──   - type DraftExercise
+│   │   ├──   - type PlanBuilderState
+│   │   ├──   - const generateUUID
+│   │   ├──   - const r
+│   │   ├──   - const v
+│   │   ├──   - const usePlanBuilderStore
+│   │   ├──   - const stats
+│   │   ├──   - const mapping
+│   │   ├──   - const cleaned
+│   │   ├──   - const prev
+│   │   ├──   - const next
+│   │   ├──   - const matchesPrev
+│   │   ├──   - const matchesNext
+│   │   ├──   - const index
+│   │   ├──   - const current
+│   │   ├──   - const previous
+│   │   ├──   - const isCurrentlyLinked
+│   │   ├──   - const oldId
+│   │   ├──   - const newSplitId
+│   │   ├──   - const targetId
+│   │   ├──   - const prevOldId
+│   │   ├──   - const currOldId
+│   │   └──   - let newExercises
+│   └── useTimerStore.ts
+│       ├──   - type TimerMode
+│       ├──   - const STORAGE_KEYS
+│       ├──   - const useTimerStore
+│       ├──   - const state
+│       ├──   - const savedMode
+│       └──   - const savedSeconds
+└── types
+    └── exercise.ts
+        ├──   - type DifficultyAndExperience
+        └──   - type Exercise
+
+================================================================================
+
+DB MODELS: C:\Users\Admin\PycharmProjects\FitPilotBot\api\services\models.py
+├── AppUser
+│   ├── TABLE
+│   │   └── - 'app_users'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+│   │   ├── - firebase_uid: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+│   │   ├── - email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+│   │   ├── - display_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+│   │   ├── - is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+│   │   ├── - email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+│   │   ├── - created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+│   │   ├── - updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+│   │   └── - last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+│   └── RELATIONSHIPS
+│       ├── - profile: Mapped[Optional['AppUserProfile']] = relationship('AppUserProfile', back_populates='user', uselist=False, cascade='all, delete-orphan')
+│       ├── - anthropometry_history: Mapped[List['UserAnthropometry']] = relationship('UserAnthropometry', back_populates='app_user', cascade='all, delete-orphan', order_by='desc(UserAnthropometry.recorded_at)')
+│       ├── - sessions: Mapped[List['WorkoutSession']] = relationship('WorkoutSession', back_populates='app_user')
+│       ├── - user_splits: Mapped[List['UserSplit']] = relationship('UserSplit', back_populates='app_user')
+│       ├── - mesocycles: Mapped[List['AppUserMesocycle']] = relationship('AppUserMesocycle', back_populates='app_user')
+│       ├── - goals: Mapped[List['UserGoal']] = relationship('UserGoal', back_populates='app_user')
+│       ├── - records: Mapped[List['UserRecord']] = relationship('UserRecord', back_populates='app_user')
+│       ├── - custom_exercises: Mapped[List['UserExercise']] = relationship('UserExercise', back_populates='app_user')
+│       ├── - exercise_preferences: Mapped[List['UserExercisePreference']] = relationship('UserExercisePreference', back_populates='app_user')
+│       ├── - generator_presets: Mapped[List['AdvancedGeneratorPreset']] = relationship('AdvancedGeneratorPreset', back_populates='app_user')
+│       └── - microcycles: Mapped[list['AppUserMicrocycle']] = relationship('AppUserMicrocycle', back_populates='app_user', cascade='all, delete-orphan')
+├── AppUserProfile
+│   ├── TABLE
+│   │   └── - 'app_user_profiles'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+│   │   ├── - app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False, unique=True, index=True)
+│   │   ├── - username: Mapped[Optional[str]] = mapped_column(String(30), unique=True, index=True)
+│   │   ├── - bio: Mapped[Optional[str]] = mapped_column(String(150))
+│   │   ├── - avatar_url: Mapped[Optional[str]] = mapped_column(String(255))
+│   │   ├── - gender: Mapped[Optional[str]] = mapped_column(String(20))
+│   │   ├── - experience_level: Mapped[str] = mapped_column(String(20), default='beginner', server_default='beginner')
+│   │   ├── - training_frequency: Mapped[int] = mapped_column(Integer, default=3, server_default='3')
+│   │   ├── - pro_mode_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default='false')
+│   │   ├── - volume_budget: Mapped[dict] = mapped_column(JSONB, default=dict, server_default='{}')
+│   │   ├── - current_streak: Mapped[int] = mapped_column(default=0, server_default='0')
+│   │   ├── - longest_streak: Mapped[int] = mapped_column(default=0, server_default='0')
+│   │   ├── - total_workouts: Mapped[int] = mapped_column(default=0, server_default='0')
+│   │   ├── - microcycle_length: Mapped[int] = mapped_column(Integer, default=7, server_default='7')
+│   │   ├── - timezone: Mapped[str] = mapped_column(String(50), default='UTC', server_default='UTC')
+│   │   └── - settings: Mapped[dict] = mapped_column(JSONB, default=lambda: {'units': 'kg', 'is_public': True, 'notifications': True, 'prehab_flags': [], 'locations': ['gym']}, server_default='{}')
+│   └── RELATIONSHIPS
+│       └── - user: Mapped['AppUser'] = relationship('AppUser', back_populates='profile')
+├── Exercise
+│   ├── TABLE
+│   │   └── - 'exercises'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+│   │   ├── - name: Mapped[str] = mapped_column(String(200), unique=True, index=True, nullable=False)
+│   │   ├── - category: Mapped[str] = mapped_column(String(50), nullable=False)
+│   │   ├── - fatigue_tier: Mapped[int] = mapped_column(Integer, default=2, server_default='2', nullable=False)
+│   │   ├── - main_muscle_group: Mapped[str] = mapped_column(String(100), nullable=False)
+│   │   ├── - secondary_muscle_groups: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+│   │   ├── - equipment_needed: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+│   │   ├── - difficulty: Mapped[str] = mapped_column(String(20), nullable=False)
+│   │   ├── - description: Mapped[Optional[str]] = mapped_column(Text)
+│   │   ├── - source: Mapped[str] = mapped_column(String(20), default='default')
+│   │   ├── - app_user_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=True, index=True)
+│   │   ├── - video_url: Mapped[Optional[str]] = mapped_column(String(500))
+│   │   ├── - action: Mapped[ExerciseAction] = mapped_column(Enum(ExerciseAction, name='exercise_action_enum'), default=ExerciseAction.unknown, server_default='unknown')
+│   │   ├── - vector: Mapped[ExerciseVector] = mapped_column(Enum(ExerciseVector, name='exercise_vector_enum'), default=ExerciseVector.unknown, server_default='unknown')
+│   │   ├── - laterality: Mapped[ExerciseLaterality] = mapped_column(Enum(ExerciseLaterality, name='exercise_laterality_enum'), default=ExerciseLaterality.unknown, server_default='unknown')
+│   │   └── - created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+│   └── RELATIONSHIPS
+│       ├── - user_preferences: Mapped[List['UserExercisePreference']] = relationship('UserExercisePreference', back_populates='exercise', cascade='all, delete-orphan')
+│       └── - session_exercises: Mapped[List['WorkoutSessionExercise']] = relationship('WorkoutSessionExercise', back_populates='exercise')
+├── UserSplit
+│   ├── TABLE
+│   │   └── - 'user_splits'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True)
+│   │   ├── - app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False)
+│   │   ├── - blueprint_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('split_blueprints.id', ondelete='CASCADE'))
+│   │   ├── - selected_plans: Mapped[dict] = mapped_column(JSONB, default=dict)
+│   │   ├── - start_date: Mapped[datetime] = mapped_column(server_default=func.now())
+│   │   ├── - is_active: Mapped[bool] = mapped_column(default=True)
+│   │   ├── - current_day: Mapped[int] = mapped_column(default=1)
+│   │   └── - last_trained_date: Mapped[Optional[datetime]] = mapped_column()
+│   └── RELATIONSHIPS
+│       ├── - app_user: Mapped['AppUser'] = relationship('AppUser', back_populates='user_splits')
+│       └── - blueprint: Mapped['SplitBlueprint'] = relationship('SplitBlueprint')
+├── Mesocycle
+│   ├── TABLE
+│   │   └── - 'mesocycles'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+│   │   ├── - author_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=True)
+│   │   ├── - name: Mapped[str] = mapped_column(String(120), nullable=False)
+│   │   ├── - code: Mapped[str] = mapped_column(String(50), nullable=False)
+│   │   ├── - description: Mapped[Optional[str]] = mapped_column(Text)
+│   │   └── - phases_in_cycle: Mapped[int] = mapped_column(nullable=False)
+│   └── RELATIONSHIPS
+│       └── - phases: Mapped[List['MesocyclePhase']] = relationship('MesocyclePhase', back_populates='mesocycle', cascade='all, delete-orphan', order_by='MesocyclePhase.phase_number')
+├── MesocyclePhase
+│   ├── TABLE
+│   │   └── - 'mesocycle_phases'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True)
+│   │   ├── - mesocycle_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('mesocycles.id', ondelete='CASCADE'), nullable=False, index=True)
+│   │   ├── - phase_number: Mapped[int] = mapped_column(nullable=False)
+│   │   ├── - name: Mapped[str] = mapped_column(String(120), nullable=False)
+│   │   └── - effort_tier: Mapped[str] = mapped_column(String(20), nullable=False)
+│   └── RELATIONSHIPS
+│       └── - mesocycle: Mapped['Mesocycle'] = relationship('Mesocycle', back_populates='phases')
+├── AppUserMesocycle
+│   ├── TABLE
+│   │   └── - 'app_user_mesocycles'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True)
+│   │   ├── - app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False, index=True)
+│   │   ├── - mesocycle_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('mesocycles.id', ondelete='CASCADE'), nullable=False)
+│   │   ├── - is_active: Mapped[bool] = mapped_column(default=False)
+│   │   ├── - started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+│   │   ├── - microcycle_length: Mapped[int] = mapped_column(Integer, nullable=False)
+│   │   └── - current_phase: Mapped[int] = mapped_column(Integer, nullable=True)
+│   └── RELATIONSHIPS
+│       ├── - app_user: Mapped['AppUser'] = relationship('AppUser', back_populates='mesocycles')
+│       └── - mesocycle: Mapped['Mesocycle'] = relationship('Mesocycle')
+├── WorkoutSession
+│   ├── TABLE
+│   │   └── - 'workout_sessions'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True)
+│   │   ├── - app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False, index=True)
+│   │   ├── - source: Mapped[str] = mapped_column(String(32), nullable=False)
+│   │   ├── - status: Mapped[str] = mapped_column(String(32), default='active', server_default='active')
+│   │   ├── - plan_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey('workout_plans.id', ondelete='SET NULL'), nullable=True)
+│   │   ├── - split_day_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('split_day_slots.id', ondelete='SET NULL'), nullable=True)
+│   │   ├── - app_user_mesocycle_id: Mapped[Optional[int]] = mapped_column(ForeignKey('app_user_mesocycles.id', ondelete='SET NULL'))
+│   │   ├── - mesocycle_phase: Mapped[Optional[int]] = mapped_column()
+│   │   ├── - app_user_microcycle_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey('app_user_microcycles.id', ondelete='SET NULL'), nullable=True)
+│   │   ├── - volume_targets = Column(JSONB, nullable=True)
+│   │   ├── - notes: Mapped[Optional[str]] = mapped_column(Text)
+│   │   ├── - started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+│   │   ├── - finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+│   │   └── - updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+│   └── RELATIONSHIPS
+│       ├── - app_user: Mapped['AppUser'] = relationship('AppUser', back_populates='sessions')
+│       └── - exercises: Mapped[List['WorkoutSessionExercise']] = relationship('WorkoutSessionExercise', back_populates='workout_session', cascade='all, delete-orphan', order_by='WorkoutSessionExercise.order_index')
+├── WorkoutSessionExercise
+│   ├── TABLE
+│   │   └── - 'workout_session_exercises'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True)
+│   │   ├── - workout_session_id: Mapped[int] = mapped_column(ForeignKey('workout_sessions.id', ondelete='CASCADE'), nullable=False, index=True)
+│   │   ├── - exercise_id: Mapped[int] = mapped_column(ForeignKey('exercises.id', ondelete='RESTRICT'), nullable=False, index=True)
+│   │   ├── - order_index: Mapped[int] = mapped_column(nullable=False)
+│   │   ├── - superset_group: Mapped[Optional[str]] = mapped_column(String(64))
+│   │   ├── - recommended_rir: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+│   │   ├── - recommended_rep_min: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+│   │   ├── - recommended_rep_max: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+│   │   ├── - notes: Mapped[Optional[str]] = mapped_column(Text)
+│   │   └── - updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+│   └── RELATIONSHIPS
+│       ├── - workout_session: Mapped['WorkoutSession'] = relationship('WorkoutSession', back_populates='exercises')
+│       ├── - sets: Mapped[List['WorkoutSessionSet']] = relationship('WorkoutSessionSet', back_populates='workout_session_exercise', cascade='all, delete-orphan', order_by='WorkoutSessionSet.set_number')
+│       └── - exercise: Mapped['Exercise'] = relationship('Exercise')
+├── WorkoutSessionSet
+│   ├── TABLE
+│   │   └── - 'workout_session_sets'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True)
+│   │   ├── - workout_session_exercise_id: Mapped[int] = mapped_column(ForeignKey('workout_session_exercises.id', ondelete='CASCADE'), nullable=False, index=True)
+│   │   ├── - set_number: Mapped[int] = mapped_column(nullable=False)
+│   │   ├── - set_type: Mapped[str] = mapped_column(String(32), default='normal', server_default='normal')
+│   │   ├── - weight: Mapped[Optional[float]] = mapped_column(Numeric(8, 2))
+│   │   ├── - reps: Mapped[Optional[int]] = mapped_column()
+│   │   ├── - notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+│   │   ├── - effort_level: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+│   │   ├── - is_completed: Mapped[bool] = mapped_column(default=True, server_default='true')
+│   │   ├── - parent_set_id: Mapped[Optional[int]] = mapped_column(ForeignKey('workout_session_sets.id', ondelete='SET NULL'))
+│   │   ├── - superset_round: Mapped[Optional[int]] = mapped_column()
+│   │   └── - updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+│   └── RELATIONSHIPS
+│       ├── - workout_session_exercise: Mapped['WorkoutSessionExercise'] = relationship('WorkoutSessionExercise', back_populates='sets')
+│       └── - parent_set: Mapped[Optional['WorkoutSessionSet']] = relationship('WorkoutSessionSet', remote_side='WorkoutSessionSet.id')
+├── UserExercise
+│   ├── TABLE
+│   │   └── - 'user_exercises'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True)
+│   │   ├── - app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False, index=True)
+│   │   ├── - name: Mapped[str] = mapped_column(String(200), nullable=False)
+│   │   ├── - category: Mapped[str] = mapped_column(String(50), default='strength')
+│   │   ├── - main_muscle_group: Mapped[str] = mapped_column(String(100), default='unknown')
+│   │   ├── - secondary_muscle_groups: Mapped[list] = mapped_column(JSONB, default=list)
+│   │   ├── - equipment_needed: Mapped[list] = mapped_column(JSONB, default=list)
+│   │   ├── - description: Mapped[Optional[str]] = mapped_column(Text)
+│   │   ├── - is_public: Mapped[bool] = mapped_column(default=False)
+│   │   └── - created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+│   └── RELATIONSHIPS
+│       ├── - app_user: Mapped['AppUser'] = relationship('AppUser', back_populates='custom_exercises')
+│       └── - user_preferences: Mapped[List['UserExercisePreference']] = relationship('UserExercisePreference', back_populates='user_exercise', cascade='all, delete-orphan')
+├── UserAnthropometry
+│   ├── TABLE
+│   │   └── - 'user_anthropometry'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True)
+│   │   ├── - app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False, index=True)
+│   │   ├── - recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+│   │   ├── - birth_date: Mapped[Optional[date_type]] = mapped_column(Date)
+│   │   ├── - height: Mapped[Optional[float]] = mapped_column()
+│   │   ├── - weight: Mapped[Optional[float]] = mapped_column()
+│   │   └── - activity_level: Mapped[Optional[str]] = mapped_column()
+│   └── RELATIONSHIPS
+│       └── - app_user: Mapped['AppUser'] = relationship('AppUser', back_populates='anthropometry_history')
+├── UserGoal
+│   ├── TABLE
+│   │   └── - 'user_goals'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True)
+│   │   ├── - app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False)
+│   │   ├── - goal_type: Mapped[str] = mapped_column(String(50), nullable=False)
+│   │   ├── - target_value: Mapped[float] = mapped_column(nullable=False)
+│   │   ├── - unit: Mapped[Optional[str]] = mapped_column(String(20))
+│   │   ├── - exercise_id: Mapped[Optional[int]] = mapped_column(ForeignKey('exercises.id', ondelete='SET NULL'))
+│   │   ├── - deadline: Mapped[Optional[date_type]] = mapped_column(Date)
+│   │   └── - is_completed: Mapped[bool] = mapped_column(default=False)
+│   └── RELATIONSHIPS
+│       ├── - app_user: Mapped['AppUser'] = relationship('AppUser', back_populates='goals')
+│       ├── - exercise: Mapped[Optional['Exercise']] = relationship('Exercise')
+│       └── - progress_history: Mapped[List['GoalProgress']] = relationship('GoalProgress', back_populates='goal', cascade='all, delete-orphan')
+├── GoalProgress
+│   ├── TABLE
+│   │   └── - 'goal_progress'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True)
+│   │   ├── - goal_id: Mapped[int] = mapped_column(ForeignKey('user_goals.id'), nullable=False, index=True)
+│   │   ├── - app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False, index=True)
+│   │   ├── - value: Mapped[float] = mapped_column(nullable=False)
+│   │   ├── - progress_percentage: Mapped[float] = mapped_column(nullable=False)
+│   │   └── - created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+│   └── RELATIONSHIPS
+│       └── - goal: Mapped['UserGoal'] = relationship('UserGoal', back_populates='progress_history')
+├── UserRecord
+│   ├── TABLE
+│   │   └── - 'user_records'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True)
+│   │   ├── - app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False)
+│   │   ├── - exercise_id: Mapped[Optional[int]] = mapped_column(ForeignKey('exercises.id'))
+│   │   ├── - user_exercise_id: Mapped[Optional[int]] = mapped_column(ForeignKey('user_exercises.id'))
+│   │   ├── - exercise_name: Mapped[str] = mapped_column(String(200), nullable=False)
+│   │   ├── - record_type: Mapped[str] = mapped_column(nullable=False)
+│   │   ├── - value: Mapped[float] = mapped_column(nullable=False)
+│   │   └── - date_achieved: Mapped[date_type] = mapped_column(Date, default=lambda: datetime.now(UTC).date())
+│   └── RELATIONSHIPS
+│       ├── - app_user: Mapped['AppUser'] = relationship('AppUser', back_populates='records')
+│       ├── - exercise: Mapped[Optional['Exercise']] = relationship('Exercise')
+│       └── - user_exercise: Mapped[Optional['UserExercise']] = relationship('UserExercise')
+├── UserExercisePreference
+│   ├── TABLE
+│   │   └── - 'user_exercise_preferences'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True)
+│   │   ├── - app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False, index=True)
+│   │   ├── - exercise_id: Mapped[Optional[int]] = mapped_column(ForeignKey('exercises.id'))
+│   │   ├── - user_exercise_id: Mapped[Optional[int]] = mapped_column(ForeignKey('user_exercises.id'))
+│   │   ├── - exercise_name: Mapped[str] = mapped_column(String(200), nullable=False)
+│   │   └── - preference: Mapped[str] = mapped_column(String(50), nullable=False)
+│   └── RELATIONSHIPS
+│       ├── - app_user: Mapped['AppUser'] = relationship('AppUser', back_populates='exercise_preferences')
+│       ├── - exercise: Mapped[Optional['Exercise']] = relationship('Exercise', back_populates='user_preferences')
+│       └── - user_exercise: Mapped[Optional['UserExercise']] = relationship('UserExercise', back_populates='user_preferences')
+├── AdvancedGeneratorPreset
+│   ├── TABLE
+│   │   └── - 'advanced_generator_presets'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True)
+│   │   ├── - app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False, index=True)
+│   │   ├── - name: Mapped[str] = mapped_column(String(100), nullable=False)
+│   │   ├── - settings: Mapped[dict] = mapped_column(JSONB, nullable=False)
+│   │   ├── - is_default: Mapped[bool] = mapped_column(default=False)
+│   │   └── - created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+│   └── RELATIONSHIPS
+│       └── - app_user: Mapped['AppUser'] = relationship('AppUser', back_populates='generator_presets')
+├── SplitBlueprint
+│   ├── TABLE
+│   │   └── - 'split_blueprints'
+│   ├── COLUMNS
+│   │   ├── - id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+│   │   ├── - name = Column(String, nullable=False)
+│   │   ├── - author_id = Column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=True)
+│   │   ├── - length_days = Column(Integer, nullable=False)
+│   │   └── - is_system = Column(Boolean, default=False, nullable=False)
+│   └── RELATIONSHIPS
+│       └── - slots = relationship('SplitDaySlot', back_populates='blueprint', cascade='all, delete-orphan', order_by='SplitDaySlot.day_order')
+├── DayBlueprint
+│   ├── TABLE
+│   │   └── - 'day_blueprints'
+│   ├── COLUMNS
+│   │   ├── - id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+│   │   ├── - name = Column(String, nullable=False)
+│   │   ├── - author_id = Column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=True)
+│   │   ├── - template_type = Column(Enum(DayTemplateType, name='day_template_type', values_callable=lambda obj: [e.value for e in obj]), nullable=False)
+│   │   └── - is_system = Column(Boolean, default=False, nullable=False)
+│   └── RELATIONSHIPS
+│       └── - muscle_targets = relationship('DayMuscleTarget', back_populates='day', cascade='all, delete-orphan')
+├── SplitDaySlot
+│   ├── TABLE
+│   │   └── - 'split_day_slots'
+│   ├── COLUMNS
+│   │   ├── - id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+│   │   ├── - blueprint_id = Column(UUID(as_uuid=True), ForeignKey('split_blueprints.id', ondelete='CASCADE'), nullable=False)
+│   │   ├── - day_id = Column(UUID(as_uuid=True), ForeignKey('day_blueprints.id'), nullable=False)
+│   │   └── - day_order = Column(Integer, nullable=False)
+│   └── RELATIONSHIPS
+│       ├── - blueprint = relationship('SplitBlueprint', back_populates='slots')
+│       └── - day = relationship('DayBlueprint')
+├── DayMuscleTarget
+│   ├── TABLE
+│   │   └── - 'day_muscle_targets'
+│   ├── COLUMNS
+│   │   ├── - id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+│   │   ├── - day_id = Column(UUID(as_uuid=True), ForeignKey('day_blueprints.id', ondelete='CASCADE'), nullable=False)
+│   │   └── - muscle_group_id = Column(String, nullable=False)
+│   └── RELATIONSHIPS
+│       └── - day = relationship('DayBlueprint', back_populates='muscle_targets')
+├── ActiveMesocycle
+│   ├── TABLE
+│   │   └── - 'active_mesocycles'
+│   ├── COLUMNS
+│   │   ├── - id = Column(UUID(as_uuid=True), default=uuid.uuid4, primary_key=True)
+│   │   ├── - user_id = Column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False)
+│   │   ├── - blueprint_id = Column(UUID(as_uuid=True), ForeignKey('split_blueprints.id'), nullable=False)
+│   │   ├── - start_date = Column(Date, nullable=False, default=date.today)
+│   │   ├── - scheduling_mode = Column(Enum(SchedulingMode), nullable=False)
+│   │   ├── - allowed_weekdays = Column(ARRAY(Integer), nullable=True)
+│   │   ├── - rolling_pattern = Column(ARRAY(Integer), nullable=True)
+│   │   └── - blackout_weekdays = Column(ARRAY(Integer), nullable=True, default=[])
+│   └── RELATIONSHIPS
+│       └── - scheduled_workouts = relationship('ScheduledWorkout', back_populates='mesocycle', cascade='all, delete-orphan')
+├── ScheduledWorkout
+│   ├── TABLE
+│   │   └── - 'scheduled_workouts'
+│   ├── COLUMNS
+│   │   ├── - id = Column(UUID(as_uuid=True), default=uuid.uuid4, primary_key=True)
+│   │   ├── - mesocycle_id = Column(UUID(as_uuid=True), ForeignKey('active_mesocycles.id', ondelete='CASCADE'), nullable=False)
+│   │   ├── - blueprint_day_id = Column(UUID(as_uuid=True), nullable=False)
+│   │   ├── - scheduled_date = Column(Date, nullable=False)
+│   │   ├── - status = Column(Enum(WorkoutStatus), nullable=False, default=WorkoutStatus.pending)
+│   │   ├── - mesocycle_phase = Column(Enum(MesocyclePhaseEnum), nullable=False, default=MesocyclePhaseEnum.medium)
+│   │   └── - workout_order = Column(Integer, nullable=False)
+│   └── RELATIONSHIPS
+│       └── - mesocycle = relationship('ActiveMesocycle', back_populates='scheduled_workouts')
+├── WorkoutPlan
+│   ├── TABLE
+│   │   └── - 'workout_plans'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True)
+│   │   ├── - app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False)
+│   │   ├── - name: Mapped[str] = mapped_column(String(255), nullable=False)
+│   │   ├── - day_tag: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+│   │   ├── - micro_tag: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+│   │   └── - meso_tag: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+│   └── RELATIONSHIPS
+│       └── - exercises: Mapped[List['WorkoutPlanExercise']] = relationship('WorkoutPlanExercise', back_populates='plan', cascade='all, delete-orphan', order_by='WorkoutPlanExercise.order_index')
+├── WorkoutPlanExercise
+│   ├── TABLE
+│   │   └── - 'workout_plan_exercises'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True)
+│   │   ├── - plan_id: Mapped[int] = mapped_column(Integer, ForeignKey('workout_plans.id', ondelete='CASCADE'), nullable=False)
+│   │   ├── - exercise_id: Mapped[int] = mapped_column(Integer, ForeignKey('exercises.id', ondelete='CASCADE'), nullable=False)
+│   │   ├── - order_index: Mapped[int] = mapped_column(Integer, nullable=False)
+│   │   ├── - superset_group_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+│   │   ├── - target_sets: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+│   │   ├── - override_reps: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+│   │   └── - override_rir: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+│   └── RELATIONSHIPS
+│       ├── - plan: Mapped['WorkoutPlan'] = relationship('WorkoutPlan', back_populates='exercises')
+│       └── - exercise: Mapped['Exercise'] = relationship('Exercise')
+├── AppUserMicrocycle
+│   ├── TABLE
+│   │   └── - 'app_user_microcycles'
+│   ├── COLUMNS
+│   │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+│   │   ├── - app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False, index=True)
+│   │   ├── - name: Mapped[str] = mapped_column(String(120), nullable=False)
+│   │   ├── - length_days: Mapped[int] = mapped_column(Integer, nullable=False)
+│   │   ├── - days_mapping: Mapped[dict] = mapped_column(JSONB, default=dict, server_default='{}')
+│   │   └── - is_active: Mapped[bool] = mapped_column(Boolean, default=False, server_default='false')
+│   └── RELATIONSHIPS
+│       └── - app_user: Mapped['AppUser'] = relationship('AppUser', back_populates='microcycles')
+└── UserCalendarDay
+    ├── TABLE
+    │   └── - 'user_calendar'
+    ├── COLUMNS
+    │   ├── - id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    │   ├── - app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False, index=True)
+    │   ├── - target_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    │   ├── - user_mesocycle_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey('app_user_mesocycles.id', ondelete='SET NULL'), nullable=True)
+    │   ├── - mesocycle_phase_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    │   ├── - user_microcycle_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey('app_user_microcycles.id', ondelete='SET NULL'), nullable=True)
+    │   ├── - microcycle_day_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    │   ├── - day_tag: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    │   ├── - micro_tag: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    │   ├── - meso_tag: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    │   ├── - plan_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey('workout_plans.id', ondelete='SET NULL'), nullable=True)
+    │   ├── - is_rest_day: Mapped[bool] = mapped_column(Boolean, default=False, server_default='false')
+    │   ├── - is_blackout: Mapped[bool] = mapped_column(Boolean, default=False, server_default='false')
+    │   ├── - status: Mapped[str] = mapped_column(String(20), default='planned', server_default='planned')
+    │   └── - actual_workout_session_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    └── RELATIONSHIPS
+        └── - plan = relationship('WorkoutPlan', lazy='noload')
