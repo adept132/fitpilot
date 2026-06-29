@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from api.services.models import Base
 
 load_dotenv()
-DATABASE_URL = os.getenv("DB_URL")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Проверяем, что URL содержит asyncpg
 if "asyncpg" not in DATABASE_URL:
