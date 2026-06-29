@@ -29,7 +29,6 @@ app.include_router(profile_router)
 app.include_router(calendar_router)
 app.include_router(workout_supersets_router)
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {"status": "ok"}
-
