@@ -52,3 +52,4 @@ class UpdateSettingsRequest(BaseModel):
     locations: List[str]
     prehab_flags: List[str]
     effort_display_mode: Optional[Literal["hidden", "text", "rir"]] = None
+    progression_factor: Optional[float] = Field(default=None, gt=0)

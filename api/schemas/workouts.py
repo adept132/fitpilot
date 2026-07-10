@@ -28,8 +28,19 @@ class ExerciseShortResponse(BaseModel):
     name: str
     fatigue_tier: int | None = None
 
+    category: str | None = None
+    equipment_needed: Optional[List[str]] = None
+
     main_muscle_group: str | None = None
     secondary_muscle_groups: Optional[Union[List[str], str]] = None
+
+
+class AutoprogressionResponse(BaseModel):
+    has_basis: bool
+    metric: Optional[Literal["e1rm", "volume"]] = None
+    target_weight: float | None = None
+    target_reps: int | None = None
+    modified_target: float | None = None
 
 
 class WorkoutSessionSetResponse(BaseModel):
@@ -63,6 +74,7 @@ class WorkoutSessionExerciseResponse(BaseModel):
     recommended_rir: Optional[int] = None
     recommended_rep_min: Optional[int] = None
     recommended_rep_max: Optional[int] = None
+    target_sets: Optional[int] = None
 
 class MuscleVolumeTarget(BaseModel):
     target_sets: int

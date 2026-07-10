@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -8,12 +8,14 @@ from sqlalchemy.orm import selectinload
 from api.deps import get_db
 from api.schemas.supersets import CreateSupersetRequest, ReorderWorkoutStructureRequest
 from api.schemas.workouts import WorkoutSessionDetailResponse, AddWorkoutExerciseRequest, AddWorkoutSetResponse, \
-    AddWorkoutSetRequest, UpdateWorkoutSetRequest, RepeatWorkoutSetRequest
+    AddWorkoutSetRequest, UpdateWorkoutSetRequest, RepeatWorkoutSetRequest, AutoprogressionResponse
 from api.services.app_user_service import get_current_app_user
+from api.services.autoprogression import compute_autoprogression
 from api.services.calculate_exercise_recommendation import calculate_exercise_recommendations
 from api.services.exercise_utils import get_base_exercise_query
 from api.services.workout_superset_service import WorkoutSupersetService
-from api.services.models import WorkoutSession, WorkoutSessionExercise, Exercise, WorkoutSessionSet, AppUser
+from api.services.models import WorkoutSession, WorkoutSessionExercise, Exercise, WorkoutSessionSet, AppUser, \
+    AppUserProfile
 
 router = APIRouter(tags=["workouts"])
 
@@ -291,6 +293,65 @@ async def add_set_to_session_exercise(
     await db.refresh(new_set)
 
     return new_set
+
+@router.get(
+    "/workout-session-exercises/{session_exercise_id}/autoprogression",
+    response_model=AutoprogressionResponse,
+)
+async def get_exercise_autoprogression(
+    session_exercise_id: int,
+    target_reps: int | None = Query(default=None, gt=0),
+    target_effort: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    current_app_user=Depends(get_current_app_user),
+):
+    """Рекомендация автопрогрессии для упражнения в текущей сессии.
+
+    target_reps/target_effort передаются только в свободной тренировке (пользователь
+    выбирает их вручную). В плановой берём целевые параметры из сессии.
+    """
+    stmt = (
+        select(WorkoutSessionExercise)
+        .where(WorkoutSessionExercise.id == session_exercise_id)
+        .options(
+            selectinload(WorkoutSessionExercise.workout_session),
+            selectinload(WorkoutSessionExercise.exercise),
+        )
+    )
+    result = await db.execute(stmt)
+    session_exercise = result.scalar_one_or_none()
+
+    if session_exercise is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workout session exercise not found",
+        )
+
+    if session_exercise.workout_session.app_user_id != current_app_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workout session exercise not found",
+        )
+
+    profile_result = await db.execute(
+        select(AppUserProfile).where(AppUserProfile.app_user_id == current_app_user.id)
+    )
+    profile = profile_result.scalars().first()
+    experience_level = profile.experience_level if profile else None
+    settings = profile.settings if profile else None
+
+    data = await compute_autoprogression(
+        db,
+        session_exercise,
+        current_app_user.id,
+        experience_level,
+        settings,
+        target_reps=target_reps,
+        target_effort=target_effort,
+    )
+
+    return AutoprogressionResponse(**data)
+
 
 async def get_active_workout_for_user(
     db: AsyncSession,

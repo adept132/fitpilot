@@ -111,6 +111,9 @@ async def update_profile_settings(
     if payload.effort_display_mode is not None:
         current_settings["effort_display_mode"] = payload.effort_display_mode
 
+    if payload.progression_factor is not None:
+        current_settings["progression_factor"] = payload.progression_factor
+
     profile.settings = current_settings
     await db.commit()
 
