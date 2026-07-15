@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, root_validator
-from typing import List, Literal, Dict, Optional
+from typing import Any, List, Literal, Dict, Optional
 
 
 class OnboardingWidgetRequest(BaseModel):
@@ -49,7 +49,12 @@ class VolumeBudget(BaseModel):
     weekly_targets: Dict[str, MuscleTarget]
 
 class UpdateSettingsRequest(BaseModel):
-    locations: List[str]
-    prehab_flags: List[str]
+    locations: Optional[List[str]] = None
+    prehab_flags: Optional[List[str]] = None
     effort_display_mode: Optional[Literal["hidden", "text", "rir"]] = None
     progression_factor: Optional[float] = Field(default=None, gt=0)
+    weight_unit: Optional[Literal["kg", "lbs"]] = None
+    weight_steps: Optional[Dict[str, float]] = None
+    # Конфиг калькулятора блинов (отдельно на единицу): {barWeights, selectedBar, plates}
+    plate_config_kg: Optional[Dict[str, Any]] = None
+    plate_config_lbs: Optional[Dict[str, Any]] = None

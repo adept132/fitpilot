@@ -102,10 +102,12 @@ async def update_profile_settings(
     if not profile:
         raise HTTPException(status_code=404, detail="Профиль не найден")
 
-    # Обновляем JSONB поле settings
+    # Обновляем JSONB поле settings (частично — только переданные поля)
     current_settings = dict(profile.settings) if profile.settings else {}
-    current_settings["locations"] = payload.locations
-    current_settings["prehab_flags"] = payload.prehab_flags
+    if payload.locations is not None:
+        current_settings["locations"] = payload.locations
+    if payload.prehab_flags is not None:
+        current_settings["prehab_flags"] = payload.prehab_flags
 
     # === ДОБАВЛЯЕМ СОХРАНЕНИЕ ===
     if payload.effort_display_mode is not None:
@@ -113,6 +115,19 @@ async def update_profile_settings(
 
     if payload.progression_factor is not None:
         current_settings["progression_factor"] = payload.progression_factor
+
+    if payload.weight_unit is not None:
+        current_settings["weight_unit"] = payload.weight_unit
+
+    if payload.weight_steps is not None:
+        merged_steps = dict(current_settings.get("weight_steps") or {})
+        merged_steps.update(payload.weight_steps)
+        current_settings["weight_steps"] = merged_steps
+
+    if payload.plate_config_kg is not None:
+        current_settings["plate_config_kg"] = payload.plate_config_kg
+    if payload.plate_config_lbs is not None:
+        current_settings["plate_config_lbs"] = payload.plate_config_lbs
 
     profile.settings = current_settings
     await db.commit()
