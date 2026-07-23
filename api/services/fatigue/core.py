@@ -171,6 +171,15 @@ def _std(values: list[float], mean: float) -> float:
     return math.sqrt(sum((v - mean) ** 2 for v in values) / (len(values) - 1))
 
 
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2 == 1:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
+
+
 def _ewma(values: list[float], tau_days: float) -> float:
     """EWMA по дневному ряду, свежие значения в конце."""
     if not values:
@@ -193,9 +202,12 @@ def readiness_z(series: list[float], p: FatigueParams) -> Readiness:
 
     mean = _mean(series)
     std = _std(series, mean)
-    # Пол дисперсии: у очень регулярного пользователя std стремится к нулю,
-    # и z взрывался бы на копеечных отклонениях.
-    floor = abs(mean) * p.sigma_floor_ratio
+    # Пол дисперсии (§4.3): доля от МЕДИАНЫ F_c, а не от среднего — медиана
+    # устойчивее к выбросам, а весь смысл пола в устойчивости. У очень
+    # регулярного пользователя std стремится к нулю, и z взрывался бы на
+    # копеечных отклонениях; пол это предотвращает. z по-прежнему центрируется
+    # по среднему — это стандартная z-оценка.
+    floor = abs(_median(series)) * p.sigma_floor_ratio
     denominator = max(std, floor)
     if denominator <= 0:
         return Readiness(z=0.0, band=BAND_NEUTRAL)

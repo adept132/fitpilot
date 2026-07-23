@@ -263,3 +263,28 @@ def test_chronic_window_excludes_the_acute_tail():
     # реализации, где хроника берёт весь ряд, spike.chronic вырос бы и первая
     # ассерция упала бы.
     assert spike.ratio > base.ratio
+
+
+def test_median_helper_odd_and_even():
+    from api.services.fatigue.core import _median
+
+    # Нечётная длина — центральный элемент; порядок не важен (сортируется внутри).
+    assert _median([3.0, 1.0, 2.0]) == pytest.approx(2.0)
+    # Чётная длина — среднее двух центральных.
+    assert _median([1.0, 2.0, 3.0, 4.0]) == pytest.approx(2.5)
+    # Один элемент.
+    assert _median([7.0]) == pytest.approx(7.0)
+
+
+def test_sigma_floor_uses_median_not_mean():
+    # Пол должен считаться от медианы. Здесь медиана (10) и среднее заметно
+    # расходятся из-за хвоста, но floor привязан к устойчивой медиане.
+    from api.services.fatigue.core import _median, _mean
+
+    series = [10.0] * 20 + [10.0] * 9 + [200.0]
+    assert _median(series) == pytest.approx(10.0)
+    assert _mean(series) > 15.0  # среднее утащено выбросом вверх
+    # readiness_z не падает и выдаёт конечный z (пол не даёт взрыва).
+    result = readiness_z(series, P)
+    assert result.z is not None
+    assert math.isfinite(result.z)
