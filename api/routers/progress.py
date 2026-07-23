@@ -181,9 +181,15 @@ async def get_readiness(
 # из CSV обычно вообще без finished_at.
 MIN_SESSION_MIN = 10
 MAX_SESSION_MIN = 300
-# Минимум сессий, отвечающих гвардам, ниже которого плотность не отдаём вовсе,
-# а не подсовываем клиенту число, посчитанное по одной случайной тренировке.
+# [КОНФИГ] Минимум сессий, отвечающих гвардам, ниже которого плотность не отдаём
+# вовсе, а не подсовываем клиенту число, посчитанное по одной случайной тренировке.
 MIN_SESSIONS_FOR_DENSITY = 3
+# [КОНФИГ] Окно расчёта плотности — всегда 28 дней, независимо от запрошенного
+# окна календаря. Метрики так и называются (*_28d).
+DENSITY_WINDOW_DAYS = 28
+# [КОНФИГ] Верхний предел запрашиваемого окна календаря (недель), чтобы выборка
+# не разрасталась безгранично при клиентском weeks.
+MAX_DISCIPLINE_WEEKS = 53
 
 
 @router.get("/progress/discipline", response_model=DisciplineResponse)
@@ -194,8 +200,18 @@ async def get_discipline(
 ):
     """Календарь дисциплины и плотность тренировок из реальных подходов."""
     now = datetime.now(timezone.utc)
+    # weeks приходит от клиента — клампим, чтобы since не ушёл в будущее (<=0)
+    # и выборка не разрослась безгранично.
+    weeks = max(1, min(weeks, MAX_DISCIPLINE_WEEKS))
     days_count = weeks * 7
     since = now - timedelta(days=days_count - 1)
+
+    # Плотность считается всегда за фиксированные 28 дней. Если запрошенное окно
+    # календаря короче (weeks < 4), гоним запрос по более раннему из двух краёв —
+    # иначе сессии между `since` и 28 днями назад не попали бы в выборку, и
+    # «28-дневная» плотность молча посчиталась бы по неполному периоду.
+    density_window_start = now - timedelta(days=DENSITY_WINDOW_DAYS)
+    query_since = min(since, density_window_start)
 
     rows = (await db.execute(
         select(
@@ -216,7 +232,7 @@ async def get_discipline(
         )
         .where(
             WorkoutSession.app_user_id == current_user.id,
-            WorkoutSession.started_at >= since,
+            WorkoutSession.started_at >= query_since,
             WorkoutSessionSet.is_completed.is_(True),
             WorkoutSessionSet.set_type.in_(["normal", "drop"]),
             WorkoutSessionSet.is_anomalous.is_(False),
@@ -224,12 +240,12 @@ async def get_discipline(
     )).all()
 
     # Дни идут подряд, включая пустые: иначе на клиенте не построить сетку.
+    # Строим ровно запрошенное окно календаря (days_count), а не окно выборки.
     buckets: dict[str, dict] = {}
     for offset in range(days_count):
         key = (since + timedelta(days=offset)).strftime("%Y-%m-%d")
         buckets[key] = {"sets": 0, "sessions": set(), "volume_kg": 0.0}
 
-    density_window_start = now - timedelta(days=28)
     density_sets = 0
     # id сессии -> её длительность в минутах: длительность каждой сессии
     # должна попасть в знаменатель ровно один раз, а не по разу на подход.
