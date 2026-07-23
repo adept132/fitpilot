@@ -70,8 +70,48 @@ def test_round_weight_block_machine_is_always_in_pounds():
 
 def test_round_weight_barbell_wins_over_dumbbell():
     # При нескольких видах оборудования приоритет у штанги (_STEP_PRIORITY).
+    # Дефолтные plate_kg и dumbbell_kg совпадают (2.5), поэтому порядок приоритета
+    # ничего не пинит — передаём steps с РАЗНЫМИ шагами, чтобы исходы различались.
+    #
+    # Штанга (побеждает по _STEP_PRIORITY): шаг plate_kg = 4.
+    #   round(101.0 / 4) * 4 = round(25.25) * 4 = 25 * 4 = 100.0 кг
+    #
+    # Если бы победили гантели: шаг dumbbell_kg = 6.
+    #   round(101.0 / 6) * 6 = round(16.8333...) * 6 = 17 * 6 = 102.0 кг ≠ 100.0
+    #   (проверено: round_weight_for_equipment(101.0, ["dumbbell"], "kg",
+    #    steps={"plate_kg": 4, "dumbbell_kg": 6}) == 102.0)
     assert round_weight_for_equipment(
-        101.0, ["dumbbell", "barbell"], "kg"
+        101.0,
+        ["dumbbell", "barbell"],
+        "kg",
+        steps={"plate_kg": 4, "dumbbell_kg": 6},
+    ) == pytest.approx(100.0)
+
+
+def test_round_weight_lbs_unit_rounds_via_pounds():
+    # Путь unit="lbs" отдельно не проверялся ни одним тестом. Округление идёт
+    # в фунтах (plate_lb = 5 по умолчанию) и переводится обратно в кг.
+    #
+    # 52.0 кг -> фунты: 52.0 * 2.2046226218 = 114.6403763336 lb
+    # round(114.6403763336 / 5) * 5 = round(22.92807526...) * 5 = 23 * 5 = 115 lb
+    # обратно в кг: 115 * 0.45359237 = 52.16312255 -> round(..., 2) = 52.16 кг
+    #
+    # В kg-режиме тот же вес даёт другое число — round_weight_for_equipment(52.0,
+    # ["barbell"], "kg") == 52.5 — значит тест реально дискриминирует lb-путь,
+    # а не случайно совпадает с ним.
+    assert round_weight_for_equipment(52.0, ["barbell"], "lbs") == pytest.approx(
+        52.16, abs=0.01
+    )
+
+
+def test_round_weight_falls_back_when_resolved_step_is_zero():
+    # Защитный фолбэк: если резолвнутый шаг <= 0 (например, кривой steps
+    # override), round_weight_for_equipment подменяет его на (2.5, "kg").
+    # steps={"plate_kg": 0} заставляет _resolve_step вернуть шаг 0 для штанги.
+    #
+    # После фолбэка: round(101.0 / 2.5) * 2.5 = round(40.4) * 2.5 = 40 * 2.5 = 100.0 кг
+    assert round_weight_for_equipment(
+        101.0, ["barbell"], "kg", steps={"plate_kg": 0}
     ) == pytest.approx(100.0)
 
 
