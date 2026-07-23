@@ -109,12 +109,16 @@ class AddWorkoutExerciseRequest(BaseModel):
 
 class AddWorkoutSetRequest(BaseModel):
     set_type: WorkoutSetType = "normal"
-    weight: Decimal | None = Field(default=None, ge=0)
-    reps: int | None = Field(default=None, ge=0)
+    # Верхние границы — защита от переполнения Numeric(8,2), а не оценка
+    # правдоподобности: ею занимается anomaly_guard.
+    weight: Decimal | None = Field(default=None, ge=0, le=2000)
+    reps: int | None = Field(default=None, ge=0, le=1000)
     effort_level: WorkoutEffortLevel | None = None
     notes: str | None = None
     parent_set_id: int | None = Field(default=None, gt=0)
     superset_round: int | None = Field(default=None, gt=0)
+    # Клиент выставляет true, когда пользователь подтвердил подозрительное значение.
+    anomaly_confirmed: bool = False
 
 
 class AddWorkoutSetResponse(BaseModel):
@@ -130,18 +134,23 @@ class AddWorkoutSetResponse(BaseModel):
     parent_set_id: int | None = None
     superset_round: int | None = None
     is_completed: bool
+    is_anomalous: bool = False
     updated_at: datetime
 
 
 class UpdateWorkoutSetRequest(BaseModel):
     set_type: WorkoutSetType | None = None
-    weight: Decimal | None = Field(default=None, ge=0)
-    reps: int | None = Field(default=None, ge=0)
+    # Верхние границы — защита от переполнения Numeric(8,2), а не оценка
+    # правдоподобности: ею занимается anomaly_guard.
+    weight: Decimal | None = Field(default=None, ge=0, le=2000)
+    reps: int | None = Field(default=None, ge=0, le=1000)
     effort_level: WorkoutEffortLevel | None = None
     notes: str | None = None
     parent_set_id: int | None = Field(default=None, gt=0)
     superset_round: int | None = Field(default=None, gt=0)
     is_completed: bool | None = None
+    # Клиент выставляет true, когда пользователь подтвердил подозрительное значение.
+    anomaly_confirmed: bool = False
 
 
 class RepeatWorkoutSetRequest(BaseModel):

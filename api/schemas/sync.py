@@ -23,8 +23,8 @@ class SyncSetSnapshot(BaseModel):
     server_id: int | None = None
     set_number: int
     set_type: WorkoutSetType = "normal"
-    weight: Decimal | None = Field(default=None, ge=0)
-    reps: int | None = Field(default=None, ge=0)
+    weight: Decimal | None = Field(default=None, ge=0, le=2000)
+    reps: int | None = Field(default=None, ge=0, le=1000)
     # effort_level принимаем свободной строкой: набор значений на клиенте и
     # бэкенде исторически расходится ("warmup" vs "warmup_effort"), а синк не
     # место для 422 из-за расхождения справочников.
@@ -35,6 +35,8 @@ class SyncSetSnapshot(BaseModel):
     parent_client_uuid: str | None = None
     superset_round: int | None = None
     is_completed: bool = True
+    # Клиент выставляет true, когда пользователь подтвердил подозрительное значение.
+    anomaly_confirmed: bool = False
     deleted: bool = False
     # Время последней локальной правки — клиент использует его для per-entity LWW
     # при merge после 409. Сервер только сохраняет/возвращает его.

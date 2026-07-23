@@ -9,6 +9,8 @@ from api.deps import get_db
 from api.schemas.supersets import CreateSupersetRequest, ReorderWorkoutStructureRequest
 from api.schemas.workouts import WorkoutSessionDetailResponse, AddWorkoutExerciseRequest, AddWorkoutSetResponse, \
     AddWorkoutSetRequest, UpdateWorkoutSetRequest, RepeatWorkoutSetRequest, AutoprogressionResponse
+from api.services.anomaly_guard import check_set, resolve_is_anomalous
+from api.services.anomaly_stats import load_exercise_stats
 from api.services.app_user_service import get_current_app_user
 from api.services.autoprogression import compute_autoprogression
 from api.services.calculate_exercise_recommendation import calculate_exercise_recommendations
@@ -265,6 +267,17 @@ async def add_set_to_session_exercise(
 
     next_set_number = len(session_exercise.sets) + 1
 
+    stats = await load_exercise_stats(
+        db, current_app_user.id, session_exercise.exercise_id
+    )
+    verdict = check_set(
+        float(payload.weight) if payload.weight is not None else None,
+        payload.reps,
+        payload.set_type or "normal",
+        stats,
+    )
+    is_anomalous = resolve_is_anomalous(verdict, payload.anomaly_confirmed)
+
     new_set = WorkoutSessionSet(
         workout_session_exercise_id=session_exercise.id,
         set_number=next_set_number,
@@ -276,6 +289,7 @@ async def add_set_to_session_exercise(
         parent_set_id=payload.parent_set_id,
         superset_round=payload.superset_round,
         is_completed=True,
+        is_anomalous=is_anomalous,
     )
 
     print(
@@ -419,6 +433,10 @@ async def update_workout_session_set(
 
     update_data = payload.model_dump(exclude_unset=True)
 
+    # anomaly_confirmed — флаг запроса, а не колонка модели. Если оставить его
+    # в update_data, цикл setattr ниже повесит посторонний атрибут на ORM-объект.
+    anomaly_confirmed = bool(update_data.pop("anomaly_confirmed", False))
+
     if "parent_set_id" in update_data and update_data["parent_set_id"] is not None:
         parent_exists = any(s.id == update_data["parent_set_id"] for s in session_exercise.sets)
         if not parent_exists:
@@ -429,6 +447,17 @@ async def update_workout_session_set(
 
     for field_name, value in update_data.items():
         setattr(workout_set, field_name, value)
+
+    stats = await load_exercise_stats(
+        db, current_app_user.id, session_exercise.exercise_id
+    )
+    verdict = check_set(
+        float(workout_set.weight) if workout_set.weight is not None else None,
+        workout_set.reps,
+        workout_set.set_type or "normal",
+        stats,
+    )
+    workout_set.is_anomalous = resolve_is_anomalous(verdict, anomaly_confirmed)
 
     await db.commit()
     await db.refresh(workout_set)

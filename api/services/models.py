@@ -334,6 +334,12 @@ class WorkoutSessionSet(Base):
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     effort_level: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     is_completed: Mapped[bool] = mapped_column(default=True, server_default="true")
+    # Подход с неправдоподобными значениями. Остаётся видимым в истории, но
+    # исключается из автопрогрессии, прогноза, бюджета объёма и усталостной
+    # модели — один жим «500 кг» иначе отравляет аналитику на месяц вперёд.
+    is_anomalous: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     parent_set_id: Mapped[Optional[int]] = mapped_column(ForeignKey("workout_session_sets.id", ondelete="SET NULL"))
     superset_round: Mapped[Optional[int]] = mapped_column()
     updated_at: Mapped[datetime] = mapped_column(

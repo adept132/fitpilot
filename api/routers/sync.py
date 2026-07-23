@@ -17,6 +17,8 @@ from api.schemas.sync import (
     SyncWorkoutSnapshot,
 )
 from api.schemas.workouts import WorkoutSessionDetailResponse
+from api.services.anomaly_guard import check_set, resolve_is_anomalous
+from api.services.anomaly_stats import load_exercise_stats
 from api.services.app_user_service import get_current_app_user
 from api.services.models import (
     AppUser,
@@ -247,6 +249,13 @@ async def _apply_snapshot(
         existing_sets_by_id = {s.id: s for s in loaded_sets}
         set_by_client: dict[str, WorkoutSessionSet] = {}
 
+        # Статистика по упражнению считается один раз на всю пачку подходов
+        # снапшота, а не на каждый подход — иначе на большом снимке это N
+        # лишних запросов к БД.
+        exercise_stats = await load_exercise_stats(
+            db, app_user_id, exercise.exercise_id
+        )
+
         # Первый проход: создать/обновить подходы без разрешения parent.
         for set_snap in ex_snap.sets:
             workout_set = existing_sets.get(set_snap.client_uuid)
@@ -276,6 +285,19 @@ async def _apply_snapshot(
             workout_set.superset_round = set_snap.superset_round
             workout_set.is_completed = set_snap.is_completed
             workout_set.parent_set_id = None  # разрешим во втором проходе
+
+            # Синк только помечает аномалию — не поднимаем HTTPException ни при
+            # каком вердикте, иначе один кривой подход развалит весь снимок
+            # тренировки (см. api/schemas/sync.py:28).
+            verdict = check_set(
+                float(set_snap.weight) if set_snap.weight is not None else None,
+                set_snap.reps,
+                set_snap.set_type or "normal",
+                exercise_stats,
+            )
+            workout_set.is_anomalous = resolve_is_anomalous(
+                verdict, set_snap.anomaly_confirmed
+            )
 
             await db.flush()
             id_map[set_snap.client_uuid] = workout_set.id
