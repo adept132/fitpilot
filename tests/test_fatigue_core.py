@@ -246,3 +246,20 @@ def test_progression_on_empty_history_is_safe():
     result = ewma_progression([], P)
     assert result.ratio is None
     assert result.flag == "ok"
+
+
+def test_chronic_window_excludes_the_acute_tail():
+    # Несущее свойство расцепления (§5): хроническое окно НЕ видит спайк в
+    # последних tau_acute днях, иначе вернулся бы ACWR-артефакт сопряжения
+    # (острое окно втекает в хроническое). Спайк в хвосте обязан оставить
+    # chronic_level неизменным, но поднять острый сигнал (ratio).
+    flat = [10.0] * 60
+    spiked_tail = [10.0] * 53 + [1000.0] * 7
+    base = ewma_progression(flat, P)
+    spike = ewma_progression(spiked_tail, P)
+    # Хроника считается по daily[:-tau_acute], хвост в неё не входит -> не меняется.
+    assert spike.chronic_level == pytest.approx(base.chronic_level)
+    # А острый EWMA хвост видит -> ratio растёт. При сопряжённой (наивной)
+    # реализации, где хроника берёт весь ряд, spike.chronic вырос бы и первая
+    # ассерция упала бы.
+    assert spike.ratio > base.ratio
