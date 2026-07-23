@@ -52,6 +52,7 @@ class SyncExerciseSnapshot(BaseModel):
     superset_group: str | None = None
     notes: str | None = None
     recommended_rir: int | None = None
+    recommended_weight: Decimal | None = Field(default=None, ge=0, le=2000)
     recommended_rep_min: int | None = None
     recommended_rep_max: int | None = None
     target_sets: int | None = None

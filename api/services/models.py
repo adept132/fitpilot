@@ -306,6 +306,13 @@ class WorkoutSessionExercise(Base):
     order_index: Mapped[int] = mapped_column(nullable=False)
     superset_group: Mapped[Optional[str]] = mapped_column(String(64))
     recommended_rir: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Предписанный вес. Вместе с фактическими подходами даёт объективную
+    # целевую переменную «предписано против сделано» — она понадобится для
+    # персонализации tau и профилей раздачи (a_sys/a_mus). В отличие от
+    # субъективного опросника, она не страдает циркулярностью.
+    recommended_weight: Mapped[Optional[float]] = mapped_column(
+        Numeric(8, 2), nullable=True
+    )
     recommended_rep_min: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     recommended_rep_max: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text)
@@ -404,6 +411,36 @@ class UserAnthropometry(Base):
     # updated_at больше не нужен, так как мы не обновляем эту строку, а пишем новую
 
     app_user: Mapped["AppUser"] = relationship("AppUser", back_populates="anthropometry_history")
+
+
+class UserObservation(Base):
+    """Append-only журнал размеченных наблюдений для будущей персонализации.
+
+    Сейчас таблица пустая и ничем не заполняется: смысл в том, чтобы схема
+    была готова к моменту, когда появится утренний чек-ин и логирование
+    конфаундеров. Разметку за прошедшие месяцы задним числом не собрать —
+    код ретрофитится, история нет.
+
+    sRPE сюда НЕ дублируется: он строго привязан к сессии и живёт в
+    WorkoutSession.session_rpe, откуда участвует в sync-снапшоте.
+    """
+    __tablename__ = 'user_observations'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False, index=True
+    )
+    # morning_readiness | soreness | sleep | stress | hrv | ...
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    value: Mapped[float] = mapped_column(nullable=False)
+    # Свободный уточнитель: для soreness — мышечная группа, для hrv — устройство.
+    subject: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default='manual', server_default='manual')
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )
+    # Идемпотентный ключ offline-записи.
+    client_uuid: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
 
 
 class UserGoal(Base):

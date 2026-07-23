@@ -235,6 +235,7 @@ async def _apply_snapshot(
         exercise.superset_group = ex_snap.superset_group
         exercise.notes = ex_snap.notes
         exercise.recommended_rir = ex_snap.recommended_rir
+        exercise.recommended_weight = ex_snap.recommended_weight
         exercise.recommended_rep_min = ex_snap.recommended_rep_min
         exercise.recommended_rep_max = ex_snap.recommended_rep_max
         exercise.target_sets = ex_snap.target_sets
