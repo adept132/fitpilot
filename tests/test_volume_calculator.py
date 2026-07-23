@@ -17,9 +17,30 @@ def test_budget_is_produced_for_every_level(level):
 
 @pytest.mark.parametrize("level", ["beginner", "intermediate", "advanced"])
 def test_total_respects_systemic_cap(level):
+    # ВНИМАНИЕ: при пустом фокусе базовые таблицы всех уровней и так лежат под
+    # кэпом (59/84/111 против 70/95/120), поэтому ветка обрезки здесь НЕ
+    # исполняется — тест фиксирует лишь этот факт конфигурации, а не работу
+    # обрезки. Саму обрезку пинит отдельный тест ниже.
     budget = calculate_volume_budget(level, [])
     cap = EXPERIENCE_CONSTRAINTS[level]["systemic_cap"]
     assert budget.meta.total_weekly_sets <= cap
+
+
+def test_total_is_trimmed_to_cap_when_focus_pushes_over():
+    # Дискриминирующий тест на сам механизм обрезки по systemic_cap. Пять
+    # фокусных мышц на advanced поднимают сумму выше кэпа (120), и функция
+    # обязана урезать её ровно до кэпа. Balanced-сумма advanced = 111, так что
+    # результат 120 достигается именно прибавкой фокусов с последующей обрезкой,
+    # а не совпадением. Если удалить блок «if total_sets > systemic_cap», сумма
+    # осталась бы выше 120 и обе ассерции упали бы.
+    cap = EXPERIENCE_CONSTRAINTS["advanced"]["systemic_cap"]
+    budget = calculate_volume_budget(
+        "advanced", ["chest", "biceps", "triceps", "side_delts", "quads"]
+    )
+    assert budget.meta.total_weekly_sets == cap
+    assert budget.meta.total_weekly_sets > calculate_volume_budget(
+        "advanced", []
+    ).meta.total_weekly_sets
 
 
 def test_no_focus_means_balanced_distribution():
