@@ -165,15 +165,30 @@ async def compute_readiness(
             muscular_events.setdefault(muscle, []).append((impulse.at, value))
 
     window = p.window_days
+
+    # Длина ряда для z-оценки должна отражать РЕАЛЬНУЮ длину истории, а не всегда
+    # быть window_days. Иначе у новичка с парой тренировок ряд из ~33 нулей + 2
+    # реальных дней даёт ложный z, а cold-start guard в readiness_z (len ряда <
+    # cold_start_days) не срабатывает никогда, т.к. len всегда == window_days.
+    # Считаем охват от самого раннего импульса и обрезаем по нему — короткая
+    # история честно уходит в band "unknown", и ветка confidence=cold_start ниже
+    # (systemic.z is None) снова становится достижимой.
+    if loaded.impulses:
+        earliest = min(imp.at for imp in loaded.impulses)
+        history_days = (now.date() - earliest.date()).days + 1
+        series_days = max(1, min(window, history_days))
+    else:
+        series_days = window
+
     systemic = core.readiness_z(
-        _daily_series(systemic_events, p.tau_systemic_h, now, window), p
+        _daily_series(systemic_events, p.tau_systemic_h, now, series_days), p
     )
     mechanical = core.readiness_z(
-        _daily_series(mechanical_events, p.tau_mechanical_h, now, window), p
+        _daily_series(mechanical_events, p.tau_mechanical_h, now, series_days), p
     )
     muscular = {
         muscle: core.readiness_z(
-            _daily_series(events, p.tau_muscular_h, now, window), p
+            _daily_series(events, p.tau_muscular_h, now, series_days), p
         )
         for muscle, events in sorted(muscular_events.items())
     }
