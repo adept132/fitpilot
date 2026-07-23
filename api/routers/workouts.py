@@ -554,6 +554,10 @@ async def repeat_workout_session_set(
         parent_set_id=None,
         superset_round=source_set.superset_round,
         is_completed=True,
+        # Повтор наследует пометку исходного подхода: пересчитывать вердикт
+        # заново нельзя — это стёрло бы подтверждение, которое пользователь
+        # уже дал по оригиналу.
+        is_anomalous=source_set.is_anomalous,
     )
 
     db.add(repeated_set)
