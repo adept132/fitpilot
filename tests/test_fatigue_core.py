@@ -4,6 +4,7 @@ Golden-master взят из сквозного примера §8 спеки у�
 RIR 2. Спека даёт L_set ~= 10.1 AU и механику ~= 650 кг*повт.
 """
 
+import math
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -139,3 +140,109 @@ def test_exercise_without_secondary_muscles_loads_only_main():
 def test_unknown_tier_falls_back_without_crashing():
     loads = split_to_compartments(_squat_impulse(fatigue_tier=99), P)
     assert loads.systemic > 0
+
+
+# --- Распад ---
+
+from api.services.fatigue.core import (  # noqa: E402
+    Progression,
+    Readiness,
+    decay,
+    ewma_progression,
+    readiness_z,
+)
+
+
+def test_decay_of_empty_history_is_zero():
+    assert decay([], 48.0, T0) == 0.0
+
+
+def test_fresh_impulse_is_not_decayed():
+    assert decay([(T0, 100.0)], 48.0, T0) == pytest.approx(100.0)
+
+
+def test_one_tau_leaves_one_over_e():
+    later = T0 + timedelta(hours=48)
+    assert decay([(T0, 100.0)], 48.0, later) == pytest.approx(100.0 / math.e, abs=0.01)
+
+
+def test_decay_is_additive_over_impulses():
+    a = decay([(T0, 100.0)], 48.0, T0)
+    b = decay([(T0, 50.0)], 48.0, T0)
+    both = decay([(T0, 100.0), (T0, 50.0)], 48.0, T0)
+    assert both == pytest.approx(a + b)
+
+
+def test_more_load_never_reduces_fatigue():
+    """Safety-рельс §6.1: монотонность."""
+    base = [(T0, 100.0)]
+    more = base + [(T0 + timedelta(hours=1), 10.0)]
+    now = T0 + timedelta(hours=24)
+    assert decay(more, 48.0, now) >= decay(base, 48.0, now)
+
+
+def test_future_impulses_are_ignored():
+    # Часы клиента могут уехать вперёд — не даём этому раздуть усталость.
+    future = T0 + timedelta(days=3)
+    assert decay([(future, 100.0)], 48.0, T0) == 0.0
+
+
+# --- Готовность ---
+
+def test_cold_start_hides_z():
+    short = [10.0] * (P.cold_start_days - 1)
+    result = readiness_z(short, P)
+    assert result.z is None
+    assert result.band == "unknown"
+
+
+def test_flat_history_gives_neutral_band():
+    flat = [10.0] * 30
+    result = readiness_z(flat, P)
+    assert result.z is not None
+    assert result.band == "neutral"
+
+
+def test_sigma_floor_prevents_z_explosion():
+    # Почти нулевая дисперсия: без пола z ушёл бы в сотни.
+    series = [10.0] * 29 + [10.2]
+    result = readiness_z(series, P)
+    assert abs(result.z) < 5
+
+
+def test_high_recent_load_reads_as_fatigued():
+    series = [5.0] * 29 + [60.0]
+    assert readiness_z(series, P).band == "fatigued"
+
+
+def test_low_recent_load_reads_as_fresh():
+    series = [50.0] * 29 + [1.0]
+    assert readiness_z(series, P).band == "fresh"
+
+
+# --- Прогрессия ---
+
+def test_progression_of_steady_load_is_about_one():
+    steady = [10.0] * 60
+    result = ewma_progression(steady, P)
+    assert result.ratio == pytest.approx(1.0, abs=0.1)
+    assert result.flag == "ok"
+
+
+def test_sharp_rise_is_flagged():
+    ramp = [5.0] * 45 + [40.0] * 15
+    result = ewma_progression(ramp, P)
+    assert result.ratio > P.sharp_rise_ratio
+    assert result.flag == "sharp_rise"
+
+
+def test_progression_reports_week_over_week_change():
+    series = [10.0] * 53 + [20.0] * 7
+    result = ewma_progression(series, P)
+    assert result.wow_change_pct == pytest.approx(100.0, abs=1.0)
+
+
+def test_progression_on_empty_history_is_safe():
+    result = ewma_progression([], P)
+    assert result.ratio is None
+    assert result.flag == "ok"
