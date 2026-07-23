@@ -1,0 +1,107 @@
+"""Характеризационные тесты ядра автопрогрессии (api/services/autoprogression.py).
+
+Фиксируют текущее поведение перед тем, как на эти функции ляжет усталостная
+модель. Реализацию не меняем: падение теста — повод разобраться, а не подогнать.
+"""
+
+import pytest
+
+from api.services.autoprogression import (
+    DEFAULT_RIR,
+    effort_to_rir,
+    progression_factor_for,
+    round_weight_for_equipment,
+    set_target_value,
+    weight_for_target,
+)
+
+
+@pytest.mark.parametrize(
+    "level,expected",
+    [
+        ("warmup", 4),
+        ("warmup_effort", 4),
+        ("light", 3),
+        ("easy", 3),
+        ("medium", 2),
+        ("prefailure", 1),
+        ("failure", 0),
+    ],
+)
+def test_effort_to_rir_known_levels(level, expected):
+    assert effort_to_rir(level) == expected
+
+
+def test_effort_to_rir_is_case_and_space_insensitive():
+    assert effort_to_rir("  FAILURE ") == 0
+
+
+@pytest.mark.parametrize("level", [None, "", "unknown"])
+def test_effort_to_rir_falls_back_to_default(level):
+    assert effort_to_rir(level) == DEFAULT_RIR
+
+
+def test_set_target_value_folds_rir_into_epley():
+    # 100 * (1 + (10 + 2) / 30) = 140.0
+    assert set_target_value(100.0, 10, 2) == pytest.approx(140.0)
+
+
+def test_weight_for_target_is_inverse_of_set_target_value():
+    for weight, reps, rir in [(100.0, 10, 2), (60.0, 5, 0), (42.5, 12, 3)]:
+        target = set_target_value(weight, reps, rir)
+        assert weight_for_target(target, reps, rir) == pytest.approx(weight)
+
+
+def test_round_weight_snaps_barbell_to_plate_step():
+    assert round_weight_for_equipment(101.0, ["barbell"], "kg") == pytest.approx(100.0)
+
+
+def test_round_weight_never_returns_below_one_step():
+    # Округление вниз дало бы 0 — возвращаем минимум один шаг.
+    assert round_weight_for_equipment(1.0, ["barbell"], "kg") == pytest.approx(2.5)
+
+
+def test_round_weight_block_machine_is_always_in_pounds():
+    # Блочный тренажёр считается в фунтах с шагом 10 и возвращается в кг.
+    assert round_weight_for_equipment(100.0, ["block_machine"], "kg") == pytest.approx(
+        99.79, abs=0.01
+    )
+
+
+def test_round_weight_barbell_wins_over_dumbbell():
+    # При нескольких видах оборудования приоритет у штанги (_STEP_PRIORITY).
+    assert round_weight_for_equipment(
+        101.0, ["dumbbell", "barbell"], "kg"
+    ) == pytest.approx(100.0)
+
+
+def test_round_weight_unknown_equipment_uses_default_step():
+    assert round_weight_for_equipment(101.0, ["bodyweight"], "kg") == pytest.approx(
+        100.0
+    )
+
+
+@pytest.mark.parametrize(
+    "level,expected",
+    [("beginner", 1.03), ("intermediate", 1.02), ("advanced", 1.01)],
+)
+def test_progression_factor_by_level(level, expected):
+    assert progression_factor_for(level, None) == pytest.approx(expected)
+
+
+def test_progression_factor_settings_override_wins():
+    assert progression_factor_for("advanced", {"progression_factor": 1.05}) == pytest.approx(
+        1.05
+    )
+
+
+@pytest.mark.parametrize("raw", ["не число", None, -1, 0])
+def test_progression_factor_ignores_broken_override(raw):
+    # Битый или неположительный override игнорируется, берётся уровень.
+    assert progression_factor_for("advanced", {"progression_factor": raw}) == pytest.approx(
+        1.01
+    )
+
+
+def test_progression_factor_unknown_level_uses_fallback():
+    assert progression_factor_for("alien", None) == pytest.approx(1.03)
