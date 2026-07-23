@@ -46,13 +46,18 @@ def test_absolute_rules_work_without_history():
 
 
 def test_e1rm_jump_is_suspicious():
-    # e1RM = 250 * (1 + 12/30) = 350 > 1.5 * 140 = 210.
+    # e1RM = 250 * (1 + 10/30) = 333.3 > 1.5 * 140 = 210.
     assert check_set(250.0, 10, "normal", RICH_HISTORY).level == "suspicious"
 
 
 def test_weight_far_above_median_is_suspicious():
-    # 350 > 3 * 100, при этом e1RM-правило тоже сработает — важно, что не "ok".
-    assert check_set(350.0, 1, "normal", RICH_HISTORY).level == "suspicious"
+    # Изолируем медианное правило: e1RM подхода 320 * (1 + 1/30) = 330.7 не
+    # дотягивает до 1.5 * 400 = 600, поэтому первое правило молчит, а
+    # 320 > 3 * 100 — срабатывает именно проверка по медиане.
+    stats = ExerciseStats(sessions=10, best_e1rm=400.0, median_weight_kg=100.0)
+    verdict = check_set(320.0, 1, "normal", stats)
+    assert verdict.level == "suspicious"
+    assert "обычного" in verdict.reason
 
 
 def test_thin_history_disables_relative_rules():
