@@ -413,7 +413,8 @@ class ExerciseSearchService:
             workout_date = finished_at.date()
 
             # Собираем только успешно выполненные рабочие подходы
-            completed_sets = [s for s in se.sets if s.is_completed and s.weight is not None and s.reps is not None]
+            # not s.is_anomalous: аномальные подходы не искажают график e1RM и прогноз (спека §5.3).
+            completed_sets = [s for s in se.sets if s.is_completed and not s.is_anomalous and s.weight is not None and s.reps is not None]
             if completed_sets:
                 daily_data[workout_date].extend(completed_sets)
 

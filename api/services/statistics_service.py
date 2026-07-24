@@ -27,6 +27,8 @@ async def get_weekly_performed_sets(db: AsyncSession, user_id: int) -> dict:
             WorkoutSessionSet.is_completed == True,
             # Важнейший фильтр: считаем только рабочие подходы и дропсеты, игнорируем разминку
             WorkoutSessionSet.set_type.in_(["normal", "drop"]),
+            # Аномальные подходы не учитываются в бюджете объёма (спека §5.3)
+            WorkoutSessionSet.is_anomalous.is_(False),
             WorkoutSessionSet.updated_at >= start_of_week
         )
         .group_by(Exercise.main_muscle_group)

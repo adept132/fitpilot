@@ -166,6 +166,10 @@ async def get_last_performance_basis_sets(
             continue
         if float(s.weight) <= 0 or int(s.reps) <= 0:
             continue
+        # Аномальные подходы не участвуют в автопрогрессии (спека §5.3):
+        # один жим «700 кг» иначе задрал бы e1RM и рекомендованный вес.
+        if s.is_anomalous:
+            continue
         basis.append(s)
 
     return basis

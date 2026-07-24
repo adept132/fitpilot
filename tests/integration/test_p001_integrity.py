@@ -18,6 +18,8 @@ import pytest
 from sqlalchemy import select
 
 from api.services.anomaly_stats import load_exercise_stats
+from api.services.autoprogression import get_last_performance_basis_sets
+from api.services.exercise_search_service import ExerciseSearchService
 from api.services.models import (
     Exercise,
     WorkoutSession,
@@ -428,3 +430,59 @@ async def test_readiness_cold_start_with_short_history(client, db, test_user):
 
     assert body["confidence"] == "cold_start"
     assert body["systemic"]["z"] is None
+
+
+# --- G. Аномальные подходы исключены из автопрогрессии и аналитики (спека §5.3) --
+
+
+async def test_autoprogression_basis_sets_excludes_anomalous(db, test_user):
+    """get_last_performance_basis_sets не должна отдавать аномальный подход как
+    базу для автопрогрессии: один жим «700 кг» иначе задрал бы e1RM и
+    рекомендованный вес на следующей тренировке."""
+    exercise = await _get_catalog_exercise(db)
+
+    await _make_finished_session_with_sets(
+        db, test_user.id, exercise.id,
+        [
+            {"weight": 100, "reps": 10},
+            {"weight": ABSURD_BUT_SCHEMA_VALID_WEIGHT, "reps": 5, "is_anomalous": True},
+        ],
+    )
+    await db.commit()
+
+    basis = await get_last_performance_basis_sets(db, test_user.id, exercise.id)
+
+    assert len(basis) == 1
+    assert float(basis[0].weight) == pytest.approx(100.0)
+    assert all(not s.is_anomalous for s in basis)
+
+
+async def test_analytics_history_excludes_anomalous(db, test_user):
+    """get_exercise_analytics_history не должна включать аномальные подходы в
+    график e1RM/объёма (спека §5.3): без исключения объём и e1rm за день были бы
+    искажены абсурдным весом."""
+    exercise = await _get_catalog_exercise(db)
+
+    session = await _make_finished_session_with_sets(
+        db, test_user.id, exercise.id,
+        [
+            {"weight": 100, "reps": 10},
+            {"weight": ABSURD_BUT_SCHEMA_VALID_WEIGHT, "reps": 5, "is_anomalous": True},
+        ],
+    )
+    session.finished_at = datetime.now(timezone.utc)
+    await db.commit()
+
+    history = await ExerciseSearchService.get_exercise_analytics_history(
+        db, test_user.id, exercise.id
+    )
+
+    assert history is not None
+    assert len(history["history"]) == 1
+    day = history["history"][0]
+    # Только нормальный подход (100кг х 10) должен попасть в дневную сводку.
+    assert day["sets"] == [{"weight": 100, "reps": 10}]
+    # e1rm = 100 * (1 + 10/30) = 133.3; если бы аномалия не исключалась, e1rm
+    # ушёл бы к абсурдному весу (700 кг).
+    assert day["e1rm"] == pytest.approx(133.3)
+    assert day["volume"] == pytest.approx(1000.0)
