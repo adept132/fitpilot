@@ -93,6 +93,8 @@ class WorkoutSessionDetailResponse(BaseModel):
     periodization_week: int | None = None
     items: list[dict] = []
     notes: str | None = None
+    # Субъективная тяжесть сессии по шкале Борга CR10 (0-10).
+    session_rpe: float | None = None
     volume_targets: Optional[Dict[str, MuscleVolumeTarget]] = None
     started_at: datetime
     finished_at: datetime | None = None

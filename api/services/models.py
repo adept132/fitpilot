@@ -278,6 +278,14 @@ class WorkoutSession(Base):
                                                                   nullable=True)
     volume_targets = Column(JSONB, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Субъективная тяжесть всей сессии по шкале Борга CR10 (0-10).
+    # Самый универсальный измеритель внутренней нагрузки: работает для любой
+    # модальности и нужен, чтобы позже свести зал с кардио в одну шкалу.
+    session_rpe: Mapped[Optional[float]] = mapped_column(nullable=True)
+    session_rpe_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(

@@ -73,6 +73,9 @@ class SyncWorkoutSnapshot(BaseModel):
     split_day_id: uuid.UUID | None = None
     plan_id: int | None = None
     notes: str | None = None
+    # Субъективная тяжесть сессии по шкале Борга CR10 (0-10); заполняется позже,
+    # после завершения тренировки, поэтому опциональна и в снапшоте.
+    session_rpe: float | None = Field(default=None, ge=0, le=10)
     volume_targets: dict | None = None
     started_at: datetime
     finished_at: datetime | None = None

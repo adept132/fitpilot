@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import exists, func, or_, select, text
@@ -192,6 +192,12 @@ async def _apply_snapshot(
     workout.split_day_id = payload.split_day_id
     workout.plan_id = payload.plan_id
     workout.notes = payload.notes
+    # sRPE проставляется клиентом отдельно от остальных скалярных полей: стампим
+    # session_rpe_at только когда значение реально пришло и отличается от
+    # сохранённого, чтобы не тереть метку времени повторной синхронизацией.
+    if payload.session_rpe is not None and workout.session_rpe != payload.session_rpe:
+        workout.session_rpe = payload.session_rpe
+        workout.session_rpe_at = datetime.now(timezone.utc)
     workout.volume_targets = payload.volume_targets
     workout.started_at = payload.started_at
     workout.finished_at = payload.finished_at
