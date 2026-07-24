@@ -186,13 +186,34 @@ async def add_exercise_to_workout(
         superset_group=payload.superset_group,
         notes=payload.notes,
         # ДОБАВЛЯЕМ СНИМКИ
-        recommended_rir=rec_data.get("rir"),
-        recommended_rep_min=rec_data.get("rmin"),
-        recommended_rep_max=rec_data.get("rmax"),
+        # (фикс несовпадения ключей: calculate_exercise_recommendations возвращает
+        # "recommended_rir"/"recommended_rep_min"/"recommended_rep_max", а не "rir"/"rmin"/"rmax" —
+        # из-за этого поля всегда были null, и автопрогрессия ниже не имела rep_candidates)
+        recommended_rir=rec_data.get("recommended_rir"),
+        recommended_rep_min=rec_data.get("recommended_rep_min"),
+        recommended_rep_max=rec_data.get("recommended_rep_max"),
     )
 
     db.add(session_exercise)
     await db.flush()
+
+    # Рекомендованный вес заполняем при добавлении упражнения, чтобы накапливать
+    # объективную метку «предписано против сделано» (см. spec §8.3).
+    profile_result = await db.execute(
+        select(AppUserProfile).where(AppUserProfile.app_user_id == current_app_user.id)
+    )
+    profile = profile_result.scalars().first()
+    experience_level = profile.experience_level if profile else None
+    settings = profile.settings if profile else None
+
+    # exercise уже загружен выше — присваиваем явно, чтобы compute_autoprogression
+    # не пытался сделать ленивую подгрузку session_exercise.exercise (запрещено в async SQLAlchemy).
+    session_exercise.exercise = exercise
+
+    auto = await compute_autoprogression(
+        db, session_exercise, current_app_user.id, experience_level, settings
+    )
+    session_exercise.recommended_weight = auto.get("target_weight")
 
     await db.commit()
 

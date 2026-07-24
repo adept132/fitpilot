@@ -76,6 +76,19 @@ async def _make_finished_session_with_sets(db, user_id, exercise_id, sets_spec, 
     return session
 
 
+async def _make_active_session(db, user_id):
+    """Активная сессия без упражнений — для теста POST /workouts/{id}/exercises."""
+    session = WorkoutSession(
+        app_user_id=user_id,
+        source="free",
+        status="active",
+        started_at=datetime.now(timezone.utc),
+    )
+    db.add(session)
+    await db.flush()
+    return session
+
+
 async def _make_active_session_with_exercise(db, user_id, exercise_id):
     """Создаёт активную (незавершённую) сессию с одним упражнением без подходов —
     ровно то, что нужно эндпоинтам add-set/update-set."""
@@ -486,3 +499,75 @@ async def test_analytics_history_excludes_anomalous(db, test_user):
     # ушёл бы к абсурдному весу (700 кг).
     assert day["e1rm"] == pytest.approx(133.3)
     assert day["volume"] == pytest.approx(1000.0)
+
+
+# --- H. recommended_weight заполняется при добавлении упражнения в сессию (F1) --
+
+
+async def test_add_exercise_populates_recommended_weight_with_basis(client, db, test_user):
+    """POST /workouts/{id}/exercises обязан рассчитать и сохранить
+    recommended_weight, если у пользователя уже есть завершённая тренировка с
+    этим упражнением (база для автопрогрессии)."""
+    exercise = await _get_catalog_exercise(db)
+
+    # Завершённая сессия с рабочими подходами — база для автопрогрессии.
+    await _make_finished_session_with_sets(
+        db, test_user.id, exercise.id,
+        [
+            {"weight": 100, "reps": 10},
+            {"weight": 105, "reps": 8},
+        ],
+    )
+
+    workout = await _make_active_session(db, test_user.id)
+    workout_id = workout.id
+    await db.commit()
+
+    resp = await client.post(
+        f"/workouts/{workout_id}/exercises",
+        json={"exercise_id": exercise.id},
+    )
+    assert resp.status_code == 200, resp.text
+
+    session_exercise = (
+        await db.execute(
+            select(WorkoutSessionExercise).where(
+                WorkoutSessionExercise.workout_session_id == workout_id,
+                WorkoutSessionExercise.exercise_id == exercise.id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    assert session_exercise is not None
+    assert session_exercise.recommended_weight is not None
+    # Правдоподобный вес: не ноль/отрицательный и в разумных пределах от базы (100-105 кг).
+    assert 0 < float(session_exercise.recommended_weight) < 500
+
+
+async def test_add_exercise_recommended_weight_null_without_basis(client, db, test_user):
+    """Без предыдущей завершённой тренировки с этим упражнением базы для
+    автопрогрессии нет — recommended_weight обязан остаться null (не 0 и не
+    выдуманное значение)."""
+    exercise = await _get_catalog_exercise(db)
+
+    workout = await _make_active_session(db, test_user.id)
+    workout_id = workout.id
+    await db.commit()
+
+    resp = await client.post(
+        f"/workouts/{workout_id}/exercises",
+        json={"exercise_id": exercise.id},
+    )
+    assert resp.status_code == 200, resp.text
+
+    session_exercise = (
+        await db.execute(
+            select(WorkoutSessionExercise).where(
+                WorkoutSessionExercise.workout_session_id == workout_id,
+                WorkoutSessionExercise.exercise_id == exercise.id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    assert session_exercise is not None
+    assert session_exercise.recommended_weight is None
