@@ -353,9 +353,20 @@ async def test_discipline_density_guards(client, db, test_user):
     assert resp.status_code == 200, resp.text
     body = resp.json()
 
-    # Календарь покрывает ровно запрошенное окно (13 * 7 дней), включая пустые.
-    assert len(body["days"]) == 13 * 7
-    assert any(day["sets"] == 0 for day in body["days"])
+    # Календарь покрывает запрошенное окно (13 * 7 дней), включая пустые, плюс
+    # добор назад до понедельника: клиентская heatmap рисует колонками по неделям,
+    # и окно, начатое с середины недели, оставляло бы дыры в первой колонке.
+    days = body["days"]
+    assert 13 * 7 <= len(days) <= 13 * 7 + 6
+    # Первый день окна — всегда понедельник (weekday() == 0).
+    first_day = datetime.strptime(days[0]["date"], "%Y-%m-%d")
+    assert first_day.weekday() == 0, f"окно начинается не с понедельника: {days[0]['date']}"
+    # Дни идут подряд, без пропусков.
+    for i in range(1, len(days)):
+        prev = datetime.strptime(days[i - 1]["date"], "%Y-%m-%d")
+        cur = datetime.strptime(days[i]["date"], "%Y-%m-%d")
+        assert (cur - prev).days == 1, f"разрыв в календаре: {days[i-1]['date']} -> {days[i]['date']}"
+    assert any(day["sets"] == 0 for day in days)
 
     density = body["density"]
     # Только 3 правдоподобные сессии участвуют — не 5.
