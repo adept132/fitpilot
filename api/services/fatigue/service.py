@@ -21,6 +21,7 @@ from api.services.models import (
     WorkoutSessionExercise,
     WorkoutSessionSet,
 )
+from api.services.muscle_keys import to_system_key
 
 CONFIDENCE_COLD_START = "cold_start"
 CONFIDENCE_LOW = "low"
@@ -101,14 +102,27 @@ async def _load(
             out.labeled += 1
         seen_sessions[row.id] = bool(row.import_source)
 
+        # Exercise.main_muscle_group хранится по-русски («Грудь»), а наружу
+        # отсеки обязаны называться системными ключами («chest»): по ним клиент
+        # раскрашивает карту тела и подписывает группы. Без нормализации ключи
+        # приходили русскими, клиентский маппинг не находил совпадений и вся
+        # карта оставалась серой. to_system_key — единственный мост RU↔EN.
+        # Нераспознанное имя (напр. «Предплечья», которого нет в системном
+        # наборе) оставляем как есть: потерять группу хуже, чем показать её
+        # исходным именем.
+        main_muscle = to_system_key(row.main_muscle_group) or row.main_muscle_group
+        secondary = tuple(
+            to_system_key(m) or m for m in (row.secondary_muscle_groups or ()) if m
+        )
+
         out.impulses.append(
             core.SetImpulse(
                 at=row.started_at,
                 weight_kg=float(row.weight),
                 reps=int(row.reps),
                 rir=effort_to_rir(row.effort_level),
-                main_muscle=row.main_muscle_group,
-                secondary_muscles=tuple(row.secondary_muscle_groups or ()),
+                main_muscle=main_muscle,
+                secondary_muscles=secondary,
                 fatigue_tier=int(row.fatigue_tier or 2),
             )
         )

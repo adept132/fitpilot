@@ -582,3 +582,47 @@ async def test_add_exercise_recommended_weight_null_without_basis(client, db, te
 
     assert session_exercise is not None
     assert session_exercise.recommended_weight is None
+
+
+# ---------------------------------------------------------------------------
+# I. Ключи мышц в readiness — системные (англ.), а не сырые русские из БД
+# ---------------------------------------------------------------------------
+
+
+async def test_readiness_muscle_keys_are_system_keys_not_russian(db, test_user):
+    """Exercise.main_muscle_group хранится по-русски, но наружу отсеки обязаны
+    называться системными ключами: по ним клиент красит карту тела.
+
+    Регрессия: раньше ключи уезжали русскими («Грудь» вместо «chest»), клиентский
+    маппинг не находил совпадений и вся карта оставалась серой.
+    """
+    from api.services.fatigue.service import compute_readiness
+    from api.services.muscle_keys import to_system_key
+
+    # Берём упражнение с распознаваемой системным ключом мышцей.
+    exercises = (await db.execute(select(Exercise).limit(200))).scalars().all()
+    exercise = next(
+        (e for e in exercises if to_system_key(e.main_muscle_group) is not None),
+        None,
+    )
+    assert exercise is not None, "в справочнике нет упражнения с известной мышцей"
+    expected_key = to_system_key(exercise.main_muscle_group)
+
+    await _make_finished_session_with_sets(
+        db,
+        test_user.id,
+        exercise.id,
+        [{"weight": 100, "reps": 8}, {"weight": 100, "reps": 8}],
+    )
+    await db.commit()
+
+    report = await compute_readiness(db, test_user.id)
+
+    assert report.muscular, "модель не вернула ни одной мышечной группы"
+    # Главное: ключ — системный, и сырое русское имя среди ключей не встречается.
+    assert expected_key in report.muscular, (
+        f"ожидали системный ключ {expected_key!r}, получили {list(report.muscular)}"
+    )
+    assert exercise.main_muscle_group not in report.muscular, (
+        f"сырое русское имя {exercise.main_muscle_group!r} просочилось в ключи"
+    )
