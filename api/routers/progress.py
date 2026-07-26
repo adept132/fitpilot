@@ -154,7 +154,12 @@ async def get_readiness(
     report = await compute_readiness(db, current_user.id)
 
     def band(r) -> ReadinessBand:
-        return ReadinessBand(z=r.z, band=r.band)
+        return ReadinessBand(
+            z=r.z,
+            band=r.band,
+            recovery_hours=r.recovery_hours,
+            days_since_load=r.days_since_load,
+        )
 
     return ReadinessResponse(
         model_version=report.model_version,

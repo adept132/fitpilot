@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -141,6 +141,18 @@ def _daily_bins(events: list[Event], now: datetime, days: int) -> list[float]:
     return bins
 
 
+def _days_since_load(events: list[Event], now: datetime) -> float | None:
+    """Сколько дней назад был последний импульс в списке событий.
+
+    None, если отсек ни разу не грузился в окне выборки — клиенту нечего
+    показать про давность, а не «0 дней назад».
+    """
+    if not events:
+        return None
+    latest = max(at for at, _ in events)
+    return (now - latest).total_seconds() / 86400.0
+
+
 async def compute_readiness(
     db: AsyncSession,
     app_user_id: int,
@@ -181,14 +193,27 @@ async def compute_readiness(
         series_days = window
 
     systemic = core.readiness_z(
-        _daily_series(systemic_events, p.tau_systemic_h, now, series_days), p
+        _daily_series(systemic_events, p.tau_systemic_h, now, series_days),
+        p,
+        tau_hours=p.tau_systemic_h,
     )
+    systemic = replace(systemic, days_since_load=_days_since_load(systemic_events, now))
+
     mechanical = core.readiness_z(
-        _daily_series(mechanical_events, p.tau_mechanical_h, now, series_days), p
+        _daily_series(mechanical_events, p.tau_mechanical_h, now, series_days),
+        p,
+        tau_hours=p.tau_mechanical_h,
     )
+    mechanical = replace(mechanical, days_since_load=_days_since_load(mechanical_events, now))
+
     muscular = {
-        muscle: core.readiness_z(
-            _daily_series(events, p.tau_muscular_h, now, series_days), p
+        muscle: replace(
+            core.readiness_z(
+                _daily_series(events, p.tau_muscular_h, now, series_days),
+                p,
+                tau_hours=p.tau_muscular_h,
+            ),
+            days_since_load=_days_since_load(events, now),
         )
         for muscle, events in sorted(muscular_events.items())
     }

@@ -39,6 +39,12 @@ class ReadinessBand(BaseModel):
     # истории (может отсутствовать при cold-start) и качественная полоса.
     z: float | None = None
     band: str
+    # Оценка времени до возврата в нейтральную полосу, часы. None при
+    # cold-start/неизвестном tau; 0.0, если отсек уже не устал.
+    recovery_hours: float | None = None
+    # Сколько дней назад был последний импульс нагрузки в этом отсеке. None,
+    # если отсек ни разу не грузился в окне выборки (клиенту — «серый» статус).
+    days_since_load: float | None = None
 
 
 class ProgressionResponse(BaseModel):

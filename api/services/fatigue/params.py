@@ -62,6 +62,7 @@ class FatigueParams:
     band_threshold_z: float
     sharp_rise_ratio: float
     window_days: int
+    recovery_hours_cap: float
 
 
 PARAM_REGISTRY: dict[str, Param] = {
@@ -140,6 +141,12 @@ PARAM_REGISTRY: dict[str, Param] = {
     "window_days": Param(
         35, CONFIG, TIER_NONE,
         "Окно выборки импульсов: покрывает 5 tau для механики с запасом.",
+    ),
+    "recovery_hours_cap": Param(
+        336.0, CONFIG, TIER_NONE,
+        "Потолок безопасности для оценки времени восстановления (14 дней): "
+        "почти нулевой F_target даёт огромное ln(F_now/F_target), и без потолка "
+        "прогноз превращался бы в абсурдные значения. Предохранитель, не свойство человека.",
     ),
 }
 

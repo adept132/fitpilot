@@ -288,3 +288,82 @@ def test_sigma_floor_uses_median_not_mean():
     result = readiness_z(series, P)
     assert result.z is not None
     assert math.isfinite(result.z)
+
+
+# --- Время восстановления ---
+
+def test_fatigued_series_yields_recovery_hours_matching_the_formula():
+    # Ряд с явным всплеском в последний день -> band "fatigued". Считаем
+    # ожидаемое время восстановления вручную по формуле Δ = τ · ln(F_now/F_target)
+    # с теми же mean/denominator, что использует readiness_z, и сверяем.
+    series = [5.0] * 29 + [60.0]
+    tau = 48.0
+    result = readiness_z(series, P, tau_hours=tau)
+
+    assert result.band == "fatigued"
+    assert result.recovery_hours is not None
+
+    mean = sum(series) / len(series)
+    std = math.sqrt(sum((v - mean) ** 2 for v in series) / (len(series) - 1))
+    from api.services.fatigue.core import _median
+
+    floor = abs(_median(series)) * P.sigma_floor_ratio
+    denominator = max(std, floor)
+    f_target = mean + P.band_threshold_z * denominator
+    expected = tau * math.log(series[-1] / f_target)
+
+    assert result.recovery_hours == pytest.approx(expected, rel=1e-9)
+    assert result.recovery_hours > 0.0
+
+
+def test_neutral_series_has_zero_recovery_hours():
+    flat = [10.0] * 30
+    result = readiness_z(flat, P, tau_hours=48.0)
+    assert result.band == "neutral"
+    assert result.recovery_hours == 0.0
+
+
+def test_fresh_series_has_zero_recovery_hours():
+    series = [50.0] * 29 + [1.0]
+    result = readiness_z(series, P, tau_hours=48.0)
+    assert result.band == "fresh"
+    assert result.recovery_hours == 0.0
+
+
+def test_cold_start_hides_recovery_hours():
+    short = [10.0] * (P.cold_start_days - 1)
+    result = readiness_z(short, P, tau_hours=48.0)
+    assert result.band == "unknown"
+    assert result.recovery_hours is None
+
+
+def test_missing_tau_hides_recovery_hours():
+    # Механика/мышца/система знают свой tau только у вызывающего кода
+    # (service.py); без него readiness_z обязана молчать, а не гадать.
+    series = [5.0] * 29 + [60.0]
+    result = readiness_z(series, P, tau_hours=None)
+    assert result.band == "fatigued"
+    assert result.recovery_hours is None
+
+
+def test_recovery_hours_is_capped():
+    # Экстремальный всплеск даёт большое ln(F_now/F_target); c достаточно
+    # большим tau «сырая» оценка превышает потолок. Проверяем, что срабатывает
+    # КОНФИГ-предохранитель recovery_hours_cap, а не голая формула.
+    series = [1.0] * 29 + [1e9]
+    tau = 200.0
+    result = readiness_z(series, P, tau_hours=tau)
+
+    assert result.band == "fatigued"
+
+    mean = sum(series) / len(series)
+    std = math.sqrt(sum((v - mean) ** 2 for v in series) / (len(series) - 1))
+    from api.services.fatigue.core import _median
+
+    floor = abs(_median(series)) * P.sigma_floor_ratio
+    denominator = max(std, floor)
+    f_target = mean + P.band_threshold_z * denominator
+    raw = tau * math.log(series[-1] / f_target)
+
+    assert raw > P.recovery_hours_cap  # убеждаемся, что без потолка тест был бы иным
+    assert result.recovery_hours == pytest.approx(P.recovery_hours_cap)

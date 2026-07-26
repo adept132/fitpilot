@@ -120,6 +120,8 @@ class Readiness:
     ложная точность читается как медицинский факт (§4.3)."""
     z: float | None
     band: str  # fresh | neutral | fatigued | unknown
+    recovery_hours: float | None = None
+    days_since_load: float | None = None
 
 
 @dataclass(frozen=True)
@@ -191,14 +193,46 @@ def _ewma(values: list[float], tau_days: float) -> float:
     return acc
 
 
-def readiness_z(series: list[float], p: FatigueParams) -> Readiness:
+def _recovery_hours(
+    f_now: float, mean: float, denominator: float, z: float, tau_hours: float | None, p: FatigueParams
+) -> float | None:
+    """Время до возврата отсека в нейтральную полосу.
+
+    Затухание F(t+Δ) = F(t)·exp(−Δ/τ), поэтому время падения от текущего
+    уровня до целевого: Δ = τ · ln(F_now / F_target). Целевой уровень — тот,
+    при котором z снова равен границе полосы:
+        F_target = mean + band_threshold_z · denominator
+    (mean/denominator — те же, что уже посчитаны в readiness_z).
+    """
+    if tau_hours is None:
+        return None
+    if z <= p.band_threshold_z:
+        # Отсек уже в нейтральной/свежей полосе — ждать нечего.
+        return 0.0
+
+    f_target = mean + p.band_threshold_z * denominator
+    if f_now <= 0 or f_target <= 0:
+        return None
+
+    hours = tau_hours * math.log(f_now / f_target)
+    # Предохранитель (§V1): патологическое соотношение не должно давать
+    # абсурдный прогноз наружу.
+    return min(hours, p.recovery_hours_cap)
+
+
+def readiness_z(
+    series: list[float], p: FatigueParams, tau_hours: float | None = None
+) -> Readiness:
     """z-оценка последнего значения F_c к собственной истории.
 
-    series — дневной ряд F_c, свежий день последний.
+    series — дневной ряд F_c, свежий день последний. tau_hours — период
+    полураспада ТЕКУЩЕГО отсека (systemic/muscular/mechanical): здесь он не
+    известен, вызывающий код обязан передать его явно, иначе recovery_hours
+    остаётся None.
     """
     if len(series) < p.cold_start_days:
         # Гвард холодного старта: без истории z — это шум.
-        return Readiness(z=None, band=BAND_UNKNOWN)
+        return Readiness(z=None, band=BAND_UNKNOWN, recovery_hours=None)
 
     mean = _mean(series)
     std = _std(series, mean)
@@ -210,7 +244,7 @@ def readiness_z(series: list[float], p: FatigueParams) -> Readiness:
     floor = abs(_median(series)) * p.sigma_floor_ratio
     denominator = max(std, floor)
     if denominator <= 0:
-        return Readiness(z=0.0, band=BAND_NEUTRAL)
+        return Readiness(z=0.0, band=BAND_NEUTRAL, recovery_hours=0.0)
 
     z = (series[-1] - mean) / denominator
 
@@ -221,7 +255,9 @@ def readiness_z(series: list[float], p: FatigueParams) -> Readiness:
     else:
         band = BAND_NEUTRAL
 
-    return Readiness(z=z, band=band)
+    recovery_hours = _recovery_hours(series[-1], mean, denominator, z, tau_hours, p)
+
+    return Readiness(z=z, band=band, recovery_hours=recovery_hours)
 
 
 def ewma_progression(daily_loads: list[float], p: FatigueParams) -> Progression:
