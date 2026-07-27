@@ -3,9 +3,8 @@
 Логика (эталон):
 1. Берём подходы последней завершённой тренировки с этим упражнением
    (без warmup/дропсетов, с непустыми весом и повторениями).
-2. Целевое значение (ЦЗ) подхода:
-     - Базовое (compound):  e1rm = weight * (1 + (reps + rir) / 30)   # Эпли с учётом RIR
-     - Изолирующее:         volume = weight * (reps + rir)
+2. Целевое значение (ЦЗ) подхода — e1rm по Эпли с учётом RIR для всех типов
+   упражнений (и базовых, и изолирующих): e1rm = weight * (1 + (reps + rir) / 30).
    Берём максимум по подходам -> base_value.
 3. Модифицированное ЦЗ: mod = base_value * factor (коэффициент прогрессии).
 4. Для каждого r в целевом интервале повторений (или для выбранного r в свободной
@@ -22,25 +21,28 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from api.services import equipment as equip
 from api.services.models import (
     WorkoutSession,
     WorkoutSessionExercise,
 )
 
-KGS_IN_LBS = 2.20462
-FREE_WEIGHT_STEP_KG = 2.5
-
-# effort_level -> RIR. Принимаем оба варианта warmup (фронт: "warmup", бэкенд-схема: "warmup_effort").
-EFFORT_TO_RIR = {
-    "warmup": 4,
-    "warmup_effort": 4,
-    "light": 3,
-    "easy": 3,
-    "medium": 2,
-    "prefailure": 1,
-    "failure": 0,
-}
-DEFAULT_RIR = 2  # если усилие не указано -> medium
+# Формулы и округление переехали в api/services/progression/.
+# Старые имена сохраняются на один релиз: их импортируют fatigue/,
+# csv_format.py и tests/test_autoprogression.py.
+from api.services.progression.metrics import (  # noqa: F401
+    DEFAULT_RIR,
+    EFFORT_TO_RIR,
+    effort_to_rir,
+)
+from api.services.progression.metrics import e1rm as set_target_value  # noqa: F401
+from api.services.progression.metrics import weight_for_e1rm as weight_for_target  # noqa: F401
+from api.services.progression.rounding import (  # noqa: F401
+    DEFAULT_WEIGHT_STEPS,
+    KG_PER_LB,
+    LB_PER_KG,
+)
+from api.services.progression.rounding import round_to_step as round_weight_for_equipment  # noqa: F401
 
 # Дефолт коэффициента прогрессии по уровню пользователя.
 DEFAULT_FACTOR_BY_LEVEL = {
@@ -49,55 +51,6 @@ DEFAULT_FACTOR_BY_LEVEL = {
     "advanced": 1.01,
 }
 FALLBACK_FACTOR = 1.03
-
-# Оборудование, для которого вес округляется до 10 lb (в кг). Остальное -> до 2.5 кг.
-ROUND_10LB_EQUIPMENT = {"Тренажер", "Кроссовер"}
-
-
-def effort_to_rir(effort_level: Optional[str]) -> int:
-    if not effort_level:
-        return DEFAULT_RIR
-    return EFFORT_TO_RIR.get(effort_level.strip().lower(), DEFAULT_RIR)
-
-
-def is_compound(category: Optional[str]) -> bool:
-    """True -> базовое (e1rm), False -> изолирующее (объём). По умолчанию базовое."""
-    if not category:
-        return True
-    c = category.strip().lower()
-    if "изол" in c or "isol" in c:
-        return False
-    return True
-
-
-def set_target_value(compound: bool, weight: float, reps: int, rir: int) -> float:
-    if compound:
-        return weight * (1 + (reps + rir) / 30)
-    return weight * (reps + rir)
-
-
-def weight_for_target(compound: bool, target_value: float, reps: int, rir: int) -> float:
-    if compound:
-        denom = 1 + (reps + rir) / 30
-    else:
-        denom = reps + rir
-    if denom <= 0:
-        return 0.0
-    return target_value / denom
-
-
-def round_weight_for_equipment(weight: float, equipment: Optional[list]) -> float:
-    equipment = equipment or []
-    use_10lb = any(e in ROUND_10LB_EQUIPMENT for e in equipment)
-
-    if use_10lb:
-        target_lbs = weight * KGS_IN_LBS
-        rounded_lbs = round(target_lbs / 10) * 10
-        final_lbs = max(10, rounded_lbs)
-        return round(final_lbs / KGS_IN_LBS, 1)
-
-    rounded_kg = round(weight / FREE_WEIGHT_STEP_KG) * FREE_WEIGHT_STEP_KG
-    return round(max(FREE_WEIGHT_STEP_KG, rounded_kg), 1)
 
 
 def progression_factor_for(
@@ -190,9 +143,8 @@ async def compute_autoprogression(
     выбрал их вручную). В плановой тренировке берём recommended_* из session_exercise.
     """
     exercise = session_exercise.exercise
-    compound = is_compound(getattr(exercise, "category", None))
     equipment = getattr(exercise, "equipment_needed", None) or []
-    metric = "e1rm" if compound else "volume"
+    metric = "e1rm"  # единая метрика для базовых и изолирующих упражнений
 
     basis_sets = await get_last_performance_basis_sets(
         session, app_user_id, exercise.id
@@ -207,13 +159,14 @@ async def compute_autoprogression(
         }
 
     base_value = max(
-        set_target_value(
-            compound, float(s.weight), int(s.reps), effort_to_rir(s.effort_level)
-        )
+        set_target_value(float(s.weight), int(s.reps), effort_to_rir(s.effort_level))
         for s in basis_sets
     )
     factor = progression_factor_for(experience_level, settings)
     mod = base_value * factor
+
+    unit = (settings or {}).get("weight_unit", "kg")
+    steps = (settings or {}).get("weight_steps")
 
     # Целевой RIR и набор кандидатов по повторениям.
     if target_reps is not None:
@@ -255,9 +208,9 @@ async def compute_autoprogression(
 
     best = None  # (abs_diff, weight, reps)
     for r in rep_candidates:
-        raw_w = weight_for_target(compound, mod, r, rir_t)
-        w_r = round_weight_for_equipment(raw_w, equipment)
-        new_val = set_target_value(compound, w_r, r, rir_t)
+        raw_w = weight_for_target(mod, r, rir_t)
+        w_r = round_weight_for_equipment(raw_w, equipment, unit, steps)
+        new_val = set_target_value(w_r, r, rir_t)
         diff = abs(new_val - mod)
         if best is None or diff < best[0]:
             best = (diff, w_r, r)
