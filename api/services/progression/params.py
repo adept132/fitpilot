@@ -1,0 +1,71 @@
+"""Пороги и константы движка прогрессии.
+
+Магических чисел в логике быть не должно: всё, что можно захотеть
+подкрутить по накопленным данным, живёт здесь.
+"""
+
+from __future__ import annotations
+
+# --- Плато ---
+# Меньше 6 завершённых сессий — данных не хватает, плато не объявляем
+# (принцип P0-01: не показывать то, что нельзя вывести).
+PLATEAU_MIN_SESSIONS = 6
+# Сколько сессий подряд без прироста считаются застоем (~2 недели при 2 тр/нед).
+PLATEAU_STALL_SESSIONS = 4
+# Допуск на шум округления по шагу оборудования: 12x30 -> 8x32.5 не застой.
+PLATEAU_GAIN_TOLERANCE = 1.005
+
+# --- Снижение нагрузки ---
+REDUCTION_RATIO = 0.90          # -10 %
+LAYOFF_DAYS = 21                # длинный перерыв
+MISS_STREAK_FOR_REDUCTION = 2   # два недобора подряд -> снижение
+SEVERE_MISS_RATIO = 0.5         # провал половины подходов -> снижение сразу
+
+# --- Схемы ---
+# Относительный потолок фиксированной прибавки: без него новичок с приседом
+# 20 кг получает +5 кг = +25 % за сессию.
+FIXED_INCREMENT_MAX_RATIO = 0.05
+LOWER_BODY_INCREMENT_STEPS = 2
+UPPER_BODY_INCREMENT_STEPS = 1
+LOWER_BODY_KEYS = frozenset({"quads", "hamstrings", "glutes", "calves"})
+
+TRAINING_MAX_RATIO = 0.90
+
+# (доля от training max, повторы, тип подхода)
+PERCENT_TABLE: dict[str, list[tuple[float, int, str]]] = {
+    "deload": [(0.50, 5, "normal"), (0.60, 5, "normal"), (0.60, 5, "normal")],
+    "easy": [(0.65, 5, "normal"), (0.75, 5, "normal"), (0.85, 5, "amrap")],
+    "medium": [(0.70, 3, "normal"), (0.80, 3, "normal"), (0.90, 3, "amrap")],
+    "prefailure": [(0.75, 5, "normal"), (0.85, 3, "normal"), (0.95, 1, "amrap")],
+    "failure": [(0.75, 5, "normal"), (0.85, 3, "normal"), (0.95, 1, "amrap")],
+}
+
+# --- Диапазоны повторов ---
+# Явный fallback, когда активного микроцикла нет. Раньше подставлялся
+# неявно day_type=medium, и движок не мог отличить осознанное предписание
+# от значения по умолчанию.
+TIER_REP_FALLBACK: dict[int, tuple[int, int]] = {1: (6, 8), 2: (8, 12), 3: (12, 15)}
+
+REP_SOURCE_PLAN = "plan_override"
+REP_SOURCE_MICROCYCLE = "microcycle"
+REP_SOURCE_FALLBACK = "tier_fallback"
+
+# --- Схемы (идентификаторы) ---
+SCHEME_E1RM_FACTOR = "e1rm_factor"
+SCHEME_DOUBLE = "double"
+SCHEME_FIXED_INCREMENT = "fixed_increment"
+SCHEME_PERCENT_1RM = "percent_1rm"
+
+# --- Причины ---
+REASON_TEXTS: dict[str, str] = {
+    "progressed": "Прошлая цель выполнена — двигаемся вперёд.",
+    "hold_after_miss": "В прошлый раз цель не взята — оставляем тот же вес.",
+    "repeated_miss": "Цель не взята дважды подряд — снижаем вес на 10 %.",
+    "plateau_reset": "Прогресса нет несколько тренировок — снижаем вес и заходим заново.",
+    "deload_phase": "Неделя разгрузки — вес не растёт.",
+    "weight_deviation": "В прошлый раз вы работали с другим весом — считаем от него.",
+    "layoff": "Долгий перерыв — начинаем с веса полегче.",
+    "bootstrap_no_prescription": "Считаем по вашему прошлому результату.",
+    "needs_external_load": "Верх диапазона взят — пора добавить отягощение.",
+    "no_basis": "Пока нет данных для расчёта.",
+}
