@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from api.services.progression import params
+from api.services.progression.metrics import e1rm, weight_for_e1rm
 from api.services.progression.state import rebuild_state
 from api.services.progression.types import (
     ExerciseHistory,
@@ -69,6 +70,21 @@ def test_last_top_weight_is_from_latest_session_prescription():
     assert st.last_top_weight == pytest.approx(42.5)
 
 
+def test_last_top_weight_updates_when_latest_prescription_is_zero():
+    # Регрессия: раньше `last_top = prescription.top_weight or last_top`
+    # считал 0.0 ложным значением и не обновлял last_top, оставляя вес
+    # от более старой сессии. У самой свежей сессии предписан явный 0.0 —
+    # last_top_weight обязан стать 0.0, а не унаследовать 45.0.
+    st = rebuild_state(
+        history(
+            session(1, 40.0, 10, prescribed=45.0),
+            session(2, 42.0, 8, prescribed=0.0),
+        ),
+        STEP,
+    )
+    assert st.last_top_weight == 0.0
+
+
 def test_consecutive_misses_counts_trailing_misses():
     st = rebuild_state(
         history(
@@ -112,11 +128,47 @@ def test_growth_resets_the_stall_counter():
     assert st.stalled is False
 
 
-def test_tolerance_absorbs_rounding_noise():
-    # 30x12 -> 32.5x8: e1RM почти равны, приростом это считать нельзя.
-    a = 30.0 * (1 + 14 / 30)
-    b = 32.5 * (1 + 10 / 30)
-    assert b < a * params.PLATEAU_GAIN_TOLERANCE
+def test_gain_within_tolerance_counts_as_stall():
+    # Прирост e1RM есть, но он строго меньше допуска на шум округления
+    # (PLATEAU_GAIN_TOLERANCE) — это ровно тот случай, ради которого допуск
+    # существует: шаг оборудования не должен выдаваться за реальный прогресс.
+    # Границу считаем через саму константу, а не через захардкоженное число,
+    # чтобы тест следовал за params.py.
+    base_weight, base_reps, base_rir = 100.0, 10, 2
+    base_e1rm = e1rm(base_weight, base_reps, base_rir)
+    boundary_e1rm = base_e1rm * params.PLATEAU_GAIN_TOLERANCE
+    within_tolerance_e1rm = (base_e1rm + boundary_e1rm) / 2
+    assert base_e1rm < within_tolerance_e1rm < boundary_e1rm
+    second_weight = weight_for_e1rm(within_tolerance_e1rm, base_reps, base_rir)
+
+    st = rebuild_state(
+        history(
+            session(1, base_weight, base_reps),
+            session(2, second_weight, base_reps),
+        ),
+        STEP,
+    )
+    # Прирост в пределах допуска в счёт не идёт — счётчик застоя растёт.
+    assert st.sessions_since_gain == 1
+
+
+def test_gain_above_tolerance_resets_stall_counter():
+    # Тот же сценарий, но e1RM второй сессии выходит за границу допуска —
+    # это уже настоящий прогресс, и счётчик застоя должен обнулиться.
+    base_weight, base_reps, base_rir = 100.0, 10, 2
+    base_e1rm = e1rm(base_weight, base_reps, base_rir)
+    boundary_e1rm = base_e1rm * params.PLATEAU_GAIN_TOLERANCE
+    above_tolerance_e1rm = boundary_e1rm * 1.001  # чуть выше границы допуска
+    second_weight = weight_for_e1rm(above_tolerance_e1rm, base_reps, base_rir)
+
+    st = rebuild_state(
+        history(
+            session(1, base_weight, base_reps),
+            session(2, second_weight, base_reps),
+        ),
+        STEP,
+    )
+    assert st.sessions_since_gain == 0
 
 
 def test_deload_sessions_do_not_count_toward_stall():

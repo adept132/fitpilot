@@ -148,7 +148,12 @@ def rebuild_state(history: ExerciseHistory, step_kg: float) -> ProgressionState:
         completed += 1
         working = value
         if session.prescription is not None:
-            last_top = session.prescription.top_weight or last_top
+            # `or` здесь неверен: top_weight == 0.0 — валидное предписание
+            # (например, безопасное упражнение с нулевым весом), а `or`
+            # считает 0.0 ложным и молча оставляет last_top от старой сессии.
+            top = session.prescription.top_weight
+            if top is not None:
+                last_top = top
             last_scheme = session.prescription.scheme
 
         outcome = evaluate(session.prescription, session.sets, step_kg)
