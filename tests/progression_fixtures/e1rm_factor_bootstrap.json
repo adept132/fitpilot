@@ -1,0 +1,25 @@
+{
+  "name": "e1rm_factor: бутстрап без сохранённых предписаний — e1RM x коэффициент опыта",
+  "ctx": {
+    "target_sets": 3,
+    "rep_min": 5,
+    "rep_max": 5,
+    "target_rir": 2,
+    "equipment": ["barbell"],
+    "experience_level": "intermediate",
+    "phase_effort_tier": "medium",
+    "days_since_last_session": 3
+  },
+  "sessions": [
+    {"weight": 100.0, "reps": [8], "rir": 2, "no_prescription": true}
+  ],
+  "expect": {
+    "scheme": "e1rm_factor",
+    "reason_code": "bootstrap_no_prescription",
+    "sets": [
+      {"weight_kg": 110.0, "rep_min": 5, "rep_max": 5, "kind": "normal"},
+      {"weight_kg": 110.0, "rep_min": 5, "rep_max": 5, "kind": "normal"},
+      {"weight_kg": 110.0, "rep_min": 5, "rep_max": 5, "kind": "normal"}
+    ]
+  }
+}

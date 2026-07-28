@@ -13,7 +13,11 @@ from dataclasses import replace
 from typing import Optional
 
 from api.services.progression import params
-from api.services.progression.rounding import round_down_to_step, step_kg
+from api.services.progression.rounding import (
+    round_down_to_step,
+    round_to_step,
+    step_kg,
+)
 from api.services.progression.state import working_sets
 from api.services.progression.types import Prescription, SchemeContext
 
@@ -21,7 +25,15 @@ from api.services.progression.types import Prescription, SchemeContext
 def _with_weight(
     prescription: Prescription, weight: Optional[float], reason_code: str
 ) -> Prescription:
-    """Тот же набор подходов, другой вес и другая причина."""
+    """Тот же набор подходов, другой вес и другая причина.
+
+    Вес сюда передаётся уже приведённым к сетке шага оборудования —
+    приведение делает вызывающая сторона (Находка 2 ревью Задачи 12,
+    P0-06), а не эта функция: разные причины несут разную семантику веса
+    (anchor из прошлого предписания vs фактический залогированный вес
+    пользователя), и решение "округлять или нет" завязано на эту разницу
+    (см. комментарий у правила 3 в apply_reduction).
+    """
     sets = tuple(replace(s, weight_kg=weight) for s in prescription.sets)
     return replace(
         prescription,
@@ -29,6 +41,14 @@ def _with_weight(
         reason_code=reason_code,
         reason_text=params.REASON_TEXTS[reason_code],
     )
+
+
+def _on_grid(ctx: SchemeContext, weight: Optional[float]) -> Optional[float]:
+    """round_to_step, если вес есть — свёрнуто для читаемости на местах
+    вызова _with_weight (Находка 2 ревью Задачи 12, P0-06)."""
+    if weight is None:
+        return None
+    return round_to_step(weight, list(ctx.equipment), ctx.unit, ctx.weight_steps or None)
 
 
 def _with_reason(prescription: Prescription, reason_code: str) -> Prescription:
@@ -84,7 +104,12 @@ def apply_reduction(prescription: Prescription, ctx: SchemeContext) -> Prescript
             # логами на неделе разгрузки) — вес предписания схемы не
             # трогаем, чтобы не обнулить его, но причину сообщаем.
             return _with_reason(prescription, "deload_phase")
-        return _with_weight(prescription, anchor, "deload_phase")
+        # anchor — прошлый top_weight из ProgressionState, восстановленный
+        # rebuild_state()-ом из Prescription.top_weight прошлых сессий; это
+        # НОВОЕ предписание пользователю на предстоящую сессию, поэтому вес
+        # обязан лежать на сетке (Находка 2 ревью Задачи 12, P0-06) — легаси-
+        # записи/ручной ввод могли сохранить top_weight мимо сетки.
+        return _with_weight(prescription, _on_grid(ctx, anchor), "deload_phase")
 
     # 2. Длинный перерыв. Только арифметика по датам — субъективные сигналы
     #    (сон, стресс, боль) подключатся здесь же в P0-07.
@@ -99,6 +124,20 @@ def apply_reduction(prescription: Prescription, ctx: SchemeContext) -> Prescript
     if outcome is not None and outcome.status == "deviated":
         actual = _actual_last_weight(ctx)
         if actual is not None or anchor is not None:
+            # НЕ приводим к сетке: actual — это _actual_last_weight(), то
+            # есть факт того, что человек реально поднял (SetFact.weight_kg),
+            # а не будущее предписание, которое нужно суметь набрать
+            # железом. Округление здесь исказило бы "мы увидели, что вы
+            # работали с X" в "мы вам советуем Y" — смысл правила 3 (см.
+            # docstring выше: "переякориваемся, но не наказываем"), а также
+            # сломало бы принятый тест
+            # test_deviation_reanchors_to_actual_weight_from_history (42.0
+            # кг для barbell не лежит на сетке 2.5 кг, и тест ожидает это
+            # значение дословно). Находка 2 ревью Задачи 12 (P0-06) отмечает
+            # эту ветку как потенциально несогласованную с инвариантом
+            # «предписанный вес всегда на сетке» — оставлено как известный
+            # разрыв, чинить в этом заходе запрещено жёстким условием
+            # ревью (нельзя ломать принятые тесты).
             return _with_weight(prescription, actual or anchor, "weight_deviation")
         # Переякорить не на что: ни фактического веса, ни якоря не известно.
         # Правило не срабатывает — идём дальше по списку (4, 5, 6, 7).
@@ -116,7 +155,10 @@ def apply_reduction(prescription: Prescription, ctx: SchemeContext) -> Prescript
 
     # 5. Один недобор — вес держим.
     if ctx.state.consecutive_misses == 1 and anchor is not None:
-        return _with_weight(prescription, anchor, "hold_after_miss")
+        # См. комментарий у правила 1 (deload_phase): anchor — не факт
+        # подхода, а прошлый top_weight предписания, и это НОВОЕ
+        # предписание — обязан лежать на сетке (Находка 2).
+        return _with_weight(prescription, _on_grid(ctx, anchor), "hold_after_miss")
 
     # 6. Плато.
     if ctx.state.stalled and anchor is not None:

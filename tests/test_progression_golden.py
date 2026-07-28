@@ -29,20 +29,29 @@ FIXTURES = sorted((Path(__file__).parent / "progression_fixtures").glob("*.json"
 def _session(index: int, raw: dict) -> SessionFact:
     weight = raw["weight"]
     reps = raw["reps"]
-    prescription = Prescription(
-        scheme=raw.get("scheme", "double"),
-        sets=tuple(
-            SetPrescription(
-                i + 1, weight, raw["rep_min"], raw["rep_max"], raw.get("rir", 2), "normal"
-            )
-            for i in range(len(reps))
-        ),
-        reason_code="progressed",
-        reason_text="x",
-    )
-    facts = tuple(
-        SetFact(i + 1, weight, r, raw.get("rir", 2)) for i, r in enumerate(reps)
-    )
+    rir = raw.get("rir", 2)
+
+    # "no_prescription": true — сессия без сохранённого предписания (импорт,
+    # ручной лог, первая тренировка упражнения). Нужна, чтобы покрыть
+    # бутстрап-схему e1rm_factor: resolve_scheme() выбирает её только тогда,
+    # когда НИ ОДНА сессия в истории не несёт Prescription (см. resolve.py,
+    # _has_prescription_history). rep_min/rep_max в фикстуре для такой
+    # сессии не нужны — предписания, куда их класть, попросту нет.
+    prescription = None
+    if not raw.get("no_prescription", False):
+        prescription = Prescription(
+            scheme=raw.get("scheme", "double"),
+            sets=tuple(
+                SetPrescription(
+                    i + 1, weight, raw["rep_min"], raw["rep_max"], rir, "normal"
+                )
+                for i in range(len(reps))
+            ),
+            reason_code="progressed",
+            reason_text="x",
+        )
+
+    facts = tuple(SetFact(i + 1, weight, r, rir) for i, r in enumerate(reps))
     return SessionFact(
         session_id=index,
         finished_at=None,
@@ -93,4 +102,4 @@ def test_every_scheme_has_at_least_one_fixture():
     schemes = set()
     for path in FIXTURES:
         schemes.add(json.loads(path.read_text(encoding="utf-8"))["expect"]["scheme"])
-    assert {"double", "fixed_increment", "percent_1rm"} <= schemes
+    assert {"double", "fixed_increment", "percent_1rm", "e1rm_factor"} <= schemes
