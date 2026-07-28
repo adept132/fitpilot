@@ -124,3 +124,29 @@ def test_achieved_e1rm_is_max_over_working_sets():
 def test_working_sets_filters_incomplete_data():
     facts = [fact(1, None, 10), fact(2, 40.0, 0), fact(3, 40.0, 10)]
     assert [s.set_number for s in working_sets(facts)] == [3]
+
+
+def test_partial_overshoot_with_hit_is_still_hit():
+    # Один подход выше rep_max, другой в диапазоне — это НЕ overshoot.
+    # overshoot выставляется только когда абсолютно все засчитанные подходы
+    # ушли выше потолка; частичный перебор не даёт оснований для ускоренного
+    # роста веса, поэтому итоговый статус — обычный "hit".
+    p = presc((1, 40.0, 8, 10), (2, 40.0, 8, 10))
+    out = evaluate(p, [fact(1, 40.0, 14), fact(2, 40.0, 9)], STEP)
+    assert out.status == "hit"
+    assert out.hit_sets == 2
+    assert out.total_sets == 2
+
+
+def test_partial_anomaly_is_evaluated_on_normal_set_only():
+    # Один подход аномален (абсурдный вес), второй — нормальный и выполненный.
+    # Аномальный исключается из оценки, статус определяется только по
+    # оставшемуся нормальному подходу.
+    p = presc((1, 40.0, 8, 12), (2, 40.0, 8, 12))
+    out = evaluate(
+        p,
+        [fact(1, 700.0, 10, anomalous=True), fact(2, 40.0, 10)],
+        STEP,
+    )
+    assert out.status == "hit"
+    assert out.total_sets == 1

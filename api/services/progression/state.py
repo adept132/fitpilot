@@ -20,8 +20,6 @@ from api.services.progression.types import (
     SetPrescription,
 )
 
-_IGNORED_SET_TYPES = {"warmup", "warmup_effort", "drop"}
-
 
 def working_sets(facts: Sequence[SetFact]) -> list[SetFact]:
     """Подходы, пригодные для оценки: без разминки, дропов и пустых значений.
@@ -31,7 +29,7 @@ def working_sets(facts: Sequence[SetFact]) -> list[SetFact]:
     """
     result = []
     for s in facts:
-        if (s.set_type or "normal").lower() in _IGNORED_SET_TYPES:
+        if (s.set_type or "normal").lower() in params.IGNORED_SET_TYPES:
             continue
         if s.weight_kg is None or s.reps is None:
             continue
@@ -41,12 +39,12 @@ def working_sets(facts: Sequence[SetFact]) -> list[SetFact]:
     return result
 
 
-def _prescription_for(
-    prescription: Prescription, set_number: int
-) -> Optional[SetPrescription]:
-    """Предписание на подход. Лишние подходы берут цель последнего известного."""
-    if not prescription.sets:
-        return None
+def _prescription_for(prescription: Prescription, set_number: int) -> SetPrescription:
+    """Предписание на подход. Лишние подходы берут цель последнего известного.
+
+    Вызывающая сторона (evaluate) гарантирует непустой prescription.sets —
+    иначе она возвращает no_basis раньше, до вызова этой функции.
+    """
     for sp in prescription.sets:
         if sp.set_number == set_number:
             return sp
@@ -75,8 +73,6 @@ def evaluate(
 
     for s in usable:
         sp = _prescription_for(prescription, s.set_number)
-        if sp is None:
-            continue
 
         value = e1rm(float(s.weight_kg), int(s.reps), int(s.rir))
         achieved = value if achieved is None else max(achieved, value)
@@ -100,6 +96,10 @@ def evaluate(
     elif miss:
         status = "miss"
     elif overshoot and overshoot == hit:
+        # overshoot выставляется, только если ВСЕ засчитанные подходы ушли
+        # выше rep_max. Смешанный случай (часть выше потолка, часть в
+        # диапазоне) — это "hit": частичный перебор не даёт достаточных
+        # оснований для ускоренного роста веса на всех подходах.
         status = "overshoot"
     else:
         status = "hit"
