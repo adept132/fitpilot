@@ -1,0 +1,25 @@
+{
+  "name": "фаза разгрузки -> вес не растёт",
+  "ctx": {
+    "target_sets": 3,
+    "rep_min": 8,
+    "rep_max": 12,
+    "target_rir": 4,
+    "equipment": ["barbell"],
+    "experience_level": "intermediate",
+    "phase_effort_tier": "deload",
+    "days_since_last_session": 3
+  },
+  "sessions": [
+    {"weight": 60.0, "reps": [12, 12, 12], "rep_min": 8, "rep_max": 12}
+  ],
+  "expect": {
+    "scheme": "double",
+    "reason_code": "deload_phase",
+    "sets": [
+      {"weight_kg": 60.0, "rep_min": 8, "rep_max": 12, "kind": "normal"},
+      {"weight_kg": 60.0, "rep_min": 8, "rep_max": 12, "kind": "normal"},
+      {"weight_kg": 60.0, "rep_min": 8, "rep_max": 12, "kind": "normal"}
+    ]
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "%1RM: силовая фаза на базе, последний подход AMRAP с открытым верхом",
+  "override": "percent_1rm",
+  "ctx": {
+    "target_sets": 3,
+    "rep_min": 5,
+    "rep_max": 5,
+    "target_rir": 1,
+    "equipment": ["barbell"],
+    "experience_level": "advanced",
+    "fatigue_tier": 1,
+    "phase_effort_tier": "prefailure",
+    "days_since_last_session": 3
+  },
+  "sessions": [
+    {"weight": 100.0, "reps": [5, 5, 5], "rep_min": 5, "rep_max": 5}
+  ],
+  "expect": {
+    "scheme": "percent_1rm",
+    "reason_code": "progressed",
+    "sets": [
+      {"weight_kg": 82.5, "rep_min": 5, "rep_max": 5, "kind": "normal"},
+      {"weight_kg": 92.5, "rep_min": 3, "rep_max": 3, "kind": "normal"},
+      {"weight_kg": 102.5, "rep_min": 1, "rep_max": null, "kind": "amrap"}
+    ]
+  }
+}

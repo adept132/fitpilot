@@ -1,0 +1,25 @@
+{
+  "name": "перерыв больше трёх недель -> заходим с веса полегче",
+  "ctx": {
+    "target_sets": 3,
+    "rep_min": 8,
+    "rep_max": 12,
+    "target_rir": 2,
+    "equipment": ["barbell"],
+    "experience_level": "intermediate",
+    "phase_effort_tier": "medium",
+    "days_since_last_session": 45
+  },
+  "sessions": [
+    {"weight": 60.0, "reps": [12, 12, 12], "rep_min": 8, "rep_max": 12}
+  ],
+  "expect": {
+    "scheme": "double",
+    "reason_code": "layoff",
+    "sets": [
+      {"weight_kg": 52.5, "rep_min": 8, "rep_max": 12, "kind": "normal"},
+      {"weight_kg": 52.5, "rep_min": 8, "rep_max": 12, "kind": "normal"},
+      {"weight_kg": 52.5, "rep_min": 8, "rep_max": 12, "kind": "normal"}
+    ]
+  }
+}

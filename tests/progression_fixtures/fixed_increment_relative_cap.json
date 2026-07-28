@@ -1,0 +1,26 @@
+{
+  "name": "фиксированная прибавка: относительный потолок режет +5 кг до +2.5 кг",
+  "ctx": {
+    "target_sets": 3,
+    "rep_min": 5,
+    "rep_max": 5,
+    "target_rir": 2,
+    "equipment": ["barbell"],
+    "experience_level": "beginner",
+    "main_muscle_group": "квадрицепсы",
+    "phase_effort_tier": "medium",
+    "days_since_last_session": 3
+  },
+  "sessions": [
+    {"weight": 20.0, "reps": [5, 5, 5], "rep_min": 5, "rep_max": 5}
+  ],
+  "expect": {
+    "scheme": "fixed_increment",
+    "reason_code": "progressed",
+    "sets": [
+      {"weight_kg": 22.5, "rep_min": 5, "rep_max": 5, "kind": "normal"},
+      {"weight_kg": 22.5, "rep_min": 5, "rep_max": 5, "kind": "normal"},
+      {"weight_kg": 22.5, "rep_min": 5, "rep_max": 5, "kind": "normal"}
+    ]
+  }
+}
