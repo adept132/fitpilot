@@ -74,9 +74,54 @@ def test_step_kg_for_block_machine_is_ten_pounds():
 
 
 def test_round_down_never_exceeds_input():
+    # Только килограммовое оборудование со строгой границей (unit="kg").
+    # Фунтовая ветка проверяется отдельно с допуском (см. ниже).
     for weight in [41.3, 40.0, 39.9, 13.1, 28.0]:
         result = rounding.round_down_to_step(weight, ["barbell"], "kg", None)
         assert result <= weight + 1e-9
+
+
+def test_round_down_with_lb_unit_tolerates_small_overage():
+    """Контракт на допуск LB_ROUNDING_TOLERANCE при округлении вниз с фунтами.
+
+    При работе с фунтами (блочный тренажёр или килограммовое оборудование
+    с unit="lbs") результат может превышать входное значение. Причина:
+    конвертация кг -> lb -> floor -> lb -> кг вносит ошибки округления.
+
+    Без допуска функция не была бы идемпотентной. Пример: 160 lb хранится
+    в БД как 72.57 кг (round(..., 2)). При обратном переводе даёт 159.9946 lb.
+    Без допуска LB_ROUNDING_TOLERANCE floor съедает целый 10 lb шаг:
+    160 -> 150 lb. Повторное применение сдвигал бы вес ещё дальше.
+
+    Превышение допускается, но не должно превышать LB_ROUNDING_TOLERANCE
+    (переведённый в килограммы) плюс небольшой запас на ошибки дополнительного
+    округления при back-конвертации (round(..., 2)). Величина физически ничтожна
+    (~0.013 кг max), функция остаётся идемпотентной, и дрейф не накапливается.
+    """
+    tolerance_kg = rounding.LB_ROUNDING_TOLERANCE * rounding.KG_PER_LB
+    # Запас на округление при back-конвертации (round(..., 2) добавляет ~0.005 кг)
+    max_overage_kg = tolerance_kg + 0.005
+
+    weights = _weight_sweep()
+
+    # Блочный тренажёр всегда работает в фунтах
+    for weight in weights:
+        result = rounding.round_down_to_step(weight, ["block_machine"], "kg", None)
+        overage = result - weight
+        assert overage <= max_overage_kg + 1e-9, (
+            f"block_machine: {weight} кг -> {result} кг, превышение "
+            f"{overage:.6f} кг > допуска {max_overage_kg:.6f} кг"
+        )
+
+    # Килограммовое оборудование при unit="lbs" (преобразуется в фунты)
+    for equipment in [["barbell"], ["dumbbell"], ["smith"]]:
+        for weight in weights:
+            result = rounding.round_down_to_step(weight, equipment, "lbs", None)
+            overage = result - weight
+            assert overage <= max_overage_kg + 1e-9, (
+                f"{equipment} unit=lbs: {weight} кг -> {result} кг, превышение "
+                f"{overage:.6f} кг > допуска {max_overage_kg:.6f} кг"
+            )
 
 
 def test_round_down_on_block_actually_reduces():
