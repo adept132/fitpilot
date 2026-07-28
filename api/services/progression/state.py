@@ -16,6 +16,7 @@ from api.services.progression.types import (
     Outcome,
     Prescription,
     ProgressionState,
+    SessionFact,
     SetFact,
     SetPrescription,
 )
@@ -110,4 +111,78 @@ def evaluate(
         miss_sets=miss,
         total_sets=total,
         achieved_e1rm=achieved,
+    )
+
+
+def _session_e1rm(session: "SessionFact") -> Optional[float]:
+    """Максимальный e1RM по рабочим неаномальным подходам сессии."""
+    usable = [s for s in working_sets(session.sets) if not s.is_anomalous]
+    if not usable:
+        return None
+    return max(e1rm(float(s.weight_kg), int(s.reps), int(s.rir)) for s in usable)
+
+
+def rebuild_state(history: ExerciseHistory, step_kg: float) -> ProgressionState:
+    """Полное восстановление состояния из истории.
+
+    Единственный источник истины: кэш-таблица только материализует результат
+    этой функции, поэтому любое расхождение чинится пересчётом.
+    """
+    # Внутри удобнее хронологический порядок; снаружи история от новой к старой.
+    chronological = list(reversed(history.sessions))
+
+    best_ever: Optional[float] = None
+    completed = 0
+    consecutive_misses = 0
+    sessions_since_gain = 0
+    working: Optional[float] = None
+    last_top: Optional[float] = None
+    last_scheme: Optional[str] = None
+
+    for session in chronological:
+        value = _session_e1rm(session)
+        if value is None:
+            # Пропущенная сессия: ни счётчики, ни метрики не двигаются.
+            continue
+
+        completed += 1
+        working = value
+        if session.prescription is not None:
+            last_top = session.prescription.top_weight or last_top
+            last_scheme = session.prescription.scheme
+
+        outcome = evaluate(session.prescription, session.sets, step_kg)
+        if outcome.status == "miss":
+            consecutive_misses += 1
+        elif outcome.status in ("hit", "overshoot"):
+            consecutive_misses = 0
+
+        if session.is_deload:
+            # Разгрузка не обязана расти — в счёт застоя не идёт.
+            continue
+
+        if best_ever is None:
+            best_ever = value
+        elif value > best_ever * params.PLATEAU_GAIN_TOLERANCE:
+            best_ever = value
+            sessions_since_gain = 0
+        else:
+            best_ever = max(best_ever, value)
+            sessions_since_gain += 1
+
+    stalled = (
+        completed >= params.PLATEAU_MIN_SESSIONS
+        and sessions_since_gain >= params.PLATEAU_STALL_SESSIONS
+    )
+
+    return ProgressionState(
+        working_e1rm=working,
+        training_max=None if working is None else working * params.TRAINING_MAX_RATIO,
+        best_e1rm_ever=best_ever,
+        consecutive_misses=consecutive_misses,
+        sessions_since_gain=sessions_since_gain,
+        last_top_weight=last_top,
+        last_scheme=last_scheme,
+        stalled=stalled,
+        completed_sessions=completed,
     )
