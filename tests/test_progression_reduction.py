@@ -10,6 +10,8 @@ from api.services.progression.types import (
     Prescription,
     ProgressionState,
     SchemeContext,
+    SessionFact,
+    SetFact,
     SetPrescription,
 )
 
@@ -59,6 +61,23 @@ def test_deload_phase_holds_the_previous_weight():
     assert out.reason_code == "deload_phase"
 
 
+def test_deload_without_anchor_keeps_scheme_weight():
+    # Нет last_top_weight (например, первая обработка упражнения с
+    # легаси-логами на неделе разгрузки) — вес схемы нельзя ни обнулить,
+    # ни выдумать, только сообщить причину.
+    p = presc(weight=44.0)
+    out = apply_reduction(
+        p,
+        ctx(
+            state=ProgressionState(last_top_weight=None),
+            phase_effort_tier="deload",
+        ),
+    )
+    assert out.reason_code == "deload_phase"
+    assert top(out) == pytest.approx(44.0)
+    assert all(s.weight_kg == pytest.approx(44.0) for s in out.sets)
+
+
 def test_layoff_reduces_from_the_last_working_weight():
     out = apply_reduction(presc(), ctx(days_since_last_session=30))
     assert out.reason_code == "layoff"
@@ -76,6 +95,53 @@ def test_deviation_reanchors_without_growth():
     )
     assert out.reason_code == "weight_deviation"
     assert top(out) == pytest.approx(40.0)
+
+
+def test_deviation_reanchors_to_actual_weight_from_history():
+    # Нагружаем реальный путь: _actual_last_weight должен найти вес по
+    # обычным подходам и отфильтровать аномальный, а не свалиться на
+    # запасной путь actual or anchor.
+    history = ExerciseHistory(
+        exercise_id=1,
+        sessions=(
+            SessionFact(
+                session_id=1,
+                finished_at=None,
+                prescription=None,
+                sets=(
+                    SetFact(1, 42.0, 8, 2, "normal", False),
+                    SetFact(2, 42.0, 8, 2, "normal", False),
+                    SetFact(3, 999.0, 8, 2, "normal", True),  # аномалия — не в счёт
+                ),
+            ),
+        ),
+    )
+    out = apply_reduction(
+        presc(weight=44.0),
+        ctx(
+            history=history,
+            state=ProgressionState(last_top_weight=40.0),
+            last_outcome=Outcome(status="deviated", total_sets=3),
+        ),
+    )
+    assert out.reason_code == "weight_deviation"
+    assert top(out) == pytest.approx(42.0)
+
+
+def test_deviation_without_anchor_or_actual_does_not_fire():
+    # Ни фактического веса из истории, ни якоря нет — переякорить не на
+    # что. Правило 3 не срабатывает, управление идёт дальше по списку и
+    # (при отсутствии других триггеров) предписание схемы проходит как есть.
+    p = presc()
+    out = apply_reduction(
+        p,
+        ctx(
+            state=ProgressionState(last_top_weight=None),
+            last_outcome=Outcome(status="deviated", total_sets=3),
+        ),
+    )
+    assert out.reason_code != "weight_deviation"
+    assert out == p
 
 
 def test_one_miss_holds_the_weight():

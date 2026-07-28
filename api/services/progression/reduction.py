@@ -31,6 +31,20 @@ def _with_weight(
     )
 
 
+def _with_reason(prescription: Prescription, reason_code: str) -> Prescription:
+    """Меняет только причину, веса подходов не трогает.
+
+    Нужно там, где переякориться не на что (нет ни last_top_weight, ни
+    фактического веса), но пользователя всё равно нужно предупредить —
+    выдумывать вес нельзя, вес схемы остаётся как есть.
+    """
+    return replace(
+        prescription,
+        reason_code=reason_code,
+        reason_text=params.REASON_TEXTS[reason_code],
+    )
+
+
 def _reduced(ctx: SchemeContext, anchor: float) -> float:
     """-10 % с округлением ВНИЗ и гарантией фактического снижения."""
     equipment = list(ctx.equipment)
@@ -65,6 +79,11 @@ def apply_reduction(prescription: Prescription, ctx: SchemeContext) -> Prescript
 
     # 1. Фаза разгрузки: расти не положено.
     if ctx.phase_effort_tier == "deload":
+        if anchor is None:
+            # Якоря нет (например, первая обработка упражнения с легаси-
+            # логами на неделе разгрузки) — вес предписания схемы не
+            # трогаем, чтобы не обнулить его, но причину сообщаем.
+            return _with_reason(prescription, "deload_phase")
         return _with_weight(prescription, anchor, "deload_phase")
 
     # 2. Длинный перерыв. Только арифметика по датам — субъективные сигналы
@@ -78,8 +97,11 @@ def apply_reduction(prescription: Prescription, ctx: SchemeContext) -> Prescript
 
     # 3. Пользователь работал с другим весом — переякориваемся, но не наказываем.
     if outcome is not None and outcome.status == "deviated":
-        actual = _actual_last_weight(ctx) or anchor
-        return _with_weight(prescription, actual, "weight_deviation")
+        actual = _actual_last_weight(ctx)
+        if actual is not None or anchor is not None:
+            return _with_weight(prescription, actual or anchor, "weight_deviation")
+        # Переякорить не на что: ни фактического веса, ни якоря не известно.
+        # Правило не срабатывает — идём дальше по списку (4, 5, 6, 7).
 
     # 4. Повторный или тяжёлый недобор.
     severe = (
