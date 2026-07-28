@@ -30,7 +30,6 @@ def ctx(**kw) -> SchemeContext:
     return SchemeContext(**base)
 
 
-@pytest.mark.xfail(reason="схемы double/fixed/percent появятся в задачах 8-10")
 def test_registry_contains_all_four_schemes():
     assert set(SCHEMES) == {
         params.SCHEME_E1RM_FACTOR,
