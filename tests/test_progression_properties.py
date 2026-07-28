@@ -180,6 +180,15 @@ def test_prescribed_weight_is_always_on_an_equipment_step(equipment, weight, rep
     Вес НЕ приводится к сетке перед вызовом движка (в отличие от тестов
     2 и 3) — см. docstring модуля: часть значений (OFF_GRID_WEIGHTS)
     специально выбрана вне сетки, чтобы нагрузить сквозные ветки.
+
+    ВАЖНО: Конструкторы build_ctx() и build_ctx_miss() ВСЕГДА ставят
+    фактический вес равным предписанному. Это значит, что расхождение
+    между ними никогда не превысит ноль, условие для статуса "deviated"
+    (линия 102 в state.evaluate()) структурно недостижимо в этом тесте.
+    Ветка reduction.weight_deviation (правило 3 в reduction.py) поэтому
+    ВООБЩЕ НЕ ВЫПОЛНЯЕТСЯ в этом тесте и логично исключена из проверки
+    инварианта "вес всегда на сетке" — это исключение закреплено
+    отдельным регрессионным тестом.
     """
     p = plan_exercise(build_ctx(equipment, weight, reps))
     for s in p.sets:
@@ -267,3 +276,80 @@ def test_reduction_always_lowers_by_at_least_one_step(equipment, weight):
     assert reduced.reason_code == "plateau_reset"
     step = step_kg(list(equipment), "kg", None)
     assert reduced.top_weight <= weight - step + 0.01
+
+
+def test_weight_deviation_does_not_round_to_grid():
+    """ИСКЛЮЧЕНИЕ из свойства 1: weight_deviation СОЗНАТЕЛЬНО не округляется.
+
+    Это намеренное исключение, закрепляющее замысел правила 3 в reduction.py
+    (вес, с которым пользователь РЕАЛЬНО работал в прошлый раз, переносится
+    как факт, а не как будущее предписание, и поэтому не округляется).
+
+    Если этот тест упал, значит кто-то добавил округление в ветку
+    weight_deviation (reduction.apply_reduction, линия 124+). Это нарушает
+    принятый замысел: движок фиксирует подтверждённый факт того, что
+    произошло, а не округляет его под предположение об оборудовании.
+    Дефолтная сетка в params.DEFAULT_WEIGHT_STEPS — допущение о типичном
+    оборудовании, а не физический закон. Пользователь может иметь микроблины,
+    разборные гантели с мелким шагом или нестандартный тренажёр.
+
+    Сценарий: предписана штанга с весом 40.0 кг (на сетке 2.5 кг),
+    пользователь реально работал с 46.3 кг (не на сетке, но валидный
+    залогированный факт после фильтра аномалий). Расхождение 6.3 кг > 2.5 кг
+    шага, поэтому evaluate() выставляет статус "deviated". Движок должен
+    переякориться на 46.3 кг БЕЗ округления.
+    """
+    equipment = ("barbell",)
+    prescribed_weight = 40.0  # На сетке 2.5 кг штанги
+    actual_weight = 46.3  # НЕ на сетке, но подтверждённый факт
+    reps_per_set = [8, 7, 6]  # Достаточно для hit, но вес отличается
+
+    # Шаг штанги 2.5 кг, расхождение 6.3 > 2.5, поэтому evaluate() выставит deviated
+    step = step_kg(list(equipment), "kg", None)
+    assert abs(actual_weight - prescribed_weight) > step, \
+        f"Расхождение {abs(actual_weight - prescribed_weight)} должно быть > {step}"
+
+    # Строим историю: предписана 40.0, но фактически выполнена 46.3
+    facts = tuple(
+        SetFact(i + 1, actual_weight, r, 2)
+        for i, r in enumerate(reps_per_set)
+    )
+    history = ExerciseHistory(
+        exercise_id=1,
+        sessions=(
+            SessionFact(
+                1,
+                None,
+                presc(prescribed_weight, len(reps_per_set)),  # Предписание 40.0
+                facts  # Факт 46.3
+            ),
+        ),
+    )
+    ctx = SchemeContext(
+        history=history,
+        state=ProgressionState(),
+        last_outcome=None,
+        target_sets=3,
+        rep_min=8,
+        rep_max=12,
+        rep_range_source=params.REP_SOURCE_FALLBACK,
+        target_rir=2,
+        equipment=equipment,
+        experience_level="intermediate",
+        phase_effort_tier="medium",
+        days_since_last_session=3,
+    )
+
+    # Прогонять через план_exercise — движок должен переякориться
+    # на вес_deviation и вернуть 46.3 БЕЗ округления
+    p = plan_exercise(ctx)
+
+    # Проверяем что это действительно сработала ветка weight_deviation
+    assert p.reason_code == "weight_deviation", \
+        f"Ожидался reason_code='weight_deviation', получен '{p.reason_code}'"
+
+    # Проверяем что вес перенесён ДОСЛОВНО, БЕЗ округления до сетки
+    assert p.top_weight is not None
+    assert p.top_weight == pytest.approx(actual_weight, abs=1e-6), \
+        f"Ожидался вес {actual_weight}, получен {p.top_weight} " \
+        f"(при округлении до сетки был бы {_on_grid(equipment, actual_weight)})"
