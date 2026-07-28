@@ -1,6 +1,9 @@
 """Метрики и округление движка прогрессии.
 
-Поведение обязано совпадать с autoprogression.py: перенос, а не переписывание.
+Формулы сверяются с посчитанными вручную ожидаемыми значениями, а не с
+legacy-реэкспортом: после переноса имена в autoprogression.py — это те же
+объекты функций, что и здесь, поэтому сравнение с legacy само с собой ничего
+не защищает.
 """
 
 import pytest
@@ -10,13 +13,16 @@ from api.services.progression import metrics, rounding
 
 
 @pytest.mark.parametrize(
-    "weight,reps,rir",
-    [(100.0, 10, 2), (60.0, 5, 0), (42.5, 12, 3), (20.0, 15, 1)],
+    "weight,reps,rir,expected",
+    [
+        (100.0, 10, 2, 140.0),
+        (60.0, 5, 0, 70.0),
+        (42.5, 12, 3, 63.75),
+        (20.0, 15, 1, 30.666666666666664),
+    ],
 )
-def test_e1rm_matches_legacy(weight, reps, rir):
-    assert metrics.e1rm(weight, reps, rir) == pytest.approx(
-        legacy.set_target_value(weight, reps, rir)
-    )
+def test_e1rm_matches_manual_calculation(weight, reps, rir, expected):
+    assert metrics.e1rm(weight, reps, rir) == pytest.approx(expected)
 
 
 @pytest.mark.parametrize(
@@ -28,18 +34,33 @@ def test_weight_for_e1rm_is_inverse(weight, reps, rir):
     assert metrics.weight_for_e1rm(target, reps, rir) == pytest.approx(weight)
 
 
-def test_effort_to_rir_matches_legacy():
-    for level in ["warmup", "light", "medium", "prefailure", "failure", None, "junk"]:
-        assert metrics.effort_to_rir(level) == legacy.effort_to_rir(level)
+@pytest.mark.parametrize(
+    "level,expected",
+    [
+        ("warmup", 4),
+        ("light", 3),
+        ("medium", 2),
+        ("prefailure", 1),
+        ("failure", 0),
+        (None, 2),
+        ("junk", 2),
+    ],
+)
+def test_effort_to_rir_matches_manual_table(level, expected):
+    assert metrics.effort_to_rir(level) == expected
 
 
 @pytest.mark.parametrize(
-    "weight,equipment",
-    [(41.3, ["barbell"]), (13.1, ["dumbbell"]), (28.0, ["block_machine"])],
+    "weight,equipment,expected",
+    [
+        (41.3, ["barbell"], 42.5),
+        (13.1, ["dumbbell"], 12.5),
+        (28.0, ["block_machine"], 27.22),
+    ],
 )
-def test_round_to_step_matches_legacy(weight, equipment):
+def test_round_to_step_matches_manual_calculation(weight, equipment, expected):
     assert rounding.round_to_step(weight, equipment, "kg", None) == pytest.approx(
-        legacy.round_weight_for_equipment(weight, equipment, "kg", None)
+        expected
     )
 
 
@@ -59,14 +80,32 @@ def test_round_down_never_exceeds_input():
 
 
 def test_round_down_on_block_actually_reduces():
-    # 30 кг минус 10 % = 27 кг. Округление к ближайшему вернуло бы 30 —
-    # снижение бы не сработало вовсе.
-    reduced = rounding.round_down_to_step(27.0, ["block_machine"], "kg", None)
-    assert reduced < 30.0
+    # 30 кг: округление к ближайшему уходит вверх (шаг 10 lb -> 31.75 кг) и
+    # снижение бы не сработало вовсе. round_down обязан строго уменьшить вес.
+    nearest = rounding.round_to_step(30.0, ["block_machine"], "kg", None)
+    down = rounding.round_down_to_step(30.0, ["block_machine"], "kg", None)
+    assert down == pytest.approx(27.22)
+    assert nearest == pytest.approx(31.75)
+    assert down < 30.0
+    assert not (nearest < 30.0)
 
 
 def test_round_down_floor_is_one_step():
     assert rounding.round_down_to_step(0.4, ["barbell"], "kg", None) == pytest.approx(2.5)
+
+
+@pytest.mark.parametrize("equipment", [["bodyweight"], ["band"]])
+def test_custom_step_override_applies_to_other_equipment(equipment):
+    # Находка №2: оборудование вне известных категорий (plate/dumbbell/block)
+    # обязано уважать пользовательский settings.weight_steps, а не жёстко
+    # зашитые 5/2.5.
+    default_result = rounding.round_to_step(12.0, equipment, "kg", None)
+    custom_result = rounding.round_to_step(
+        12.0, equipment, "kg", {"plate_kg": 5}
+    )
+    assert default_result == pytest.approx(12.5)
+    assert custom_result == pytest.approx(10.0)
+    assert custom_result != default_result
 
 
 def test_legacy_names_still_importable():

@@ -56,6 +56,29 @@ SCHEME_DOUBLE = "double"
 SCHEME_FIXED_INCREMENT = "fixed_increment"
 SCHEME_PERCENT_1RM = "percent_1rm"
 
+# --- e1RM: перевод уровня усилия в RIR ---
+# effort_level -> RIR. Оба варианта warmup: "warmup" с фронта,
+# "warmup_effort" из бэкенд-схемы.
+EFFORT_TO_RIR: dict[str, int] = {
+    "warmup": 4,
+    "warmup_effort": 4,
+    "light": 3,
+    "easy": 3,
+    "medium": 2,
+    "prefailure": 1,
+    "failure": 0,
+}
+DEFAULT_RIR = 2
+
+# --- Округление веса: шаги оборудования по умолчанию ---
+DEFAULT_WEIGHT_STEPS: dict[str, float] = {
+    "plate_kg": 2.5,
+    "plate_lb": 5,
+    "dumbbell_kg": 2.5,
+    "dumbbell_lb": 5,
+    "block_lb": 10,  # блочный тренажёр — всегда в фунтах
+}
+
 # --- Причины ---
 REASON_TEXTS: dict[str, str] = {
     "progressed": "Прошлая цель выполнена — двигаемся вперёд.",

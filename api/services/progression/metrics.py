@@ -8,18 +8,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-# effort_level -> RIR. Оба варианта warmup: "warmup" с фронта,
-# "warmup_effort" из бэкенд-схемы.
-EFFORT_TO_RIR = {
-    "warmup": 4,
-    "warmup_effort": 4,
-    "light": 3,
-    "easy": 3,
-    "medium": 2,
-    "prefailure": 1,
-    "failure": 0,
-}
-DEFAULT_RIR = 2
+# Настраиваемые таблицы живут в params.py (Global Constraint проекта):
+# магических чисел в логике быть не должно.
+from api.services.progression.params import DEFAULT_RIR, EFFORT_TO_RIR
 
 
 def effort_to_rir(effort_level: Optional[str]) -> int:

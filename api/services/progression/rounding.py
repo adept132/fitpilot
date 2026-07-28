@@ -7,20 +7,16 @@
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 from api.services import equipment as equip
+from api.services.progression.params import DEFAULT_WEIGHT_STEPS
 
+# Физические константы перевода единиц — не настраиваемые пороги,
+# поэтому в params.py не переносим.
 LB_PER_KG = 2.2046226218
 KG_PER_LB = 0.45359237
-
-DEFAULT_WEIGHT_STEPS = {
-    "plate_kg": 2.5,
-    "plate_lb": 5,
-    "dumbbell_kg": 2.5,
-    "dumbbell_lb": 5,
-    "block_lb": 10,  # блочный тренажёр — всегда в фунтах
-}
 
 
 def _resolve_step(category: str, unit: str, steps: Optional[dict]):
@@ -32,7 +28,10 @@ def _resolve_step(category: str, unit: str, steps: Optional[dict]):
         return (s["dumbbell_lb"], "lb") if unit == "lbs" else (s["dumbbell_kg"], "kg")
     if category == equip.STEP_BLOCK:
         return (s["block_lb"], "lb")
-    return (5, "lb") if unit == "lbs" else (2.5, "kg")
+    # Прочее оборудование (bodyweight/band/...): тот же шаг, что и для
+    # штанги/тренажёра со свободным весом — тоже должен уважать
+    # пользовательское settings.weight_steps, а не жёстко зашитые 5/2.5.
+    return (s["plate_lb"], "lb") if unit == "lbs" else (s["plate_kg"], "kg")
 
 
 def _step_pair(equipment_needed, unit: str, steps: Optional[dict]):
@@ -49,11 +48,13 @@ def step_kg(equipment_needed, unit: str = "kg", steps: Optional[dict] = None) ->
     return round(step * KG_PER_LB, 4) if step_unit == "lb" else float(step)
 
 
-def _apply(weight_kg: float, equipment_needed, unit, steps, mode: str) -> float:
-    import math
-
+def _apply(
+    weight_kg: float, equipment_needed, unit, steps, round_down: bool
+) -> float:
+    """round_down — булев флаг, а не строка: опечатка не может тихо
+    подменить режим округления к ближайшему."""
     step, step_unit = _step_pair(equipment_needed, unit, steps)
-    fn = math.floor if mode == "down" else round
+    fn = math.floor if round_down else round
 
     if step_unit == "lb":
         lbs = weight_kg * LB_PER_KG
@@ -68,11 +69,11 @@ def round_to_step(
     weight_kg: float, equipment_needed, unit: str = "kg", steps: Optional[dict] = None
 ) -> float:
     """К ближайшему шагу. Нижняя граница — один шаг."""
-    return _apply(weight_kg, equipment_needed, unit, steps, "nearest")
+    return _apply(weight_kg, equipment_needed, unit, steps, round_down=False)
 
 
 def round_down_to_step(
     weight_kg: float, equipment_needed, unit: str = "kg", steps: Optional[dict] = None
 ) -> float:
     """Вниз до шага. Нижняя граница — один шаг."""
-    return _apply(weight_kg, equipment_needed, unit, steps, "down")
+    return _apply(weight_kg, equipment_needed, unit, steps, round_down=True)

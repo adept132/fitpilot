@@ -21,27 +21,24 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from api.services import equipment as equip
 from api.services.models import (
     WorkoutSession,
     WorkoutSessionExercise,
 )
 
+# Настраиваемые пороги/таблицы — единый источник в progression/params.py.
+# DEFAULT_RIR используется ниже в этом модуле; DEFAULT_WEIGHT_STEPS и
+# EFFORT_TO_RIR — реэкспорт для внешних импортов (fatigue/, тесты).
+from api.services.progression.params import DEFAULT_RIR
+from api.services.progression.params import DEFAULT_WEIGHT_STEPS, EFFORT_TO_RIR  # noqa: F401
+
 # Формулы и округление переехали в api/services/progression/.
 # Старые имена сохраняются на один релиз: их импортируют fatigue/,
 # csv_format.py и tests/test_autoprogression.py.
-from api.services.progression.metrics import (  # noqa: F401
-    DEFAULT_RIR,
-    EFFORT_TO_RIR,
-    effort_to_rir,
-)
+from api.services.progression.metrics import effort_to_rir  # noqa: F401
 from api.services.progression.metrics import e1rm as set_target_value  # noqa: F401
 from api.services.progression.metrics import weight_for_e1rm as weight_for_target  # noqa: F401
-from api.services.progression.rounding import (  # noqa: F401
-    DEFAULT_WEIGHT_STEPS,
-    KG_PER_LB,
-    LB_PER_KG,
-)
+from api.services.progression.rounding import KG_PER_LB, LB_PER_KG  # noqa: F401
 from api.services.progression.rounding import round_to_step as round_weight_for_equipment  # noqa: F401
 
 # Дефолт коэффициента прогрессии по уровню пользователя.
