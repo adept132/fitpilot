@@ -1,6 +1,8 @@
 import enum
 from typing import Tuple, Dict
 
+from api.services.progression import params as prog_params
+
 
 class DayTacticalType(str, enum.Enum):
     easy = "easy"
@@ -60,6 +62,25 @@ def resolve_rep_range(fatigue_tier: int, day_type: DayTacticalType) -> Tuple[int
 
     tier_matrix = REP_MATRIX.get(fatigue_tier, REP_MATRIX[2])  # Дефолт на Tier 2
     return tier_matrix.get(day_type, (8, 12))
+
+
+def resolve_rep_range_with_source(
+    fatigue_tier: int, day_type: "DayTacticalType | None"
+) -> Tuple[int, int, str]:
+    """Диапазон повторов вместе с его происхождением.
+
+    day_type=None означает, что активного микроцикла нет. Раньше в этом случае
+    молча подставлялся medium, и движок прогрессии не мог отличить осознанное
+    предписание от значения по умолчанию (спека P0-06 §7.1).
+    """
+    if day_type is None:
+        lo, hi = prog_params.TIER_REP_FALLBACK.get(
+            fatigue_tier, prog_params.TIER_REP_FALLBACK[2]
+        )
+        return lo, hi, prog_params.REP_SOURCE_FALLBACK
+
+    lo, hi = resolve_rep_range(fatigue_tier, day_type)
+    return lo, hi, prog_params.REP_SOURCE_MICROCYCLE
 
 
 def resolve_rir(fatigue_tier: int, effort_tier: StrategicEffortTier) -> int:

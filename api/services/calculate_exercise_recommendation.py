@@ -9,7 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.services.models import (
     AppUserMesocycle, AppUserMicrocycle, WorkoutPlan, Mesocycle, WorkoutPlanExercise
 )
-from api.services.resolvers import StrategicEffortTier, DayTacticalType, resolve_rir, resolve_rep_range
+from api.services.resolvers import (
+    StrategicEffortTier,
+    DayTacticalType,
+    resolve_rir,
+    resolve_rep_range_with_source,
+)
 
 
 async def calculate_exercise_recommendations(
@@ -17,7 +22,8 @@ async def calculate_exercise_recommendations(
         app_user_id: int,
         plan_id: Optional[int] = None,
         single_exercise_id: Optional[int] = None,
-        single_fatigue_tier: Optional[int] = None
+        single_fatigue_tier: Optional[int] = None,
+        current_day_index: Optional[int] = None
 ):
     # =====================================================================
     # СЛОЙ 1: МЕЗОЦИКЛ (Получаем StrategicEffortTier для текущей недели)
@@ -48,11 +54,17 @@ async def calculate_exercise_recommendations(
     micro_res = await session.execute(active_micro_stmt)
     active_micro = micro_res.scalar_one_or_none()
 
-    day_type = DayTacticalType.medium
+    # None означает «активного микроцикла нет» — это не то же самое, что
+    # средний день. Явный fallback по fatigue_tier живёт в resolvers
+    # (спека P0-06 §7.1).
+    day_type = None
 
     if active_micro and active_micro.days_mapping:
-        current_day_index = 1
-        day_info = active_micro.days_mapping.get(str(current_day_index), {})
+        # День микроцикла приходит из календаря (UserCalendarDay.microcycle_day_number).
+        # Если контекст дня не передан (свободная тренировка / одиночное упражнение),
+        # безопасно откатываемся на день №1, сохраняя прежнее поведение.
+        resolved_day_index = current_day_index if current_day_index is not None else 1
+        day_info = active_micro.days_mapping.get(str(resolved_day_index), {})
         raw_type = day_info.get("type", "medium")
         day_type = DayTacticalType(raw_type)
 
@@ -82,7 +94,9 @@ async def calculate_exercise_recommendations(
                 fatigue_tier = getattr(plan_ex.exercise, "fatigue_tier", 2) if plan_ex.exercise else 2
 
                 calculated_rir = resolve_rir(fatigue_tier, effort_tier)
-                base_rep_min, base_rep_max = resolve_rep_range(fatigue_tier, day_type)
+                base_rep_min, base_rep_max, rep_range_source = resolve_rep_range_with_source(
+                    fatigue_tier, day_type
+                )
 
                 final_rir = plan_ex.override_rir if plan_ex.override_rir is not None else calculated_rir
                 final_rep_min = base_rep_min
@@ -110,7 +124,8 @@ async def calculate_exercise_recommendations(
                     "superset_group": session_superset_str,
                     "recommended_rir": final_rir,
                     "recommended_rep_min": final_rep_min,
-                    "recommended_rep_max": final_rep_max
+                    "recommended_rep_max": final_rep_max,
+                    "rep_range_source": rep_range_source
                 })
 
     # ВЕТКА Б: Добавление одиночного упражнения на лету
@@ -118,7 +133,9 @@ async def calculate_exercise_recommendations(
         fatigue_tier = single_fatigue_tier if single_fatigue_tier is not None else 2
 
         calculated_rir = resolve_rir(fatigue_tier, effort_tier)
-        base_rep_min, base_rep_max = resolve_rep_range(fatigue_tier, day_type)
+        base_rep_min, base_rep_max, rep_range_source = resolve_rep_range_with_source(
+            fatigue_tier, day_type
+        )
 
         compiled_exercises.append({
             "exercise_id": single_exercise_id,
@@ -127,7 +144,8 @@ async def calculate_exercise_recommendations(
             "superset_group": None,
             "recommended_rir": calculated_rir,
             "recommended_rep_min": base_rep_min,
-            "recommended_rep_max": base_rep_max
+            "recommended_rep_max": base_rep_max,
+            "rep_range_source": rep_range_source
         })
 
     return compiled_exercises
