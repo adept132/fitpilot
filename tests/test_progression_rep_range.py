@@ -2,6 +2,7 @@
 
 import pytest
 
+from api.services.calculate_exercise_recommendation import _apply_override_reps
 from api.services.progression import params
 from api.services.resolvers import (
     DayTacticalType,
@@ -48,3 +49,37 @@ def test_tier_two_fallback_is_wider_than_the_old_implicit_medium():
     implicit_lo, implicit_hi = resolve_rep_range(2, DayTacticalType.medium)
     assert fallback_hi > implicit_hi
     assert fallback_lo == implicit_lo
+
+
+# --- _apply_override_reps: плановый override поверх базового диапазона ---
+
+
+def test_override_reps_range_marks_source_as_plan_override():
+    lo, hi, source = _apply_override_reps(8, 10, params.REP_SOURCE_MICROCYCLE, "6-8")
+    assert (lo, hi) == (6, 8)
+    assert source == params.REP_SOURCE_PLAN
+
+
+def test_override_reps_single_number_marks_source_as_plan_override():
+    lo, hi, source = _apply_override_reps(8, 10, params.REP_SOURCE_FALLBACK, "10")
+    assert (lo, hi) == (10, 10)
+    assert source == params.REP_SOURCE_PLAN
+
+
+@pytest.mark.parametrize("override_reps", [None, ""])
+def test_no_override_reps_keeps_base_source(override_reps):
+    lo, hi, source = _apply_override_reps(8, 10, params.REP_SOURCE_MICROCYCLE, override_reps)
+    assert (lo, hi) == (8, 10)
+    assert source == params.REP_SOURCE_MICROCYCLE
+
+
+def test_unparsable_override_reps_keeps_base_source():
+    lo, hi, source = _apply_override_reps(8, 10, params.REP_SOURCE_FALLBACK, "many")
+    assert (lo, hi) == (8, 10)
+    assert source == params.REP_SOURCE_FALLBACK
+
+
+def test_malformed_override_reps_range_keeps_base_source():
+    lo, hi, source = _apply_override_reps(8, 10, params.REP_SOURCE_MICROCYCLE, "6-8-10")
+    assert (lo, hi) == (8, 10)
+    assert source == params.REP_SOURCE_MICROCYCLE

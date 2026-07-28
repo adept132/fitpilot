@@ -9,12 +9,40 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.services.models import (
     AppUserMesocycle, AppUserMicrocycle, WorkoutPlan, Mesocycle, WorkoutPlanExercise
 )
+from api.services.progression import params
 from api.services.resolvers import (
     StrategicEffortTier,
     DayTacticalType,
     resolve_rir,
     resolve_rep_range_with_source,
 )
+
+
+def _apply_override_reps(
+    base_min: int, base_max: int, base_source: str, override_reps: Optional[str]
+) -> tuple[int, int, str]:
+    """Применяет override_reps плана поверх базового диапазона повторов.
+
+    override_reps может быть диапазоном ("6-8") или одиночным числом ("10").
+    Если override_reps пуст или не распарсился (строка неожиданного формата),
+    базовый диапазон и его происхождение остаются без изменений — метка не
+    должна лгать о том, что предписание пришло из плана (спека P0-06 §7.1).
+    """
+    if not override_reps:
+        return base_min, base_max, base_source
+
+    parts = override_reps.split("-")
+    try:
+        if len(parts) == 2:
+            rep_min, rep_max = int(parts[0].strip()), int(parts[1].strip())
+        elif len(parts) == 1:
+            rep_min = rep_max = int(parts[0].strip())
+        else:
+            return base_min, base_max, base_source
+    except ValueError:
+        return base_min, base_max, base_source
+
+    return rep_min, rep_max, params.REP_SOURCE_PLAN
 
 
 async def calculate_exercise_recommendations(
@@ -99,15 +127,9 @@ async def calculate_exercise_recommendations(
                 )
 
                 final_rir = plan_ex.override_rir if plan_ex.override_rir is not None else calculated_rir
-                final_rep_min = base_rep_min
-                final_rep_max = base_rep_max
-
-                if plan_ex.override_reps:
-                    parts = plan_ex.override_reps.split("-")
-                    if len(parts) == 2:
-                        final_rep_min, final_rep_max = int(parts[0].strip()), int(parts[1].strip())
-                    elif len(parts) == 1:
-                        final_rep_min = final_rep_max = int(parts[0].strip())
+                final_rep_min, final_rep_max, rep_range_source = _apply_override_reps(
+                    base_rep_min, base_rep_max, rep_range_source, plan_ex.override_reps
+                )
 
                 sg_uuid = plan_ex.superset_group_id
                 session_superset_str = None

@@ -1,7 +1,7 @@
 import enum
 from typing import Tuple, Dict
 
-from api.services.progression import params as prog_params
+from api.services.progression import params
 
 
 class DayTacticalType(str, enum.Enum):
@@ -65,7 +65,7 @@ def resolve_rep_range(fatigue_tier: int, day_type: DayTacticalType) -> Tuple[int
 
 
 def resolve_rep_range_with_source(
-    fatigue_tier: int, day_type: "DayTacticalType | None"
+    fatigue_tier: int, day_type: DayTacticalType | None
 ) -> Tuple[int, int, str]:
     """Диапазон повторов вместе с его происхождением.
 
@@ -74,13 +74,13 @@ def resolve_rep_range_with_source(
     предписание от значения по умолчанию (спека P0-06 §7.1).
     """
     if day_type is None:
-        lo, hi = prog_params.TIER_REP_FALLBACK.get(
-            fatigue_tier, prog_params.TIER_REP_FALLBACK[2]
+        lo, hi = params.TIER_REP_FALLBACK.get(
+            fatigue_tier, params.TIER_REP_FALLBACK[2]
         )
-        return lo, hi, prog_params.REP_SOURCE_FALLBACK
+        return lo, hi, params.REP_SOURCE_FALLBACK
 
     lo, hi = resolve_rep_range(fatigue_tier, day_type)
-    return lo, hi, prog_params.REP_SOURCE_MICROCYCLE
+    return lo, hi, params.REP_SOURCE_MICROCYCLE
 
 
 def resolve_rir(fatigue_tier: int, effort_tier: StrategicEffortTier) -> int:
