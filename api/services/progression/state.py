@@ -22,22 +22,42 @@ from api.services.progression.types import (
 )
 
 
-def working_sets(facts: Sequence[SetFact]) -> list[SetFact]:
+def working_sets(facts: Sequence[SetFact], require_weight: bool = True) -> list[SetFact]:
     """Подходы, пригодные для оценки: без разминки, дропов и пустых значений.
 
     Аномальные оставляем — их отсеивает evaluate(), которому нужно отличить
     «все подходы аномальны» от «подходов не было».
+
+    require_weight=False — для упражнений со своим весом (предписание не
+    задаёт weight_kg): отсутствие веса в факте там легитимно, а не пропуск
+    в логе. Дефолт True сохраняет прежнее поведение для внешних вызовов.
     """
     result = []
     for s in facts:
         if (s.set_type or "normal").lower() in params.IGNORED_SET_TYPES:
             continue
-        if s.weight_kg is None or s.reps is None:
+        if require_weight and s.weight_kg is None:
+            continue
+        if s.reps is None:
             continue
         if s.reps <= 0:
             continue
         result.append(s)
     return result
+
+
+def _requires_weight(prescription: Optional[Prescription]) -> bool:
+    """Нужен ли вес в факте, чтобы подход считался валидным.
+
+    Решение по предписанию, а не по факту: предписание само знает, ожидался
+    ли вес. Если оно задаёт вес — факт без веса это забытый лог (require
+    True). Если предписание осознанно без веса (упражнение со своим весом,
+    weight_kg=None) — отсутствие веса в факте легитимно (require False).
+    Предписания нет вовсе — безопасный дефолт True, как было раньше.
+    """
+    if prescription is None or not prescription.sets:
+        return True
+    return prescription.sets[0].weight_kg is not None
 
 
 def _prescription_for(prescription: Prescription, set_number: int) -> SetPrescription:
@@ -61,7 +81,7 @@ def evaluate(
     if prescription is None or not prescription.sets:
         return Outcome(status="no_basis")
 
-    candidates = working_sets(facts)
+    candidates = working_sets(facts, _requires_weight(prescription))
     if not candidates:
         return Outcome(status="skipped")
 
@@ -75,8 +95,9 @@ def evaluate(
     for s in usable:
         sp = _prescription_for(prescription, s.set_number)
 
-        value = e1rm(float(s.weight_kg), int(s.reps), int(s.rir))
-        achieved = value if achieved is None else max(achieved, value)
+        if s.weight_kg is not None:
+            value = e1rm(float(s.weight_kg), int(s.reps), int(s.rir))
+            achieved = value if achieved is None else max(achieved, value)
 
         if sp.weight_kg is not None and abs(float(s.weight_kg) - sp.weight_kg) > step_kg:
             deviated += 1
@@ -114,12 +135,17 @@ def evaluate(
     )
 
 
-def _session_e1rm(session: "SessionFact") -> Optional[float]:
-    """Максимальный e1RM по рабочим неаномальным подходам сессии."""
-    usable = [s for s in working_sets(session.sets) if not s.is_anomalous]
-    if not usable:
+def _measured_e1rm(usable: Sequence[SetFact]) -> Optional[float]:
+    """Максимальный e1RM по подходам, где вес фактически известен.
+
+    Для упражнения со своим весом usable может быть непустым (сессия
+    выполнена), но без единого веса e1RM посчитать нечем — тогда None:
+    это не пропуск сессии, а честное «неизмеримо».
+    """
+    measured = [s for s in usable if s.weight_kg is not None]
+    if not measured:
         return None
-    return max(e1rm(float(s.weight_kg), int(s.reps), int(s.rir)) for s in usable)
+    return max(e1rm(float(s.weight_kg), int(s.reps), int(s.rir)) for s in measured)
 
 
 def rebuild_state(history: ExerciseHistory, step_kg: float) -> ProgressionState:
@@ -140,13 +166,14 @@ def rebuild_state(history: ExerciseHistory, step_kg: float) -> ProgressionState:
     last_scheme: Optional[str] = None
 
     for session in chronological:
-        value = _session_e1rm(session)
-        if value is None:
-            # Пропущенная сессия: ни счётчики, ни метрики не двигаются.
+        require_weight = _requires_weight(session.prescription)
+        usable = [s for s in working_sets(session.sets, require_weight) if not s.is_anomalous]
+        if not usable:
+            # Пропущенная сессия: нет ни одного пригодного подхода —
+            # ни счётчики, ни метрики не двигаются.
             continue
 
         completed += 1
-        working = value
         if session.prescription is not None:
             # `or` здесь неверен: top_weight == 0.0 — валидное предписание
             # (например, безопасное упражнение с нулевым весом), а `or`
@@ -161,6 +188,16 @@ def rebuild_state(history: ExerciseHistory, step_kg: float) -> ProgressionState:
             consecutive_misses += 1
         elif outcome.status in ("hit", "overshoot"):
             consecutive_misses = 0
+
+        value = _measured_e1rm(usable)
+        if value is None:
+            # Сессия выполнена (подходы были), но e1RM неизмерим — свой вес
+            # без отягощения. Прирост силы без массы тела не вывести, а
+            # значит нельзя ни двигать working_e1rm/best_ever/training_max,
+            # ни считать это застоем или прогрессом.
+            continue
+
+        working = value
 
         if session.is_deload:
             # Разгрузка не обязана расти — в счёт застоя не идёт.

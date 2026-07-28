@@ -193,3 +193,50 @@ def test_skipped_sessions_do_not_count():
 def test_last_scheme_is_taken_from_latest_prescription():
     st = rebuild_state(history(session(1, 40.0, 10)), STEP)
     assert st.last_scheme == "double"
+
+
+def bodyweight_presc(rep_min=8, rep_max=12) -> Prescription:
+    """Предписание без веса — упражнение со своим весом (находка 1)."""
+    return Prescription(
+        scheme="double",
+        sets=(SetPrescription(1, None, rep_min, rep_max, 2, "normal"),),
+        reason_code="progressed",
+        reason_text="x",
+    )
+
+
+def bodyweight_session(idx, reps, *, is_deload=False) -> SessionFact:
+    return SessionFact(
+        session_id=idx,
+        finished_at=BASE + timedelta(days=idx),
+        prescription=bodyweight_presc(),
+        sets=(SetFact(1, None, reps, 2),),
+        is_deload=is_deload,
+    )
+
+
+def test_bodyweight_history_completes_sessions_without_measurable_e1rm():
+    # Несколько bodyweight-сессий выше PLATEAU_MIN_SESSIONS: completed_sessions
+    # растёт, working_e1rm неизмерим (None), а stalled остаётся False — движок
+    # не имеет права выдумывать плато там, где нечем измерить силу.
+    sessions = [bodyweight_session(i, 10) for i in range(1, params.PLATEAU_MIN_SESSIONS + 2)]
+    st = rebuild_state(history(*sessions), STEP)
+    assert st.completed_sessions == len(sessions)
+    assert st.working_e1rm is None
+    assert st.best_e1rm_ever is None
+    assert st.training_max is None
+    assert st.stalled is False
+
+
+def test_bodyweight_misses_still_increment_consecutive_misses():
+    # rep_min=8 у bodyweight_presc: недобор ниже него должен считаться миссом
+    # даже без измеримого e1RM — evaluate() работает по повторам, не по весу.
+    st = rebuild_state(
+        history(
+            bodyweight_session(1, 10),
+            bodyweight_session(2, 5),
+            bodyweight_session(3, 6),
+        ),
+        STEP,
+    )
+    assert st.consecutive_misses == 2

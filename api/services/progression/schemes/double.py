@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
+from typing import Optional
 
 from api.services import equipment as equip
 from api.services.progression import params
@@ -24,37 +24,19 @@ from api.services.progression.state import working_sets
 from api.services.progression.types import (
     Prescription,
     SchemeContext,
-    SetFact,
     SetPrescription,
 )
 
 
-def _usable_facts(facts: Sequence[SetFact]) -> List[SetFact]:
-    """Подходы, по которым можно читать повторы прошлой сессии.
+def _previous_reps(ctx: SchemeContext) -> list[int]:
+    """Повторы по подходам ближайшей сессии с данными, по порядку set_number.
 
-    Уже: без разминки/дропов, без аномальных, с положительными повторами.
-    Специально НЕ используем state.working_sets() — там отсутствие веса
-    (weight_kg is None) считается неполными данными (нужно для evaluate(),
-    чтобы отличить забытый лог от факта). Для double это неверно: у
-    упражнения со своим весом weight_kg=None — легитимный, полный факт
-    подхода, а не пропуск, и повторы по нему такие же ориентиры для роста.
+    working_sets(require_weight=False): у упражнения со своим весом
+    weight_kg=None — легитимный, полный факт подхода, а не пропуск, и
+    повторы по нему такие же ориентиры для роста (см. state._requires_weight).
     """
-    result = []
-    for s in facts:
-        if s.is_anomalous:
-            continue
-        if (s.set_type or "normal").lower() in params.IGNORED_SET_TYPES:
-            continue
-        if s.reps is None or s.reps <= 0:
-            continue
-        result.append(s)
-    return result
-
-
-def _previous_reps(ctx: SchemeContext) -> List[int]:
-    """Повторы по подходам ближайшей сессии с данными, по порядку set_number."""
     for session in ctx.history.sessions:
-        usable = _usable_facts(session.sets)
+        usable = [s for s in working_sets(session.sets, require_weight=False) if not s.is_anomalous]
         if usable:
             return [int(s.reps) for s in sorted(usable, key=lambda s: s.set_number)]
     return []
@@ -132,9 +114,19 @@ def plan(ctx: SchemeContext) -> Prescription:
     if ceiling_reached:
         # Все подходы взяли верх диапазона -> прибавляем вес и сбрасываем
         # повторы на низ диапазона.
+        if anchor is None:
+            # Вес ни разу не залогирован и last_top_weight тоже пуст: `+ step`
+            # от нуля выдумало бы физически бессмысленный вес (около одного
+            # шага оборудования) под видом честного прогресса.
+            return Prescription(
+                scheme=params.SCHEME_DOUBLE,
+                sets=(),
+                reason_code="no_basis",
+                reason_text=params.REASON_TEXTS["no_basis"],
+            )
         step = step_kg(list(ctx.equipment), ctx.unit, ctx.weight_steps or None)
         new_weight = round_to_step(
-            (anchor or 0.0) + step, list(ctx.equipment), ctx.unit, ctx.weight_steps or None
+            anchor + step, list(ctx.equipment), ctx.unit, ctx.weight_steps or None
         )
         sets = tuple(
             SetPrescription(n, new_weight, ctx.rep_min, ctx.rep_max, ctx.target_rir, "normal")

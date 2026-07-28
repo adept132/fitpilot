@@ -138,6 +138,22 @@ def test_partial_overshoot_with_hit_is_still_hit():
     assert out.total_sets == 2
 
 
+def test_bodyweight_prescription_with_no_weight_fact_is_hit_not_skipped():
+    # Предписание без веса (упражнение со своим весом) + факт без веса —
+    # require_weight решается по предписанию, а не по факту (находка 1).
+    p = presc((1, None, 8, 12))
+    out = evaluate(p, [fact(1, None, 10)], STEP)
+    assert out.status == "hit"
+
+
+def test_weighted_prescription_with_no_weight_fact_is_still_skipped():
+    # Предписание С весом + факт без веса — подход отброшен как неполный,
+    # поведение как до фикса находки 1.
+    p = presc((1, 40.0, 8, 12))
+    out = evaluate(p, [fact(1, None, 10)], STEP)
+    assert out.status == "skipped"
+
+
 def test_partial_anomaly_is_evaluated_on_normal_set_only():
     # Один подход аномален (абсурдный вес), второй — нормальный и выполненный.
     # Аномальный исключается из оценки, статус определяется только по

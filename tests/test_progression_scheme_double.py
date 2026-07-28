@@ -119,6 +119,18 @@ def test_scheme_name_is_recorded():
     assert p.scheme == params.SCHEME_DOUBLE
 
 
+def test_ceiling_reached_with_no_weight_anchor_gives_no_basis_not_fabricated_weight():
+    # Находка 2: вес ни разу не залогирован (weight=None в истории) и
+    # last_top_weight тоже пуст, но оборудование внешнее (не bodyweight) и
+    # потолок диапазона взят. `(anchor or 0.0) + step` выдумал бы вес около
+    # одного шага оборудования под видом честного прогресса — вместо этого
+    # схема обязана сказать no_basis, как и при полном отсутствии истории.
+    history = last_session(None, [12, 12, 12])
+    p = plan(ctx(history, equipment=("dumbbell",), state=ProgressionState()))
+    assert p.reason_code == "no_basis"
+    assert p.sets == ()
+
+
 def test_scheme_never_lowers_the_weight():
     # Инвариант: схемы умеют только повышать. Даже при полном провале
     # вес не уменьшается — это работа reduction.py.
