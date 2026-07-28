@@ -57,20 +57,27 @@ def increment_for(ctx: SchemeContext, working_weight: float) -> float:
 def _advance(ctx: SchemeContext, anchor: float) -> float:
     """Вес после успешной сессии: анкор + инкремент, округлённый вниз к шагу.
 
-    Известная ловушка: округление вниз может съесть прибавку целиком, если
-    анкор лежит точно на границе шага оборудования — например, для блочного
-    тренажёра (шаг всегда в lb) перевод кг-эквивалента шага туда и обратно
-    теряет доли грамма, и сумма при floor-делении в lb возвращается в тот же
-    грид-пункт, что и анкор. Если округлённый вниз результат не строго выше
-    анкора — гарантируем реальный рост минимум на один шаг напрямую, без
-    повторного округления, вместо тихой остановки прогрессии навсегда.
+    Известная ловушка (в основном закрыта Находкой №1 в rounding.py): округ-
+    ление вниз может съесть прибавку целиком, если анкор лежит точно на
+    границе шага оборудования. Здесь остаётся защита на случай, если она
+    всё же сработает — молчаливая остановка прогрессии недопустима.
+
+    Аварийная ветка поднимается по сетке: anchor + n * increment для расту-
+    щего n, каждый раз пропуская кандидата через каноническое
+    round_down_to_step (а не сырую арифметику), пока результат не окажется
+    строго выше анкора. Число попыток ограничено — на исчерпании анкор
+    остаётся без роста явно, а не зацикливается молча.
     """
     increment = increment_for(ctx, anchor)
     equipment = list(ctx.equipment)
-    weight = round_down_to_step(anchor + increment, equipment, ctx.unit, ctx.weight_steps or None)
-    if weight <= anchor:
-        step = step_kg(equipment, ctx.unit, ctx.weight_steps or None)
-        weight = round(anchor + step, 2)
+    weight = anchor
+    for n in range(1, params.FIXED_INCREMENT_MAX_LIFT_ATTEMPTS + 1):
+        candidate = round_down_to_step(
+            anchor + n * increment, equipment, ctx.unit, ctx.weight_steps or None
+        )
+        if candidate > anchor:
+            weight = candidate
+            break
     return weight
 
 

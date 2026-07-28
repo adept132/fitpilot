@@ -112,3 +112,57 @@ def test_legacy_names_still_importable():
     # Старые имена остаются на один релиз: их импортируют fatigue/, csv_format.py.
     assert legacy.set_target_value(100.0, 10, 2) == pytest.approx(140.0)
     assert legacy.round_weight_for_equipment(41.3, ["barbell"], "kg", None) > 0
+
+
+# --- Идемпотентность округления (находка ревью Задачи 9) ---
+# round_down_to_step для шага в фунтах (блочный тренажёр — всегда lb, а
+# штанга/гантели/"прочее" оборудование — в режиме unit="lbs") гоняет вес
+# кг -> lb -> floor -> lb -> кг. Легитимная точка сетки, прошедшая через
+# хранение в кг (round(..., 2)), при обратном переводе в фунты может стать
+# чуть МЕНЬШЕ исходного значения (round(160 * KG_PER_LB, 2) = 72.57, а
+# 72.57 lb-эквивалент = 159.9946, а не 160) — без допуска floor съедает
+# целый шаг, и повторное применение функции сдвигает вес ещё дальше вниз.
+_EQUIPMENT_CATEGORIES = [
+    ["barbell"],
+    ["dumbbell"],
+    ["block_machine"],
+    ["smith"],
+    ["unknown_category_xyz"],  # оборудование вне известных категорий
+]
+
+
+def _weight_sweep():
+    """5..200 кг с мелким шагом плюс точки, полученные обратной
+    конвертацией из круглых значений в фунтах — именно они ломались."""
+    weights = []
+    w = 5.0
+    while w <= 200.0:
+        weights.append(round(w, 2))
+        w += 0.37
+    for k in range(1, 400):
+        weights.append(round(k * 10.0 * rounding.KG_PER_LB, 2))
+    return weights
+
+
+@pytest.mark.parametrize("equipment", _EQUIPMENT_CATEGORIES)
+def test_round_down_to_step_is_idempotent(equipment):
+    for weight in _weight_sweep():
+        for unit in ("kg", "lbs"):
+            once = rounding.round_down_to_step(weight, equipment, unit, None)
+            twice = rounding.round_down_to_step(once, equipment, unit, None)
+            assert twice == pytest.approx(once), (
+                f"round_down_to_step не идемпотентна для {weight} кг, "
+                f"equipment={equipment}, unit={unit}: {once} -> {twice}"
+            )
+
+
+@pytest.mark.parametrize("equipment", _EQUIPMENT_CATEGORIES)
+def test_round_to_step_is_idempotent(equipment):
+    for weight in _weight_sweep():
+        for unit in ("kg", "lbs"):
+            once = rounding.round_to_step(weight, equipment, unit, None)
+            twice = rounding.round_to_step(once, equipment, unit, None)
+            assert twice == pytest.approx(once), (
+                f"round_to_step не идемпотентна для {weight} кг, "
+                f"equipment={equipment}, unit={unit}: {once} -> {twice}"
+            )

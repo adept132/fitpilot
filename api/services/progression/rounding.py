@@ -11,7 +11,7 @@ import math
 from typing import Optional
 
 from api.services import equipment as equip
-from api.services.progression.params import DEFAULT_WEIGHT_STEPS
+from api.services.progression.params import DEFAULT_WEIGHT_STEPS, LB_ROUNDING_TOLERANCE
 
 # Физические константы перевода единиц — не настраиваемые пороги,
 # поэтому в params.py не переносим.
@@ -54,13 +54,22 @@ def _apply(
     """round_down — булев флаг, а не строка: опечатка не может тихо
     подменить режим округления к ближайшему."""
     step, step_unit = _step_pair(equipment_needed, unit, steps)
-    fn = math.floor if round_down else round
 
     if step_unit == "lb":
         lbs = weight_kg * LB_PER_KG
-        rounded = fn(lbs / step) * step
+        if round_down:
+            # Допуск на ошибку обратной конвертации: легитимная точка сетки
+            # в фунтах, прошедшая через хранение в кг (round(..., 2)), может
+            # вернуться в фунты чуть МЕНЬШЕ исходного значения — без допуска
+            # floor съедает целый шаг (round_down_to_step перестаёт быть
+            # идемпотентной). round_to_step сюда не попадает: там round, а
+            # не floor, и такая ошибка направления не ломает ближайший шаг.
+            rounded = math.floor(lbs / step + LB_ROUNDING_TOLERANCE / step) * step
+        else:
+            rounded = round(lbs / step) * step
         return round(max(step, rounded) * KG_PER_LB, 2)
 
+    fn = math.floor if round_down else round
     rounded = fn(weight_kg / step) * step
     return round(max(step, rounded), 2)
 

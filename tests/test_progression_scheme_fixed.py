@@ -3,6 +3,7 @@
 import pytest
 
 from api.services.progression import params
+from api.services.progression.rounding import round_down_to_step
 from api.services.progression.schemes.fixed_increment import increment_for, plan
 from api.services.progression.types import (
     ExerciseHistory,
@@ -123,3 +124,26 @@ def test_floor_rounding_never_stalls_progression():
     )
     p = plan(c)
     assert all(s.weight_kg > 40.82 for s in p.sets)
+
+
+@pytest.mark.parametrize("anchor", [12.5, 20.0, 40.0, 77.5, 140.0])
+def test_emergency_branch_output_is_grid_fixed_point(anchor):
+    """Находка №2 ревью Задачи 9: аварийная ветка _advance() раньше выдавала
+    сырое anchor + step в обход канонического округления, и результат не был
+    неподвижной точкой round_down_to_step (вне сетки оборудования).
+
+    Эти пять анкоров (12.5, 20, 40, 77.5, 140 — набор Задачи 12) на блочном
+    тренажёре раньше все попадали в аварийную ветку. Результат обязан быть
+    строго больше анкора и лежать на сетке.
+    """
+    c = ctx(
+        last_session(anchor, [5, 5, 5]),
+        equipment=("block_machine",),
+        main_muscle_group="грудь",
+    )
+    p = plan(c)
+    for s in p.sets:
+        assert s.weight_kg > anchor
+        assert round_down_to_step(s.weight_kg, ["block_machine"], "kg", None) == pytest.approx(
+            s.weight_kg
+        )
