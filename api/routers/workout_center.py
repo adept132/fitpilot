@@ -500,7 +500,14 @@ async def start_workout(
                 superset_group=ex_data.get("superset_group"),
                 recommended_rir=ex_data.get("recommended_rir"),
                 recommended_rep_min=ex_data.get("recommended_rep_min"),
-                recommended_rep_max=ex_data.get("recommended_rep_max")
+                recommended_rep_max=ex_data.get("recommended_rep_max"),
+                # Блокер 2 (финальное ревью P0-06): раньше target_sets плана
+                # использовался только ниже, для создания подходов, и не
+                # попадал в саму строку сессии — build_context брал дефолт
+                # (session_exercise.target_sets or 3), и предписание
+                # считалось на 3 подхода независимо от того, что говорил план.
+                # plans.py::apply_plan_to_calendar приведён к тому же поведению.
+                target_sets=ex_data.get("target_sets"),
             )
             session.add(new_ex)
             await session.flush()

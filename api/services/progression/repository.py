@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
 
@@ -203,6 +204,31 @@ async def load_history(
             )
         except (KeyError, TypeError, ValueError):
             prescription = None
+
+        # P0-06, блокер 1 (принадлежность предписания упражнению): при
+        # full_replace (см. api/routers/exercises.py, ветка без выполненных
+        # подходов) строка WorkoutSessionExercise меняет exercise_id, но
+        # prescription — write-once и остаётся от СТАРОГО упражнения.
+        # persist_prescription штампует id упражнения, для которого
+        # предписание посчитано, в basis["exercise_id"]. Если метка есть и
+        # не совпадает с exercise_id, чью историю мы сейчас читаем, —
+        # предписание принадлежит другому упражнению, и evaluate() не
+        # должен сравнивать с ним факт (иначе упражнение без единой
+        # тренировки в своей истории получит чужую цель, evaluate() погонит
+        # снижение по чужому промаху, а _has_prescription_history() решит,
+        # что бутстрап уже пройден). Деградируем так же, как при
+        # неразбираемом JSON выше: считаем, что у сессии нет предписания.
+        #
+        # Обратная совместимость: у ВСЕХ предписаний, сохранённых до этого
+        # фикса, метки в basis нет вовсе. Отсутствие метки — это НЕ признак
+        # чужого предписания, а "принадлежность неизвестна" -> доверяем.
+        # Если трактовать отсутствие метки как несовпадение, эта проверка
+        # обнулит всю накопленную историю предписаний.
+        if prescription is not None:
+            owner_exercise_id = prescription.basis.get("exercise_id")
+            if owner_exercise_id is not None and owner_exercise_id != exercise_id:
+                prescription = None
+
         effort_tier = deload_map.get(
             (workout.app_user_mesocycle_id, workout.mesocycle_phase)
         )
@@ -295,6 +321,14 @@ def persist_prescription(
         return
     if not prescription.sets:
         return
+
+    # P0-06, блокер 1: штампуем, для какого упражнения посчитано это
+    # предписание. Единственная подпись принадлежности, которая переживёт
+    # full_replace (exercise_id строки меняется, а write-once prescription —
+    # нет); load_history сверяет эту метку при чтении истории (см. там же).
+    basis = dict(prescription.basis)
+    basis["exercise_id"] = session_exercise.exercise_id
+    prescription = replace(prescription, basis=basis)
 
     session_exercise.prescription = prescription.to_dict()
 

@@ -214,7 +214,14 @@ async def apply_plan_to_calendar(
             exercise_id=plan_ex.exercise_id,
             order_index=plan_ex.order_index,
             # Преобразуем UUID в строку, если он есть
-            superset_group=str(plan_ex.superset_group_id) if plan_ex.superset_group_id else None
+            superset_group=str(plan_ex.superset_group_id) if plan_ex.superset_group_id else None,
+            # Блокер 2 (финальное ревью P0-06): раньше target_sets плана не
+            # попадал в строку сессии — build_context брал дефолт
+            # (session_exercise.target_sets or 3), и предписание считалось
+            # на 3 подхода, даже если план говорил, скажем, 5. Строки
+            # WorkoutSessionSet ниже создаются по plan_ex.target_sets
+            # правильно, разъезжались только они и предписание.
+            target_sets=plan_ex.target_sets,
         )
         db.add(session_ex)
         await db.flush()  # Получаем ID упражнения в сессии
@@ -229,10 +236,11 @@ async def apply_plan_to_calendar(
             )
             db.add(new_set)
 
-        # session_ex.recommended_rep_min/max/target_sets тут не заполняются
-        # (пред-существующий разрыв этого эндпоинта, вне периметра C1/C2) —
-        # build_context сам откатится на TIER_REP_FALLBACK по fatigue_tier
-        # упражнения и на target_sets=3 по умолчанию.
+        # session_ex.recommended_rep_min/max тут по-прежнему не заполняются
+        # (пред-существующий разрыв этого эндпоинта, вне периметра C1/C2/
+        # блокера 2 финального ревью) — build_context сам откатится на
+        # TIER_REP_FALLBACK по fatigue_tier упражнения. target_sets теперь
+        # заполняется явно выше.
         session_ex.exercise = exercises_by_id.get(plan_ex.exercise_id)
         ctx = await progression_repo.build_context(
             db,

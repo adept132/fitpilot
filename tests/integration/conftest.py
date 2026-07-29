@@ -33,7 +33,10 @@ from api.services.app_user_service import (  # noqa: E402
 )
 from api.services.models import (  # noqa: E402
     AppUser,
+    AppUserMesocycle,
     Exercise,
+    Mesocycle,
+    MesocyclePhase,
     WorkoutPlan,
     WorkoutPlanExercise,
     WorkoutSession,
@@ -294,6 +297,78 @@ async def seeded_plan(db: AsyncSession, test_user: AppUser, seeded_history: Exer
     db.add(plan_ex)
     await db.commit()
     yield plan
+
+
+@pytest_asyncio.fixture
+async def seeded_plan_five_sets(db: AsyncSession, test_user: AppUser, seeded_history: Exercise):
+    """Тот же план, что и seeded_plan, но target_sets=5 вместо 3 —
+    нужен блокеру 2 финального ревью P0-06: значение != дефолту build_context
+    (session_exercise.target_sets or 3), иначе тест на проброс target_sets
+    прошёл бы даже без починки, случайно совпав с дефолтом.
+    """
+    plan = WorkoutPlan(
+        app_user_id=test_user.id,
+        name="Тестовый план P0-06 (5 подходов)",
+        day_tag="push",
+        micro_tag="medium",
+        meso_tag="medium",
+    )
+    db.add(plan)
+    await db.flush()
+
+    plan_ex = WorkoutPlanExercise(
+        plan_id=plan.id,
+        exercise_id=seeded_history.id,
+        order_index=0,
+        target_sets=5,
+    )
+    db.add(plan_ex)
+    await db.commit()
+    yield plan
+
+
+@pytest_asyncio.fixture
+async def deload_phase_mesocycle(db: AsyncSession, test_user: AppUser):
+    """Активный мезоцикл test_user с единственной фазой effort_tier="deload".
+
+    Нужен блокеру 3 финального ревью P0-06: существующие тесты resolve_scheme
+    (tests/test_progression_resolve.py) задают phase_effort_tier НАПРЯМУЮ в
+    SchemeContext и проходят даже без единой строчки резолва фазы из БД —
+    именно поэтому дефект "phase_effort_tier не резолвится ни на одном
+    пишущем пути" (C2) проскочил через 19 ревью. Эта фикстура даёт тесту
+    настоящие строки Mesocycle/MesocyclePhase/AppUserMesocycle, чтобы
+    проверить резолв через repository.resolve_phase_effort_tier целиком —
+    от активного мезоцикла пользователя до reason_code сохранённого
+    предписания.
+    """
+    marker = uuid.uuid4().hex[:8]
+    meso = Mesocycle(
+        author_id=test_user.id,
+        name=f"Тестовый мезоцикл {marker}",
+        code=f"test-deload-{marker}",
+        phases_in_cycle=1,
+    )
+    db.add(meso)
+    await db.flush()
+
+    phase = MesocyclePhase(
+        mesocycle_id=meso.id,
+        phase_number=1,
+        name="Разгрузка",
+        effort_tier="deload",
+    )
+    db.add(phase)
+
+    app_user_meso = AppUserMesocycle(
+        app_user_id=test_user.id,
+        mesocycle_id=meso.id,
+        is_active=True,
+        microcycle_length=7,
+        current_phase=1,
+    )
+    db.add(app_user_meso)
+    await db.commit()
+    yield app_user_meso
 
 
 @pytest_asyncio.fixture

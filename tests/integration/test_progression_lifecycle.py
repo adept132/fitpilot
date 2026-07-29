@@ -204,3 +204,130 @@ async def test_starting_workout_from_plan_stores_prescription(
         )
         assert ex["prescription"]["reason_code"]
         assert ex["recommended_weight"] is not None
+
+
+@pytest.mark.asyncio
+async def test_plan_target_sets_reaches_prescription(
+    client, auth_headers, seeded_plan_five_sets
+):
+    """Блокер 2 (финальное ревью P0-06): target_sets плана (=5) обязан
+    попасть и в саму строку WorkoutSessionExercise, и в предписание — до
+    фикса build_context брал дефолт (session_exercise.target_sets or 3), и
+    предписание считалось на 3 подхода независимо от того, что говорил план.
+
+    seeded_plan_five_sets — тот же план, что и seeded_plan, но с
+    target_sets=5, чтобы не совпасть с дефолтом build_context случайно.
+    """
+    resp = await client.post(
+        "/workouts/start",
+        headers=auth_headers,
+        json={"source": "free", "plan_id": seeded_plan_five_sets.id},
+    )
+    assert resp.status_code == 200, resp.text
+    workout_id = resp.json()["id"]
+
+    detail = (
+        await client.get(f"/workouts/{workout_id}", headers=auth_headers)
+    ).json()
+    exercises = detail["exercises"]
+    assert exercises, "план должен был создать хотя бы одно упражнение в сессии"
+
+    ex = exercises[0]
+    assert ex["target_sets"] == 5, ex
+    assert ex["prescription"] is not None
+    assert len(ex["prescription"]["sets"]) == 5, ex["prescription"]
+
+
+@pytest.mark.asyncio
+async def test_deload_phase_reaches_persisted_prescription(
+    client, auth_headers, seeded_history, deload_phase_mesocycle
+):
+    """Блокер 3, тест 1 (финальное ревью P0-06): фаза мезоцикла обязана
+    резолвиться из БД на ПИШУЩЕМ пути (добавление упражнения в активную
+    сессию), а не только в юнит-тестах resolve_scheme
+    (tests/test_progression_resolve.py), которые задают phase_effort_tier
+    напрямую в SchemeContext и проходят даже без единой строчки резолва
+    фазы из БД — именно так дефект C2 ("phase_effort_tier не резолвится ни
+    на одном пишущем пути") проскочил через 19 ревью.
+
+    Сессия стартует свободной ("source": "free") — workout_center.py::
+    start_workout, ветка "ИНТЕЛЛЕКТУАЛЬНЫЙ ПОИСК КОНТЕКСТА", сама подхватывает
+    активный мезоцикл пользователя (deload_phase_mesocycle.is_active=True) и
+    проставляет app_user_mesocycle_id/mesocycle_phase на WorkoutSession.
+    Упражнение добавляется уже в эту сессию, поэтому add_exercise_to_workout
+    обязан прокинуть их в build_context через resolve_phase_effort_tier —
+    иначе получит дефолт "medium" и правило deload_phase (reduction.py)
+    останется мёртвым кодом, как до фикса C2.
+    """
+    workout = (
+        await client.post("/workouts/start", headers=auth_headers, json={"source": "free"})
+    ).json()
+    resp = await client.post(
+        f"/workouts/{workout['id']}/exercises",
+        headers=auth_headers,
+        json={"exercise_id": seeded_history.id},
+    )
+    assert resp.status_code == 200, resp.text
+
+    prescription = resp.json()["exercises"][-1]["prescription"]
+    assert prescription is not None
+    assert prescription["reason_code"] == "deload_phase", prescription
+
+
+@pytest.mark.asyncio
+async def test_second_plan_workout_exits_bootstrap_scheme(
+    client, auth_headers, seeded_plan, seeded_history
+):
+    """Блокер 3, тест 2 (финальное ревью P0-06): вторая тренировка из того же
+    плана обязана выйти из бутстрапа e1rm_factor.
+
+    После первой сессии из плана в истории упражнения появляется сохранённое
+    предписание (persist_prescription вызывается сразу при создании
+    WorkoutSessionExercise из плана, C1), и _has_prescription_history
+    (api/services/progression/resolve.py) видит его — resolve_scheme больше
+    не обязан скатываться в бутстрап.
+
+    Существующий test_starting_workout_from_plan_stores_prescription
+    проверяет только "предписание непустое" — это условие выполняется и
+    бутстрапом (reason_code=bootstrap_no_prescription для ПЕРВОЙ сессии),
+    поэтому он не ловит регрессию "движок навсегда застрял в бутстрапе".
+    Этот тест смотрит на scheme/reason_code именно ВТОРОЙ сессии.
+    """
+    first = (
+        await client.post(
+            "/workouts/start",
+            headers=auth_headers,
+            json={"source": "free", "plan_id": seeded_plan.id},
+        )
+    ).json()
+    first_detail = (
+        await client.get(f"/workouts/{first['id']}", headers=auth_headers)
+    ).json()
+    first_ex = first_detail["exercises"][0]
+    assert first_ex["exercise"]["id"] == seeded_history.id
+
+    await client.post(
+        f"/workout-session-exercises/{first_ex['id']}/sets",
+        headers=auth_headers,
+        json={"weight": 42.5, "reps": 12, "effort_level": "medium"},
+    )
+    finish = await client.post(f"/workouts/{first['id']}/finish", headers=auth_headers)
+    assert finish.status_code == 200, finish.text
+
+    second = (
+        await client.post(
+            "/workouts/start",
+            headers=auth_headers,
+            json={"source": "free", "plan_id": seeded_plan.id},
+        )
+    ).json()
+    second_detail = (
+        await client.get(f"/workouts/{second['id']}", headers=auth_headers)
+    ).json()
+    second_ex = second_detail["exercises"][0]
+    assert second_ex["exercise"]["id"] == seeded_history.id
+
+    prescription = second_ex["prescription"]
+    assert prescription is not None
+    assert prescription["scheme"] != "e1rm_factor", prescription
+    assert prescription["reason_code"] != "bootstrap_no_prescription", prescription
