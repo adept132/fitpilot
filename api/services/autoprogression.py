@@ -27,9 +27,10 @@ from api.services.models import (
 )
 
 # Настраиваемые пороги/таблицы — единый источник в progression/params.py.
-# DEFAULT_RIR используется ниже в этом модуле; DEFAULT_WEIGHT_STEPS и
-# EFFORT_TO_RIR — реэкспорт для внешних импортов (fatigue/, тесты).
-from api.services.progression.params import DEFAULT_RIR
+# С переходом compute_autoprogression на движок (P0-06) в этом модуле сами
+# больше не используются — только реэкспорт для внешних импортов
+# (DEFAULT_RIR тянет csv_format.py, DEFAULT_WEIGHT_STEPS/EFFORT_TO_RIR — fatigue/, тесты).
+from api.services.progression.params import DEFAULT_RIR  # noqa: F401
 from api.services.progression.params import DEFAULT_WEIGHT_STEPS, EFFORT_TO_RIR  # noqa: F401
 
 # Формулы и округление переехали в api/services/progression/.
@@ -133,90 +134,53 @@ async def compute_autoprogression(
     settings: Optional[dict],
     target_reps: Optional[int] = None,
     target_effort: Optional[str] = None,
+    phase_effort_tier: str = "medium",
+    provisional: bool = False,
 ) -> dict:
-    """Возвращает dict под AutoprogressionResponse.
+    """Совместимая обёртка над движком прогрессии (P0-06).
 
-    target_reps/target_effort передаются только в свободной тренировке (пользователь
-    выбрал их вручную). В плановой тренировке берём recommended_* из session_exercise.
+    Форма ответа сохранена ради AutoprogressionResponse и старых клиентов;
+    добавлены prescription/scheme/reason_*.
     """
-    exercise = session_exercise.exercise
-    equipment = getattr(exercise, "equipment_needed", None) or []
-    metric = "e1rm"  # единая метрика для базовых и изолирующих упражнений
+    from api.services.progression import repository
+    from api.services.progression.engine import plan_exercise
+    from api.services.progression.resolve import override_for
 
-    basis_sets = await get_last_performance_basis_sets(
-        session, app_user_id, exercise.id
+    ctx = await repository.build_context(
+        session,
+        session_exercise,
+        app_user_id,
+        experience_level,
+        settings,
+        phase_effort_tier=phase_effort_tier,
     )
-    if not basis_sets:
-        return {
-            "has_basis": False,
-            "metric": None,
-            "target_weight": None,
-            "target_reps": None,
-            "modified_target": None,
-        }
 
-    base_value = max(
-        set_target_value(float(s.weight), int(s.reps), effort_to_rir(s.effort_level))
-        for s in basis_sets
-    )
-    factor = progression_factor_for(experience_level, settings)
-    mod = base_value * factor
-
-    unit = (settings or {}).get("weight_unit", "kg")
-    steps = (settings or {}).get("weight_steps")
-
-    # Целевой RIR и набор кандидатов по повторениям.
     if target_reps is not None:
-        # Свободная тренировка: пользователь выбрал конкретные повторения/усилие.
-        if target_effort is not None:
-            rir_t = effort_to_rir(target_effort)
-        elif session_exercise.recommended_rir is not None:
-            rir_t = session_exercise.recommended_rir
-        else:
-            rir_t = DEFAULT_RIR
-        rep_candidates = [int(target_reps)]
-    else:
-        rir_t = (
-            session_exercise.recommended_rir
-            if session_exercise.recommended_rir is not None
-            else DEFAULT_RIR
+        # Свободная тренировка: пользователь выбрал повторы и усилие руками.
+        from dataclasses import replace
+
+        rir = (
+            effort_to_rir(target_effort)
+            if target_effort is not None
+            else ctx.target_rir
         )
-        rmin = session_exercise.recommended_rep_min
-        rmax = session_exercise.recommended_rep_max
-        if rmin and rmax and rmax >= rmin:
-            rep_candidates = list(range(int(rmin), int(rmax) + 1))
-        elif rmin:
-            rep_candidates = [int(rmin)]
-        elif rmax:
-            rep_candidates = [int(rmax)]
-        else:
-            rep_candidates = []
+        ctx = replace(ctx, rep_min=int(target_reps), rep_max=int(target_reps), target_rir=rir)
 
-    if not rep_candidates:
-        # Есть база, но целевые повторения не заданы (напр. свободная тренировка
-        # до выбора пикеров) -> сигнал фронту показать выбор.
-        return {
-            "has_basis": True,
-            "metric": metric,
-            "target_weight": None,
-            "target_reps": None,
-            "modified_target": round(mod, 2),
-        }
+    prescription = plan_exercise(
+        ctx,
+        override=override_for(settings, session_exercise.exercise_id),
+        provisional=provisional,
+    )
 
-    best = None  # (abs_diff, weight, reps)
-    for r in rep_candidates:
-        raw_w = weight_for_target(mod, r, rir_t)
-        w_r = round_weight_for_equipment(raw_w, equipment, unit, steps)
-        new_val = set_target_value(w_r, r, rir_t)
-        diff = abs(new_val - mod)
-        if best is None or diff < best[0]:
-            best = (diff, w_r, r)
-
-    _, best_weight, best_reps = best
+    first = prescription.sets[0] if prescription.sets else None
     return {
-        "has_basis": True,
-        "metric": metric,
-        "target_weight": best_weight,
-        "target_reps": best_reps,
-        "modified_target": round(mod, 2),
+        "has_basis": bool(prescription.sets),
+        "metric": "e1rm" if prescription.sets else None,
+        "target_weight": first.weight_kg if first else None,
+        "target_reps": first.rep_min if first else None,
+        "modified_target": prescription.basis.get("modified_target"),
+        "prescription": prescription.to_dict() if prescription.sets else None,
+        "scheme": prescription.scheme,
+        "reason_code": prescription.reason_code,
+        "reason_text": prescription.reason_text,
     }

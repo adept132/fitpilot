@@ -14,6 +14,9 @@ from api.schemas.plan import VolumeTargetsResponse, MuscleTarget, UpdatePlanCont
 from api.schemas.workouts import FinishWorkoutResponse, WorkoutFinishedExerciseSummary
 from api.services.app_user_service import get_current_app_user
 from api.services.calculate_exercise_recommendation import calculate_exercise_recommendations
+from api.services.progression import repository as progression_repo
+from api.services.progression.engine import plan_exercise
+from api.services.progression.resolve import override_for
 
 # ОБНОВЛЕННЫЕ ИМПОРТЫ МОДЕЛЕЙ БАЗЫ ДАННЫХ
 from api.services.models import (
@@ -521,6 +524,36 @@ async def finish_workout(
     finished_at = datetime.now(timezone.utc)
     workout.status = "finished"
     workout.finished_at = finished_at
+
+    # Оценка результата и предварительное предписание на следующий раз.
+    # next_prescription едет на устройство и делает прогрессию доступной
+    # офлайн даже для упражнения, добавленного без сети.
+    #
+    # Порядок принципиален: цикл идёт ПОСЛЕ того, как статус тренировки стал
+    # finished и проставлен finished_at (см. выше). load_history отбирает
+    # сессии по WorkoutSession.status == "finished" — если пересчитать раньше,
+    # текущая сессия в свою же историю не попадёт и состояние обновится по
+    # устаревшим данным. Автофлаш AsyncSession перед execute() гарантирует,
+    # что build_context увидит эти изменения ещё до commit.
+    profile_result = await db.execute(
+        select(AppUserProfile).where(AppUserProfile.app_user_id == current_app_user.id)
+    )
+    profile = profile_result.scalars().first()
+    experience_level = profile.experience_level if profile else None
+    settings = profile.settings if profile else None
+
+    for se in workout.exercises:
+        ctx = await progression_repo.build_context(
+            db, se, current_app_user.id, experience_level, settings
+        )
+        nxt = plan_exercise(
+            ctx,
+            override=override_for(settings, se.exercise_id),
+            provisional=True,
+        )
+        await progression_repo.refresh_state(
+            db, current_app_user.id, se.exercise_id, nxt
+        )
 
     await db.commit()
     await db.refresh(workout)

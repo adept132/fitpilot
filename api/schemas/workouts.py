@@ -41,12 +41,22 @@ class AutoprogressionResponse(BaseModel):
     target_weight: float | None = None
     target_reps: int | None = None
     modified_target: float | None = None
+    # P0-06: единый движок прогрессии — поподходное предписание и его обоснование.
+    prescription: dict | None = None
+    scheme: str | None = None
+    reason_code: str | None = None
+    reason_text: str | None = None
 
 
 class WorkoutSessionSetResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    # Клиентский ключ синхронизации. Без него offline-клиент не может сопоставить
+    # серверную строку со своей локальной (у офлайн-созданных сущностей id
+    # отрицательный и с серверным никогда не совпадёт) — а без сопоставления
+    # невозможен ни merge после конфликта, ни защита от дублей при pull.
+    client_uuid: str | None = None
     set_number: int
     set_type: WorkoutSetType
     weight: Decimal | None = None
@@ -63,6 +73,7 @@ class WorkoutSessionExerciseResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    client_uuid: str | None = None
     order_index: int
     superset_group: str | None = None
     notes: str | None = None
@@ -75,6 +86,9 @@ class WorkoutSessionExerciseResponse(BaseModel):
     recommended_rep_min: Optional[int] = None
     recommended_rep_max: Optional[int] = None
     target_sets: Optional[int] = None
+    # P0-06: снимок веса и поподходное предписание движка прогрессии.
+    recommended_weight: Decimal | None = None
+    prescription: dict | None = None
 
 class MuscleVolumeTarget(BaseModel):
     target_sets: int
@@ -84,6 +98,7 @@ class WorkoutSessionDetailResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    client_uuid: str | None = None
     source: WorkoutSource
     status: WorkoutStatus
 

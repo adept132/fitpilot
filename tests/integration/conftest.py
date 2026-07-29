@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest_asyncio
 from fastapi import Depends
@@ -161,6 +162,101 @@ async def client(test_user: AppUser):
 async def db():
     async with SessionLocal() as session:
         yield session
+
+
+# --- Фикстуры для тестов жизненного цикла движка прогрессии (P0-06, Задача 14) ---
+#
+# ВАЖНО: строятся на db/test_user (коммитящее соединение), а НЕ на
+# db_session/app_user. Тесты в test_progression_lifecycle.py ходят через HTTP
+# клиент `client`, который сам завязан на test_user и на каждый запрос
+# открывает СВОЁ соединение (см. api/deps.get_db) — данные, созданные этими
+# фикстурами, обязаны быть закоммичены заранее, иначе клиентские запросы их
+# просто не увидят. Смешивать здесь db_session/app_user с client нельзя — это
+# ровно механика вечной блокировки, разобранная в комментарии ниже. Тот же
+# паттерн (db + test_user, коммит в фикстуре) уже используется и проверен в
+# tests/integration/test_p001_integrity.py (_make_finished_session_with_sets).
+
+
+@pytest_asyncio.fixture
+async def auth_headers():
+    """Клиент авторизуется через dependency_overrides (см. фикстуру client),
+    поэтому реальный Firebase-токен не нужен — пустой словарь для единообразия
+    сигнатур тестов, которые ожидают заголовки."""
+    return {}
+
+
+@pytest_asyncio.fixture
+async def seeded_history(db: AsyncSession, test_user: AppUser):
+    """Кастомное упражнение test_user с одной завершённой тренировкой
+    3x12x40кг — база, на которой движок прогрессии строит первое предписание."""
+    marker = uuid.uuid4().hex[:8]
+    ex = Exercise(
+        name=f"Тестовое упражнение с историей {marker}",
+        category="base",
+        main_muscle_group="chest",
+        difficulty="beginner",
+        equipment_needed=[],
+        # ck_exercises_source_user: app_user_id NOT NULL требует source != 'default'.
+        source="custom",
+        app_user_id=test_user.id,
+    )
+    db.add(ex)
+    await db.flush()
+
+    workout = WorkoutSession(
+        app_user_id=test_user.id,
+        source="free",
+        status="finished",
+        finished_at=datetime.now(timezone.utc) - timedelta(minutes=30),
+    )
+    db.add(workout)
+    await db.flush()
+
+    se = WorkoutSessionExercise(
+        workout_session_id=workout.id,
+        exercise_id=ex.id,
+        order_index=0,
+    )
+    db.add(se)
+    await db.flush()
+
+    for set_number in range(1, 4):
+        db.add(
+            WorkoutSessionSet(
+                workout_session_exercise_id=se.id,
+                set_number=set_number,
+                set_type="normal",
+                weight=40.0,
+                reps=12,
+                effort_level="medium",
+                is_completed=True,
+            )
+        )
+
+    await db.commit()
+    yield ex
+    # Отдельного teardown не нужно: exercise/workout/sets висят на
+    # test_user.id, и teardown фикстуры test_user уже сносит их в правильном
+    # FK-порядке (sets -> session_exercises -> sessions -> exercises).
+
+
+@pytest_asyncio.fixture
+async def fresh_exercise(db: AsyncSession, test_user: AppUser):
+    """Кастомное упражнение test_user без единой завершённой тренировки —
+    движок обязан отдать no_basis, а не упасть."""
+    marker = uuid.uuid4().hex[:8]
+    ex = Exercise(
+        name=f"Тестовое упражнение без истории {marker}",
+        category="base",
+        main_muscle_group="back",
+        difficulty="beginner",
+        equipment_needed=[],
+        source="custom",
+        app_user_id=test_user.id,
+    )
+    db.add(ex)
+    await db.commit()
+    yield ex
 
 
 # --- Фикстуры для тестов репозитория движка прогрессии (P0-06) ---

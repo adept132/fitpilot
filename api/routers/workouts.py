@@ -15,6 +15,9 @@ from api.services.app_user_service import get_current_app_user
 from api.services.autoprogression import compute_autoprogression
 from api.services.calculate_exercise_recommendation import calculate_exercise_recommendations
 from api.services.exercise_utils import get_base_exercise_query
+from api.services.progression import repository as progression_repo
+from api.services.progression.engine import plan_exercise
+from api.services.progression.resolve import override_for
 from api.services.workout_superset_service import WorkoutSupersetService
 from api.services.models import WorkoutSession, WorkoutSessionExercise, Exercise, WorkoutSessionSet, AppUser, \
     AppUserProfile
@@ -105,6 +108,30 @@ async def get_workout_detail(
         )
 
     return workout
+
+
+@router.delete(
+    "/workouts/{workout_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_workout(
+    workout_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_app_user=Depends(get_current_app_user),
+):
+    """Отмена тренировки: каскадно удаляет упражнения и подходы сессии."""
+    stmt = select(WorkoutSession).where(WorkoutSession.id == workout_id)
+    result = await db.execute(stmt)
+    workout = result.scalar_one_or_none()
+
+    if workout is None or workout.app_user_id != current_app_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workout not found",
+        )
+
+    await db.delete(workout)
+    await db.commit()
 
 
 @router.post(
@@ -210,10 +237,15 @@ async def add_exercise_to_workout(
     # не пытался сделать ленивую подгрузку session_exercise.exercise (запрещено в async SQLAlchemy).
     session_exercise.exercise = exercise
 
-    auto = await compute_autoprogression(
+    # Предписание считаем сразу: пользователь должен увидеть цель до первого
+    # подхода, а evaluate() потом сравнит факт именно с ней.
+    ctx = await progression_repo.build_context(
         db, session_exercise, current_app_user.id, experience_level, settings
     )
-    session_exercise.recommended_weight = auto.get("target_weight")
+    prescription = plan_exercise(
+        ctx, override=override_for(settings, session_exercise.exercise_id)
+    )
+    progression_repo.persist_prescription(session_exercise, prescription)
 
     await db.commit()
 
@@ -226,6 +258,14 @@ async def add_exercise_to_workout(
         .options(
             _workout_session_options()
         )
+        # populate_existing: `workout` (тот же объект, что вернёт этот запрос —
+        # SQLAlchemy identity map) уже был загружен ВЫШЕ с selectinload(exercises),
+        # который в момент загрузки был пуст (упражнение ещё не добавлено). Раз
+        # коллекция уже помечена загруженной, а expire_on_commit=False (см.
+        # app/database.py), commit() её не инвалидирует — без populate_existing
+        # повторный SELECT ниже молча вернул бы тот же устаревший пустой список
+        # вместо только что добавленного упражнения.
+        .execution_options(populate_existing=True)
     )
 
     detail_result = await db.execute(detail_stmt)
