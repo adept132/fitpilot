@@ -105,3 +105,99 @@ async def test_override_changes_the_prescribed_scheme(
     ).json()["exercises"][-1]
 
     assert added["prescription"]["scheme"] == "fixed_increment"
+
+
+# --- Фикс Critical: null снимает override, нестроковые значения — 422 ---
+# (см. docs/superpowers/plans/2026-07-27-p0-06-progression-engine.md, Задача 15,
+# ревью нашло краш на PATCH .../settings {"overrides": {"7": null}} — join()
+# необработанного TypeError на нестроковых значениях overrides.values()).
+
+
+@pytest.mark.asyncio
+async def test_null_removes_override_and_keeps_others(client, auth_headers, with_profile):
+    """null для одного ключа снимает именно его override, не трогая
+    override других упражнений — семантика PATCH здесь слияние, а не замена
+    всего словаря целиком."""
+    resp = await client.patch(
+        "/profile/settings",
+        headers=auth_headers,
+        json={"progression": {"overrides": {"7": "double", "9": "fixed_increment"}}},
+    )
+    assert resp.status_code == 200, resp.text
+
+    resp = await client.patch(
+        "/profile/settings",
+        headers=auth_headers,
+        json={"progression": {"overrides": {"7": None}}},
+    )
+    assert resp.status_code == 200, resp.text
+
+    profile = (await client.get("/profile", headers=auth_headers)).json()
+    overrides = profile["settings"]["progression"]["overrides"]
+    assert "7" not in overrides
+    assert overrides["9"] == "fixed_increment"
+
+
+@pytest.mark.asyncio
+async def test_null_for_unknown_key_is_a_noop(client, auth_headers, with_profile):
+    """Снятие override для упражнения, у которого его никогда не было, —
+    не ошибка: результат совпадает с тем, что и так уже верно (override
+    отсутствует)."""
+    resp = await client.patch(
+        "/profile/settings",
+        headers=auth_headers,
+        json={"progression": {"overrides": {"123": None}}},
+    )
+    assert resp.status_code == 200, resp.text
+
+    profile = (await client.get("/profile", headers=auth_headers)).json()
+    overrides = profile["settings"]["progression"]["overrides"]
+    assert "123" not in overrides
+
+
+@pytest.mark.asyncio
+async def test_non_string_scheme_value_is_rejected_not_500(client, auth_headers, with_profile):
+    """Число вместо имени схемы — ошибка клиента (422), а не необработанный
+    TypeError на join() внутри обработчика (500)."""
+    resp = await client.patch(
+        "/profile/settings",
+        headers=auth_headers,
+        json={"progression": {"overrides": {"7": 42}}},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_nested_object_scheme_value_is_rejected(client, auth_headers, with_profile):
+    """Вложенный объект вместо имени схемы тоже отвергается 422, а не падает
+    в join()/сравнении с KNOWN_SCHEMES."""
+    resp = await client.patch(
+        "/profile/settings",
+        headers=auth_headers,
+        json={"progression": {"overrides": {"7": {"nested": "value"}}}},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_null_merge_does_not_disturb_unrelated_settings(
+    client, auth_headers, with_profile
+):
+    """Снятие override через null остаётся частью обычного слияния settings —
+    остальные поля запроса (и ранее сохранённые) не страдают."""
+    await client.patch(
+        "/profile/settings",
+        headers=auth_headers,
+        json={"progression": {"overrides": {"7": "double"}}, "weight_unit": "kg"},
+    )
+
+    resp = await client.patch(
+        "/profile/settings",
+        headers=auth_headers,
+        json={"progression": {"overrides": {"7": None}}},
+    )
+    assert resp.status_code == 200, resp.text
+
+    profile = (await client.get("/profile", headers=auth_headers)).json()
+    assert profile["settings"]["weight_unit"] == "kg"
+    assert "7" not in profile["settings"]["progression"]["overrides"]

@@ -136,20 +136,58 @@ async def update_profile_settings(
     # движком (resolve.override_for сверяется с KNOWN_SCHEMES и на неизвестное
     # имя отдаёт None) — пользователь решит, что настроил, а ничего не
     # изменится. Отказываем сразу и явно, а не тихо игнорируем.
+    #
+    # null у значения — не мусор, а команда снять override для упражнения.
+    # Семантика PATCH здесь — слияние (см. ниже), поэтому единственный способ
+    # убрать одну запись, не трогая остальные, это явно передать null для её
+    # ключа; отклонять null как «не строку» значило бы не оставить пользователю
+    # рабочего способа снять override вообще.
+    #
+    # Значения, которые не строка и не null (числа, bool, вложенные объекты),
+    # синтаксически не являются именем схемы ни при каких обстоятельствах —
+    # отдаём 422 сразу, до сверки с KNOWN_SCHEMES, чтобы не упасть на
+    # необработанном TypeError при попытке сравнить/объединить их со строками.
+    #
+    # Ключ — идентификатор упражнения, JSON гарантирует, что он всегда строка;
+    # нечисловой ключ (например, "abc") просто никогда не совпадёт с
+    # str(exercise_id) в resolve.override_for и будет безопасно проигнорирован
+    # движком — отдельно отвергать его нет смысла, он не может ничего сломать.
     if payload.progression is not None:
         overrides = payload.progression.get("overrides") or {}
-        unknown = sorted(set(overrides.values()) - KNOWN_SCHEMES)
+
+        unknown: list[str] = []
+        for exercise_key, scheme in overrides.items():
+            if scheme is None:
+                continue  # снятие override — обрабатывается отдельно ниже
+            if not isinstance(scheme, str):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Схема прогрессии для упражнения {exercise_key} должна быть "
+                        f"строкой (или null, чтобы снять override), получено: "
+                        f"{type(scheme).__name__}"
+                    ),
+                )
+            if scheme not in KNOWN_SCHEMES:
+                unknown.append(scheme)
         if unknown:
             raise HTTPException(
                 status_code=422,
-                detail=f"Неизвестные схемы прогрессии: {', '.join(unknown)}",
+                detail=f"Неизвестные схемы прогрессии: {', '.join(sorted(set(unknown)))}",
             )
+
         # Мёрджим overrides по exercise_id, а не заменяем весь словарь целиком —
         # иначе сохранение схемы для упражнения A стирало бы ранее сохранённую
         # схему для упражнения B (тот же приём уже применён выше для weight_steps).
+        # null для ключа удаляет запись из смёрдженного словаря — это и есть
+        # способ снять override, не трогая остальные.
         current_progression = dict(current_settings.get("progression") or {})
         merged_overrides = dict(current_progression.get("overrides") or {})
-        merged_overrides.update(overrides)
+        for exercise_key, scheme in overrides.items():
+            if scheme is None:
+                merged_overrides.pop(exercise_key, None)
+            else:
+                merged_overrides[exercise_key] = scheme
         current_progression["overrides"] = merged_overrides
         current_settings["progression"] = current_progression
 
