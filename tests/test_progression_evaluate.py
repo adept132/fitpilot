@@ -166,3 +166,26 @@ def test_partial_anomaly_is_evaluated_on_normal_set_only():
     )
     assert out.status == "hit"
     assert out.total_sets == 1
+
+
+def test_mixed_prescription_without_weight_facts_is_skipped_not_a_crash():
+    # P0-06 C3. Смешанное предписание: первый подход без веса (bodyweight),
+    # второй — с весом. Раньше _requires_weight() смотрела только на
+    # sets[0] (без веса) -> working_sets(require_weight=False) пропускал
+    # факты без веса дальше, и на втором подходе (sp.weight_kg=40.0)
+    # `abs(float(s.weight_kg) - sp.weight_kg)` падал TypeError, потому что
+    # s.weight_kg тоже None. Теперь _requires_weight() смотрит на ВСЕ
+    # подходы: раз хотя бы один требует вес, оба факта без веса отсеиваются
+    # working_sets() ещё до сравнения — валидных подходов не остаётся.
+    p = presc((1, None, 8, 12), (2, 40.0, 8, 12))
+    out = evaluate(p, [fact(1, None, 10), fact(2, None, 10)], STEP)
+    assert out.status == "skipped"
+
+
+def test_mixed_prescription_with_weight_fact_evaluates_normally():
+    # Тот же смешанный сценарий, но второй факт весом не "забыт" — должен
+    # оцениться как обычно, без падения.
+    p = presc((1, None, 8, 12), (2, 40.0, 8, 12))
+    out = evaluate(p, [fact(1, None, 10), fact(2, 40.0, 10)], STEP)
+    assert out.status == "hit"
+    assert out.total_sets == 1

@@ -43,6 +43,46 @@ class SyncSetSnapshot(BaseModel):
     updated_at: datetime | None = None
 
 
+class SyncSetPrescriptionSnapshot(BaseModel):
+    """Один подход предписания — форма api.services.progression.types.SetPrescription.
+
+    P0-06 C3: раньше prescription в SyncExerciseSnapshot был сырым `dict`,
+    и всё, что клиент прислал, летело прямиком в JSONB. types.Prescription.
+    from_dict() потом читал по ключу без защиты — {'foo': 1} ронял
+    KeyError('scheme'), а {'sets': [{'set_number': 1}]} без rep_min ронял
+    KeyError('rep_min') на каждом чтении истории для этого упражнения (в
+    add_exercise_to_workout, finish_workout, /autoprogression). Одна такая
+    строка, попавшая в БД, необратима: write-once не даёт её перезаписать.
+    Эта модель отвергает мусор на границе синка pydantic-валидацией (422),
+    а не молча кладёт его в БД.
+    """
+    set_number: int
+    weight_kg: float | None = Field(default=None, ge=0, le=2000)
+    rep_min: int
+    rep_max: int | None = None
+    rir: int
+    kind: str = "normal"
+
+
+class SyncPrescriptionSnapshot(BaseModel):
+    """Снимок предписания — форма api.services.progression.types.Prescription.
+
+    Требует наличия scheme/reason_code/rep_min у каждого подхода — те же поля,
+    что types.Prescription.from_dict() читает без .get(), то есть без этой
+    модели упали бы KeyError-ом при следующем чтении истории (см. докстринг
+    SyncSetPrescriptionSnapshot). scheme и kind не сверяются со списком
+    известных схем: from_dict() тоже их не проверяет, а разбор истории не
+    обязан быть строже самого движка.
+    """
+    scheme: str
+    sets: list[SyncSetPrescriptionSnapshot] = []
+    reason_code: str
+    reason_text: str = ""
+    basis: dict = {}
+    engine_version: int = 1
+    provisional: bool = False
+
+
 class SyncExerciseSnapshot(BaseModel):
     """Снимок упражнения сессии со всеми подходами."""
     client_uuid: str
@@ -58,7 +98,9 @@ class SyncExerciseSnapshot(BaseModel):
     target_sets: int | None = None
     # P0-06. Write-once: сервер принимает это поле только если у него самого
     # пусто, — пользователь тренировался против того, что видел на экране.
-    prescription: dict | None = None
+    # P0-06 C3: типизировано SyncPrescriptionSnapshot вместо сырого dict —
+    # мусор отвергается на границе с понятной 422, а не долетает до JSONB.
+    prescription: SyncPrescriptionSnapshot | None = None
     deleted: bool = False
     updated_at: datetime | None = None
     sets: list[SyncSetSnapshot] = []

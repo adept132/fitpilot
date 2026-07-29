@@ -167,3 +167,40 @@ async def test_exercise_without_history_gets_no_basis_not_a_crash(
     assert resp.status_code == 200, resp.text
     added = resp.json()["exercises"][-1]
     assert added["recommended_weight"] is None
+
+
+@pytest.mark.asyncio
+async def test_starting_workout_from_plan_stores_prescription(
+    client, auth_headers, seeded_plan
+):
+    """P0-06 C1: POST /workouts/start с plan_id — единственный на момент
+    финального ревью путь создания WorkoutSessionExercise, который НЕ вызывал
+    движок вообще. Все существующие тесты этого модуля стартуют тренировку
+    {"source": "free"} без plan_id и не могли поймать эту дыру — движок
+    подключался только на add_exercise_to_workout (свободное добавление).
+
+    seeded_plan содержит одно упражнение (seeded_history) с уже завершённой
+    историей — есть база для непустого предписания, а не бутстрап no_basis
+    без recommended_weight.
+    """
+    resp = await client.post(
+        "/workouts/start",
+        headers=auth_headers,
+        json={"source": "free", "plan_id": seeded_plan.id},
+    )
+    assert resp.status_code == 200, resp.text
+    workout_id = resp.json()["id"]
+
+    detail = (
+        await client.get(f"/workouts/{workout_id}", headers=auth_headers)
+    ).json()
+    exercises = detail["exercises"]
+    assert exercises, "план должен был создать хотя бы одно упражнение в сессии"
+
+    for ex in exercises:
+        assert ex["prescription"] is not None, (
+            "предписание не посчиталось для упражнения, созданного из плана — "
+            "движок не подключён к плановому пути (P0-06 C1)"
+        )
+        assert ex["prescription"]["reason_code"]
+        assert ex["recommended_weight"] is not None

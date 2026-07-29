@@ -95,6 +95,37 @@ def test_heuristic_never_picks_percent_1rm():
             )
             assert got != params.SCHEME_PERCENT_1RM, (tier, phase)
 
+    # Финальное ревью P0-06 (C2): фаза мезоцикла раньше не резолвилась ни на
+    # одном пишущем пути (build_context всегда получал дефолт "medium"), а
+    # значит слой 2 resolve_scheme (силовая фаза + fatigue_tier==1 ->
+    # percent_1rm) был мёртвым кодом — комбинации (fatigue_tier 2 и 3) с
+    # силовыми фазами (prefailure/failure) до этого расширения не
+    # проверялись вовсе. tier==1 в силовых фазах — единственная точка, где
+    # percent_1rm ДОЛЖНА сработать (test_strength_phase_on_tier_one_picks_percent_1rm),
+    # поэтому здесь только tier 2 и 3.
+    for tier in (2, 3):
+        for phase in ("prefailure", "failure"):
+            got = resolve_scheme(
+                ctx(
+                    history=with_prescription(),
+                    fatigue_tier=tier,
+                    equipment=("barbell",),
+                    phase_effort_tier=phase,
+                )
+            )
+            assert got != params.SCHEME_PERCENT_1RM, (tier, phase)
+
+
+def test_manual_override_wins_over_bootstrap():
+    # test_manual_override_wins_over_everything (выше) гоняется с непустой
+    # историей (with_prescription()) — проверяет только победу слоя 1 над
+    # слоями 2/3 (фаза, эвристика). Порядок двух ранних `if` в resolve_scheme
+    # (сначала override, потом бутстрап при пустой истории) этим не
+    # проверялся: если бы порядок был перепутан, override на упражнении без
+    # единого предписания в истории тихо проигрывал бы e1rm_factor.
+    got = resolve_scheme(ctx(), override=params.SCHEME_PERCENT_1RM)
+    assert got == params.SCHEME_PERCENT_1RM
+
 
 def test_degenerate_range_picks_fixed_increment():
     # override_reps: "10" -> rmin == rmax, у double нулевой зазор.

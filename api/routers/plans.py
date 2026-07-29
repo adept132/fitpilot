@@ -6,8 +6,11 @@ from api.deps import get_db
 from api.schemas.plan import WorkoutPlanCreate, PlanApplyRequest
 from api.services.app_user_service import get_current_app_user
 from api.services.models import Mesocycle, MesocyclePhase, WorkoutPlan, AppUserProfile, WorkoutPlanExercise, \
-    WorkoutSession, WorkoutSessionExercise, WorkoutSessionSet
+    WorkoutSession, WorkoutSessionExercise, WorkoutSessionSet, Exercise
 from api.services.validator import AntiSuicideValidator, PlanExerciseInput
+from api.services.progression import repository as progression_repo
+from api.services.progression.engine import plan_exercise
+from api.services.progression.resolve import override_for
 
 router = APIRouter(prefix="/plans", tags=["Plans"])
 
@@ -178,6 +181,32 @@ async def apply_plan_to_calendar(
     db.add(new_session)
     await db.flush()  # Получаем ID сессии
 
+    # P0-06 C1: этот эндпоинт — один из путей создания WorkoutSessionExercise
+    # без вызова движка прогрессии (см. также api/routers/workout_center.py
+    # start_workout). Без явного расчёта и сохранения предписания здесь
+    # тренировка, применённая через /plans/{id}/apply, тоже никогда не
+    # получила бы prescription в истории.
+    profile_result = await db.execute(
+        select(AppUserProfile).where(AppUserProfile.app_user_id == current_user.id)
+    )
+    profile = profile_result.scalars().first()
+    experience_level = profile.experience_level if profile else None
+    settings = profile.settings if profile else None
+
+    # У новой сессии (см. WorkoutSession выше) нет ни app_user_mesocycle_id,
+    # ни mesocycle_phase — этот эндпоинт не привязывает сессию к мезоциклу.
+    # resolve_phase_effort_tier с (None, None) синхронно вернёт дефолт
+    # "medium" без запроса — тот же результат, что и раньше неявно.
+    phase_effort_tier = await progression_repo.resolve_phase_effort_tier(
+        db, new_session.app_user_mesocycle_id, new_session.mesocycle_phase
+    )
+
+    exercise_ids = [plan_ex.exercise_id for plan_ex in plan.exercises]
+    exercises_by_id: dict[int, Exercise] = {}
+    if exercise_ids:
+        ex_rows = await db.execute(select(Exercise).where(Exercise.id.in_(exercise_ids)))
+        exercises_by_id = {e.id: e for e in ex_rows.scalars().all()}
+
     # 3. Переносим упражнения из плана в сессию
     for plan_ex in plan.exercises:
         session_ex = WorkoutSessionExercise(
@@ -199,6 +228,24 @@ async def apply_plan_to_calendar(
                 is_completed=False  # Подходы изначально не выполнены
             )
             db.add(new_set)
+
+        # session_ex.recommended_rep_min/max/target_sets тут не заполняются
+        # (пред-существующий разрыв этого эндпоинта, вне периметра C1/C2) —
+        # build_context сам откатится на TIER_REP_FALLBACK по fatigue_tier
+        # упражнения и на target_sets=3 по умолчанию.
+        session_ex.exercise = exercises_by_id.get(plan_ex.exercise_id)
+        ctx = await progression_repo.build_context(
+            db,
+            session_ex,
+            current_user.id,
+            experience_level,
+            settings,
+            phase_effort_tier=phase_effort_tier,
+        )
+        prescription = plan_exercise(
+            ctx, override=override_for(settings, session_ex.exercise_id)
+        )
+        progression_repo.persist_prescription(session_ex, prescription)
 
     await db.commit()
 

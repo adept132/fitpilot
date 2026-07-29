@@ -15,12 +15,13 @@ from api.services.app_user_service import get_current_app_user
 from api.services.autoprogression import compute_autoprogression
 from api.services.calculate_exercise_recommendation import calculate_exercise_recommendations
 from api.services.exercise_utils import get_base_exercise_query
+from api.services.progression import params as progression_params
 from api.services.progression import repository as progression_repo
 from api.services.progression.engine import plan_exercise
 from api.services.progression.resolve import override_for
 from api.services.workout_superset_service import WorkoutSupersetService
 from api.services.models import WorkoutSession, WorkoutSessionExercise, Exercise, WorkoutSessionSet, AppUser, \
-    AppUserProfile, AppUserMesocycle, MesocyclePhase
+    AppUserProfile
 
 router = APIRouter(tags=["workouts"])
 
@@ -237,10 +238,25 @@ async def add_exercise_to_workout(
     # не пытался сделать ленивую подгрузку session_exercise.exercise (запрещено в async SQLAlchemy).
     session_exercise.exercise = exercise
 
+    # Фаза мезоцикла нужна схеме percent_1rm и правилу deload_phase (P0-06 C2) —
+    # без неё они мёртвый код на этом пишущем пути, как и было до фикса.
+    phase_effort_tier = await progression_repo.resolve_phase_effort_tier(
+        db, workout.app_user_mesocycle_id, workout.mesocycle_phase
+    )
+
     # Предписание считаем сразу: пользователь должен увидеть цель до первого
     # подхода, а evaluate() потом сравнит факт именно с ней.
     ctx = await progression_repo.build_context(
-        db, session_exercise, current_app_user.id, experience_level, settings
+        db,
+        session_exercise,
+        current_app_user.id,
+        experience_level,
+        settings,
+        # P0-06 C2: настоящий источник диапазона повторов, а не дефолт
+        # build_context — calculate_exercise_recommendations уже посчитал
+        # его выше (rec_data), раньше значение молча отбрасывалось.
+        rep_range_source=rec_data.get("rep_range_source", progression_params.REP_SOURCE_FALLBACK),
+        phase_effort_tier=phase_effort_tier,
     )
     prescription = plan_exercise(
         ctx, override=override_for(settings, session_exercise.exercise_id)
@@ -419,31 +435,15 @@ async def get_exercise_autoprogression(
     # сравнивают со строковым effort_tier ("prefailure"/"failure"/"deload"/...),
     # а не с номером фазы. WorkoutSession.mesocycle_phase — это НОМЕР (int), не
     # название (см. развёрнутый комментарий в
-    # api/services/progression/repository.py::_load_deload_map) — просто
+    # api/services/progression/repository.py::_phase_effort_tier_stmt) — просто
     # str(...) от него дал бы "1"/"2"/... и обе проверки молча никогда бы не
-    # сработали. Тот же join по (app_user_mesocycle_id, phase_number), что и в
-    # _load_deload_map, но для одной сессии — репозиторий трогать нельзя
-    # (не в списке файлов задачи), поэтому запрос локальный.
-    phase_effort_tier = "medium"
+    # сработали. P0-06 C2: резолв фазы вынесен в репозиторий (единая точка
+    # для этого read-only пути и всех пишущих), этот эндпоинт был одной из
+    # двух точек дублирования join'а — теперь их не осталось.
     workout_session = session_exercise.workout_session
-    if (
-        workout_session.app_user_mesocycle_id is not None
-        and workout_session.mesocycle_phase is not None
-    ):
-        tier_stmt = (
-            select(MesocyclePhase.effort_tier)
-            .join(
-                AppUserMesocycle,
-                AppUserMesocycle.mesocycle_id == MesocyclePhase.mesocycle_id,
-            )
-            .where(
-                AppUserMesocycle.id == workout_session.app_user_mesocycle_id,
-                MesocyclePhase.phase_number == workout_session.mesocycle_phase,
-            )
-        )
-        tier = (await db.execute(tier_stmt)).scalar_one_or_none()
-        if tier is not None:
-            phase_effort_tier = tier
+    phase_effort_tier = await progression_repo.resolve_phase_effort_tier(
+        db, workout_session.app_user_mesocycle_id, workout_session.mesocycle_phase
+    )
 
     data = await compute_autoprogression(
         db,

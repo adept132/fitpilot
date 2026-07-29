@@ -37,8 +37,18 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from api.services.models import (
+    AppUser,
+    Exercise,
+    WorkoutSession,
+    WorkoutSessionExercise,
+    WorkoutSessionSet,
+)
 
 
 def _find_workout(body: dict, workout_id: int) -> dict:
@@ -118,7 +128,17 @@ async def test_sync_does_not_overwrite_an_existing_prescription(
                 "order_index": e["order_index"],
                 "superset_group": None,
                 "notes": None,
-                "prescription": {"scheme": "astrology", "sets": []},
+                # P0-06 C3: prescription теперь типизирован SyncPrescriptionSnapshot
+                # (api/schemas/sync.py) — scheme и reason_code обязательны там же,
+                # где их без .get() читает Prescription.from_dict. Тест проверяет
+                # write-once (сервер должен ИГНОРИРОВАТЬ этот валидный-по-форме,
+                # но семантически бессмысленный snapshot), а не отказ по форме —
+                # поэтому reason_code присутствует, просто с абсурдным значением.
+                "prescription": {
+                    "scheme": "astrology",
+                    "sets": [],
+                    "reason_code": "astrology_reason",
+                },
                 "sets": [],
             }
             for e in snapshot["exercises"]
@@ -193,3 +213,161 @@ async def test_client_prescription_is_accepted_when_server_has_none(
     after_workout = _find_workout(after, workout_id)
     saved = after_workout["exercises"][0]["prescription"]
     assert saved["scheme"] == "double"
+
+
+# --- P0-06 C3: типизация клиентского prescription на границе /sync/workouts ---
+#
+# Prescription.from_dict() (api/services/progression/types.py) читает
+# scheme/reason_code/каждый sets[i].rep_min/rir БЕЗ .get() — до фикса сырой
+# `dict` из SyncExerciseSnapshot.prescription летел в JSONB как есть, и
+# первое же чтение истории (load_history) с такой строкой падало KeyError.
+# Из-за write-once её было не перезаписать — упражнение становилось
+# непригодным для завершения ЛЮБОЙ тренировки. Эти тесты проверяют, что
+# граница синка отвергает такой payload 422-й, а не кладёт его в БД.
+
+
+@pytest.mark.asyncio
+async def test_sync_rejects_prescription_missing_required_fields(
+    client, auth_headers, fresh_exercise
+):
+    """{'foo': 1} — воспроизведённый в ревью пример: KeyError('scheme')."""
+    payload = {
+        "client_uuid": "offline-workout-garbage-1",
+        "source": "free",
+        "status": "finished",
+        "split_day_id": None,
+        "plan_id": None,
+        "notes": None,
+        "volume_targets": None,
+        "started_at": "2026-07-27T10:00:00Z",
+        "finished_at": "2026-07-27T11:00:00Z",
+        "exercises": [
+            {
+                "client_uuid": "offline-ex-garbage-1",
+                "exercise_id": fresh_exercise.id,
+                "order_index": 0,
+                "superset_group": None,
+                "notes": None,
+                "prescription": {"foo": 1},
+                "sets": [],
+            }
+        ],
+    }
+    resp = await client.post("/sync/workouts", headers=auth_headers, json=payload)
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_sync_rejects_prescription_with_incomplete_set(
+    client, auth_headers, fresh_exercise
+):
+    """sets: [{'set_number': 1}] без rep_min/rir — воспроизведённый в ревью
+    пример: KeyError('rep_min')."""
+    payload = {
+        "client_uuid": "offline-workout-garbage-2",
+        "source": "free",
+        "status": "finished",
+        "split_day_id": None,
+        "plan_id": None,
+        "notes": None,
+        "volume_targets": None,
+        "started_at": "2026-07-27T10:00:00Z",
+        "finished_at": "2026-07-27T11:00:00Z",
+        "exercises": [
+            {
+                "client_uuid": "offline-ex-garbage-2",
+                "exercise_id": fresh_exercise.id,
+                "order_index": 0,
+                "superset_group": None,
+                "notes": None,
+                "prescription": {
+                    "scheme": "double",
+                    "reason_code": "progressed",
+                    "sets": [{"set_number": 1}],
+                },
+                "sets": [],
+            }
+        ],
+    }
+    resp = await client.post("/sync/workouts", headers=auth_headers, json=payload)
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_poisoned_stored_prescription_degrades_to_bootstrap_not_a_crash(
+    client, auth_headers, db: AsyncSession, test_user: AppUser
+):
+    """Мусор, УЖЕ осевший в se.prescription (не через /sync/workouts — эту
+    дверь C3 закрывает валидацией; здесь моделируется строка, попавшая в БД
+    раньше или в обход API), не должен ронять чтение истории.
+
+    load_history() (api/services/progression/repository.py) оборачивает
+    Prescription.from_dict() в try/except и деградирует до prescription=None
+    для этой сессии — движок для НОВОГО упражнения того же типа уходит в
+    бутстрап (e1rm_factor), а не роняет запрос 500-й. Реальный вес в
+    испорченной сессии (50кг x8) остаётся читаемым независимо от prescription
+    (working_e1rm считается по SetFact, не по битому JSON), поэтому бутстрап
+    отдаёт настоящую рекомендацию, а не голый no_basis.
+    """
+    marker = uuid.uuid4().hex[:8]
+    ex = Exercise(
+        name=f"Упражнение с битым prescription {marker}",
+        category="base",
+        main_muscle_group="chest",
+        difficulty="beginner",
+        equipment_needed=[],
+        source="custom",
+        app_user_id=test_user.id,
+    )
+    db.add(ex)
+    await db.flush()
+
+    workout = WorkoutSession(
+        app_user_id=test_user.id,
+        source="free",
+        status="finished",
+        finished_at=datetime.now(timezone.utc) - timedelta(minutes=30),
+    )
+    db.add(workout)
+    await db.flush()
+
+    se = WorkoutSessionExercise(
+        workout_session_id=workout.id,
+        exercise_id=ex.id,
+        order_index=0,
+        # Мусор в обход схемы (записан напрямую, не через /sync/workouts):
+        # нет обязательных scheme/reason_code, которые Prescription.from_dict
+        # читает без .get().
+        prescription={"corrupted": True, "not_a_prescription_at_all": [1, 2, 3]},
+    )
+    db.add(se)
+    await db.flush()
+
+    db.add(
+        WorkoutSessionSet(
+            workout_session_exercise_id=se.id,
+            set_number=1,
+            set_type="normal",
+            weight=50.0,
+            reps=8,
+            effort_level="medium",
+            is_completed=True,
+        )
+    )
+    await db.commit()
+
+    workout_resp = (
+        await client.post("/workouts/start", headers=auth_headers, json={"source": "free"})
+    ).json()
+    resp = await client.post(
+        f"/workouts/{workout_resp['id']}/exercises",
+        headers=auth_headers,
+        json={"exercise_id": ex.id},
+    )
+    assert resp.status_code == 200, resp.text
+
+    added = resp.json()["exercises"][-1]
+    # Бутстрап (нет читаемой истории предписаний) -> e1rm_factor по факту
+    # 50кг x8 в испорченной сессии, а не 500 и не голый no_basis.
+    assert added["prescription"]["scheme"] == "e1rm_factor"
+    assert added["recommended_weight"] is not None

@@ -248,9 +248,11 @@ async def _apply_snapshot(
         exercise.target_sets = ex_snap.target_sets
         # Write-once: серверное предписание — то, что пользователь уже видел.
         # Клиентское принимаем только когда своего нет (упражнение добавлено
-        # офлайн и предписание пришло из локального кэша).
+        # офлайн и предписание пришло из локального кэша). ex_snap.prescription
+        # уже прошёл валидацию SyncPrescriptionSnapshot на границе (P0-06 C3) —
+        # в JSONB кладём готовый dict через model_dump, а не сырой payload.
         if not exercise.prescription and ex_snap.prescription:
-            exercise.prescription = ex_snap.prescription
+            exercise.prescription = ex_snap.prescription.model_dump()
         await db.flush()
         id_map[ex_snap.client_uuid] = exercise.id
 

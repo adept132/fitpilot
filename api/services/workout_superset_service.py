@@ -406,6 +406,15 @@ class WorkoutSupersetService:
         max_order_index = max_order_result.scalar_one_or_none()
         next_order_index = (max_order_index or 0) + 1
 
+        # P0-06 C1, осознанно отложено: движок здесь НЕ вызывается —
+        # new_session_exercise.prescription остаётся пустым. Этот метод не
+        # роутер: он не знает app_user_id профиля отдельно от app_user_id
+        # параметра метода (это есть), но experience_level/settings и фазу
+        # мезоцикла (workout_session_id -> WorkoutSession.app_user_mesocycle_id/
+        # mesocycle_phase) сюда не тянет ни один вызывающий код сегодня —
+        # calling-side (workout_supersets router) тоже их не грузит. Довести
+        # до состояния "вызывает движок как add_exercise_to_workout" — отдельная
+        # задача с проверкой всех вызывающих мест, не молчаливый пропуск.
         new_session_exercise = WorkoutSessionExercise(
             workout_session_id=workout_session_id,
             exercise_id=exercise_id,

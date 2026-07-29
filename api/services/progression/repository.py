@@ -46,10 +46,10 @@ HISTORY_LIMIT = 12
 DELOAD_EFFORT_TIER = "deload"
 
 
-async def _load_deload_map(
-    session: AsyncSession, workouts: Sequence[WorkoutSession]
-) -> dict[tuple[int, int], str]:
-    """effort_tier фазы мезоцикла для каждой сессии истории — ОДНИМ запросом.
+def _phase_effort_tier_stmt(
+    mesocycle_user_ids: Sequence[int], phase_number: Optional[int] = None
+):
+    """Общий JOIN-запрос AppUserMesocycle -> MesocyclePhase по номеру фазы.
 
     WorkoutSession.mesocycle_phase — это НОМЕР фазы (int), а не её название
     (см. api/services/models.py). Строковый effort_tier ("deload"/"easy"/...)
@@ -60,19 +60,12 @@ async def _load_deload_map(
     Загрузка через selectinload/relationship тут не подходит: связь между
     WorkoutSession и конкретной MesocyclePhase — не FK, а совпадение
     (mesocycle_id, phase_number), поэтому это не путь релейшнов, а join по
-    столбцам. Батчим одним доп. запросом по всем сессиям истории сразу —
-    иначе на каждую из HISTORY_LIMIT сессий пришлось бы делать свой join
-    (N+1 запросов на каждую загрузку истории).
+    столбцам. Единственное место, которое строит этот JOIN (P0-06 C2 —
+    ранее он был продублирован в _load_deload_map и в
+    workouts.py::get_exercise_autoprogression); обе точки теперь используют
+    эту функцию — напрямую (_load_deload_map, батчем) или через
+    resolve_phase_effort_tier (одна пара, все пишущие пути).
     """
-    pairs = {
-        (w.app_user_mesocycle_id, w.mesocycle_phase)
-        for w in workouts
-        if w.app_user_mesocycle_id is not None and w.mesocycle_phase is not None
-    }
-    if not pairs:
-        return {}
-
-    mesocycle_user_ids = {p[0] for p in pairs}
     stmt = (
         select(
             AppUserMesocycle.id,
@@ -85,11 +78,60 @@ async def _load_deload_map(
         )
         .where(AppUserMesocycle.id.in_(mesocycle_user_ids))
     )
+    if phase_number is not None:
+        stmt = stmt.where(MesocyclePhase.phase_number == phase_number)
+    return stmt
+
+
+async def _load_deload_map(
+    session: AsyncSession, workouts: Sequence[WorkoutSession]
+) -> dict[tuple[int, int], str]:
+    """effort_tier фазы мезоцикла для каждой сессии истории — ОДНИМ запросом.
+
+    Батчим одним доп. запросом по всем сессиям истории сразу — иначе на
+    каждую из HISTORY_LIMIT сессий пришлось бы делать свой join (N+1
+    запросов на каждую загрузку истории).
+    """
+    pairs = {
+        (w.app_user_mesocycle_id, w.mesocycle_phase)
+        for w in workouts
+        if w.app_user_mesocycle_id is not None and w.mesocycle_phase is not None
+    }
+    if not pairs:
+        return {}
+
+    mesocycle_user_ids = {p[0] for p in pairs}
+    stmt = _phase_effort_tier_stmt(mesocycle_user_ids)
     rows = (await session.execute(stmt)).all()
     return {
         (app_user_mesocycle_id, phase_number): effort_tier
         for app_user_mesocycle_id, phase_number, effort_tier in rows
     }
+
+
+async def resolve_phase_effort_tier(
+    session: AsyncSession,
+    app_user_mesocycle_id: Optional[int],
+    mesocycle_phase: Optional[int],
+    default: str = "medium",
+) -> str:
+    """effort_tier ТЕКУЩЕЙ фазы мезоцикла по (app_user_mesocycle_id, phase_number).
+
+    Единая точка резолва фазы для всех пишущих путей движка (P0-06 C2):
+    добавление упражнения, завершение сессии, создание сессии из плана.
+    Без неё build_context(..., phase_effort_tier=...) получает дефолт
+    "medium" на каждом пишущем пути, и правило deload_phase (reduction.py) и
+    слой 2 resolve_scheme (силовая фаза -> percent_1rm) — мёртвый код,
+    несмотря на то что read-only /autoprogression считает по настоящей фазе.
+
+    default="medium" — тот же дефолт, что был у build_context(phase_effort_tier)
+    и раньше жил в вызывающем коде по всей кодовой базе; здесь он один.
+    """
+    if app_user_mesocycle_id is None or mesocycle_phase is None:
+        return default
+    stmt = _phase_effort_tier_stmt([app_user_mesocycle_id], phase_number=mesocycle_phase)
+    row = (await session.execute(stmt)).first()
+    return row.effort_tier if row is not None else default
 
 
 async def load_history(
@@ -142,9 +184,25 @@ async def load_history(
             if s.is_completed and s.parent_set_id is None
         )
 
-        prescription = (
-            Prescription.from_dict(se.prescription) if se.prescription else None
-        )
+        # P0-06 C3: se.prescription — JSONB, записанный write-once, без
+        # схемы на границе ДО этого фикса (см. SyncPrescriptionSnapshot в
+        # api/schemas/sync.py — валидация теперь есть на входе синка, но
+        # это не защищает от строк, уже осевших в БД раньше, от прямых
+        # правок в консоли и т.п.). from_dict() читает обязательные ключи
+        # без .get() и падает KeyError на первом же мусоре — один такой
+        # session_exercise делает загрузку истории (а с ней —
+        # добавление упражнения, завершение тренировки, автопрогрессию)
+        # невозможной для ВСЕХ сессий с этим упражнением сразу, и write-once
+        # не даёт это исправить перезаписью. Разбор — не молчаливое glotanie:
+        # решение — деградировать до "у сессии нет предписания", это тот же
+        # путь, что и легитимный se.prescription is None (движок уйдёт в
+        # бутстрап e1rm_factor), а не 500 на каждый запрос с этим упражнением.
+        try:
+            prescription = (
+                Prescription.from_dict(se.prescription) if se.prescription else None
+            )
+        except (KeyError, TypeError, ValueError):
+            prescription = None
         effort_tier = deload_map.get(
             (workout.app_user_mesocycle_id, workout.mesocycle_phase)
         )

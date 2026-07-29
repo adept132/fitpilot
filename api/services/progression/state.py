@@ -54,10 +54,24 @@ def _requires_weight(prescription: Optional[Prescription]) -> bool:
     True). Если предписание осознанно без веса (упражнение со своим весом,
     weight_kg=None) — отсутствие веса в факте легитимно (require False).
     Предписания нет вовсе — безопасный дефолт True, как было раньше.
+
+    P0-06 C3: смотрим на ВСЕ подходы предписания, а не только на первый
+    (sets[0]). working_sets() принимает один общий флаг require_weight на
+    весь список фактов сессии — он не умеет требовать вес выборочно, по
+    set_number. Раньше при смешанном предписании (первый подход без веса,
+    остальные с весом) sets[0].weight_kg is None давал require_weight=False,
+    working_sets() пропускал факты без веса дальше в evaluate(), и там
+    строка `abs(float(s.weight_kg) - sp.weight_kg)` падала TypeError — для
+    подхода с фактическим весом=None, но sp (предписание ЭТОГО set_number)
+    ожидающим вес. Требуем вес, если он нужен ХОТЯ БЫ для одного подхода:
+    это самый безопасный вариант при одном общем флаге на всю сессию — факты
+    без веса в такой сессии просто не попадут в оценку (see working_sets()),
+    вместо падения. Для честно безвесового упражнения (все sets без веса)
+    поведение не меняется: any(...) даёт False, как и раньше sets[0].
     """
     if prescription is None or not prescription.sets:
         return True
-    return prescription.sets[0].weight_kg is not None
+    return any(sp.weight_kg is not None for sp in prescription.sets)
 
 
 def _prescription_for(prescription: Prescription, set_number: int) -> SetPrescription:
@@ -99,7 +113,17 @@ def evaluate(
             value = e1rm(float(s.weight_kg), int(s.reps), int(s.rir))
             achieved = value if achieved is None else max(achieved, value)
 
-        if sp.weight_kg is not None and abs(float(s.weight_kg) - sp.weight_kg) > step_kg:
+        # P0-06 C3: доп. защита от TypeError (float() argument ... NoneType) —
+        # _requires_weight() выше уже не должна пропускать сюда факт без веса,
+        # когда предписание ЭТОГО set_number его ожидает (см. её докстринг),
+        # но working_sets() фильтрует по ОДНОМУ флагу на всю сессию, а не по
+        # set_number. s.weight_kg is not None — вторая, независимая гарантия
+        # на случай прескрипшена, не покрытого этим инвариантом.
+        if (
+            sp.weight_kg is not None
+            and s.weight_kg is not None
+            and abs(float(s.weight_kg) - sp.weight_kg) > step_kg
+        ):
             deviated += 1
             continue
         if s.reps < sp.rep_min:

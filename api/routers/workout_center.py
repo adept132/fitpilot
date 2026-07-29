@@ -14,6 +14,7 @@ from api.schemas.plan import VolumeTargetsResponse, MuscleTarget, UpdatePlanCont
 from api.schemas.workouts import FinishWorkoutResponse, WorkoutFinishedExerciseSummary
 from api.services.app_user_service import get_current_app_user
 from api.services.calculate_exercise_recommendation import calculate_exercise_recommendations
+from api.services.progression import params as progression_params
 from api.services.progression import repository as progression_repo
 from api.services.progression.engine import plan_exercise
 from api.services.progression.resolve import override_for
@@ -28,7 +29,7 @@ from api.services.models import (
     DayMuscleTarget,
     WorkoutSession,
     WorkoutSessionExercise, AppUserMesocycle, Mesocycle, AppUserProfile, WorkoutPlan, AppUserMicrocycle,
-    WorkoutSessionSet, UserCalendarDay,
+    WorkoutSessionSet, UserCalendarDay, Exercise,
 )
 from api.schemas.workout_center import (
     WorkoutCenterContextRead,
@@ -456,6 +457,41 @@ async def start_workout(
     if payload.plan_id:
         compiled_exercises = await calculate_exercise_recommendations(session, app_user.id, plan_id=payload.plan_id)
 
+        # P0-06 C1: до этого фикса /workouts/start с plan_id создавал
+        # WorkoutSessionExercise только со снимками recommended_*, ни разу не
+        # вызывая движок. Из-за write-once в persist_prescription и
+        # resolve._has_prescription_history это означало, что у пользователя,
+        # тренирующегося по плану, prescription НИКОГДА не появлялся в
+        # истории -> схема навсегда оставалась бутстрапом e1rm_factor.
+        # Единственный до сих пор рабочий путь был add_exercise_to_workout
+        # (api/routers/workouts.py) — свободное добавление упражнения.
+        profile_result = await session.execute(
+            select(AppUserProfile).where(AppUserProfile.app_user_id == app_user.id)
+        )
+        profile = profile_result.scalars().first()
+        experience_level = profile.experience_level if profile else None
+        settings = profile.settings if profile else None
+
+        # Фаза мезоцикла одна на всю сессию — резолвим один раз до цикла,
+        # а не на каждое упражнение (иначе N лишних запросов джойна поверх
+        # уже существующего N+1 build_context по load_history, P0-06 C2).
+        phase_effort_tier = await progression_repo.resolve_phase_effort_tier(
+            session, workout.app_user_mesocycle_id, workout.mesocycle_phase
+        )
+
+        # Пачкой подгружаем упражнения плана — build_context нужен объект
+        # Exercise (equipment_needed/fatigue_tier/main_muscle_group), а
+        # ленивая подгрузка через session_exercise.exercise упадёт вне
+        # greenlet-контекста в async SQLAlchemy. Один SELECT на всю сессию
+        # вместо одного на упражнение — тот же принцип, что и резолв фазы.
+        exercise_ids = [ex_data["exercise_id"] for ex_data in compiled_exercises]
+        exercises_by_id: dict[int, Exercise] = {}
+        if exercise_ids:
+            ex_rows = await session.execute(
+                select(Exercise).where(Exercise.id.in_(exercise_ids))
+            )
+            exercises_by_id = {e.id: e for e in ex_rows.scalars().all()}
+
         for ex_data in compiled_exercises:
             new_ex = WorkoutSessionExercise(
                 workout_session_id=workout.id,
@@ -477,6 +513,24 @@ async def start_workout(
                     is_completed=False
                 )
                 session.add(new_set)
+
+            new_ex.exercise = exercises_by_id.get(ex_data["exercise_id"])
+
+            ctx = await progression_repo.build_context(
+                session,
+                new_ex,
+                app_user.id,
+                experience_level,
+                settings,
+                rep_range_source=ex_data.get(
+                    "rep_range_source", progression_params.REP_SOURCE_FALLBACK
+                ),
+                phase_effort_tier=phase_effort_tier,
+            )
+            prescription = plan_exercise(
+                ctx, override=override_for(settings, new_ex.exercise_id)
+            )
+            progression_repo.persist_prescription(new_ex, prescription)
 
     await session.commit()
     await session.refresh(workout)
@@ -542,9 +596,18 @@ async def finish_workout(
     experience_level = profile.experience_level if profile else None
     settings = profile.settings if profile else None
 
+    # P0-06 C2: фаза мезоцикла одна на всю сессию (WorkoutSession.mesocycle_phase),
+    # резолвим ОДИН раз до цикла — иначе на каждое упражнение сессии пришёлся бы
+    # свой запрос джойна, что усугубило бы уже существующий N+1 build_context
+    # (по load_history на упражнение).
+    phase_effort_tier = await progression_repo.resolve_phase_effort_tier(
+        db, workout.app_user_mesocycle_id, workout.mesocycle_phase
+    )
+
     for se in workout.exercises:
         ctx = await progression_repo.build_context(
-            db, se, current_app_user.id, experience_level, settings
+            db, se, current_app_user.id, experience_level, settings,
+            phase_effort_tier=phase_effort_tier,
         )
         nxt = plan_exercise(
             ctx,

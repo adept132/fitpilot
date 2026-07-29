@@ -34,6 +34,8 @@ from api.services.app_user_service import (  # noqa: E402
 from api.services.models import (  # noqa: E402
     AppUser,
     Exercise,
+    WorkoutPlan,
+    WorkoutPlanExercise,
     WorkoutSession,
     WorkoutSessionExercise,
     WorkoutSessionSet,
@@ -258,6 +260,40 @@ async def fresh_exercise(db: AsyncSession, test_user: AppUser):
     db.add(ex)
     await db.commit()
     yield ex
+
+
+@pytest_asyncio.fixture
+async def seeded_plan(db: AsyncSession, test_user: AppUser, seeded_history: Exercise):
+    """План с единственным упражнением, у которого уже есть завершённая
+    история (seeded_history) — нужен тесту P0-06 C1 на плановый путь
+    создания тренировки (POST /workouts/start с plan_id), до фикса
+    ни разу не вызывавший движок прогрессии.
+
+    Коммитящее соединение (db/test_user), как и seeded_history: тест ходит
+    через HTTP-клиент `client`, который открывает своё соединение на каждый
+    запрос (см. комментарий у фикстур выше про смешивание с db_session/app_user).
+    Отдельного teardown не нужно: WorkoutPlan.app_user_id — ON DELETE CASCADE,
+    удаление test_user в его собственном teardown уносит план автоматически.
+    """
+    plan = WorkoutPlan(
+        app_user_id=test_user.id,
+        name="Тестовый план P0-06",
+        day_tag="push",
+        micro_tag="medium",
+        meso_tag="medium",
+    )
+    db.add(plan)
+    await db.flush()
+
+    plan_ex = WorkoutPlanExercise(
+        plan_id=plan.id,
+        exercise_id=seeded_history.id,
+        order_index=0,
+        target_sets=3,
+    )
+    db.add(plan_ex)
+    await db.commit()
+    yield plan
 
 
 @pytest_asyncio.fixture
