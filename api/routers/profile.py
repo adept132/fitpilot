@@ -130,12 +130,6 @@ async def update_profile_settings(
     if payload.plate_config_lbs is not None:
         current_settings["plate_config_lbs"] = payload.plate_config_lbs
 
-    if payload.body_measurements_enabled is not None:
-        current_settings["body_measurements_enabled"] = payload.body_measurements_enabled
-
-    if payload.reminders_enabled is not None:
-        current_settings["reminders_enabled"] = payload.reminders_enabled
-
     # P0-06: ручной выбор схемы прогрессии по упражнениям
     # (settings["progression"]["overrides"][exercise_id] = scheme).
     # Мусорное имя схемы молча ляжет в settings и будет тихо игнорироваться
@@ -263,26 +257,6 @@ async def update_profile_onboarding(
     # Если ты добавил microcycle_length в БД, раскомментируй:
     # if hasattr(payload, 'microcycle_length') and payload.microcycle_length:
     #     profile.microcycle_length = payload.microcycle_length
-
-    # 2b. Антропометрия (вес/рост) — журналируем новой записью (append-only).
-    # Переносим недостающее измерение из последней записи, чтобы не потерять его
-    # при сохранении только одного поля.
-    if payload.weight is not None or payload.height is not None:
-        last_anthro = (await db.execute(
-            select(UserAnthropometry)
-            .where(UserAnthropometry.app_user_id == current_user.id)
-            .order_by(desc(UserAnthropometry.recorded_at))
-            .limit(1)
-        )).scalars().first()
-
-        new_weight = payload.weight if payload.weight is not None else (last_anthro.weight if last_anthro else None)
-        new_height = payload.height if payload.height is not None else (last_anthro.height if last_anthro else None)
-
-        db.add(UserAnthropometry(
-            app_user_id=current_user.id,
-            weight=new_weight,
-            height=new_height,
-        ))
 
     # Активируем PRO Mode для продвинутых
     if profile.experience_level == "advanced":
