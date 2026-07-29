@@ -23,6 +23,9 @@ api/routers/workout_center.py: создание тренировки — POST /w
 import pytest
 
 from api.services.progression import repository
+from api.services.progression.metrics import e1rm
+from api.services.models import UserExerciseProgressionState
+from sqlalchemy import select
 
 
 @pytest.mark.asyncio
@@ -84,10 +87,15 @@ async def test_finishing_a_session_refreshes_state_and_next_prescription(
     ).json()
     se_id = add["exercises"][-1]["id"]
 
+    # Вес НАМЕРЕННО сильно отличается от seeded_history (3x12x40кг, medium):
+    # 60кг x8, medium даёт e1RM заметно выше, чем сессия из фикстуры. Это
+    # ключ ко всей проверке ниже — если бы вес совпадал с seeded_history,
+    # working_e1rm вышел бы одинаковым в обоих порядках выполнения кода и
+    # ничего бы не различал.
     await client.post(
         f"/workout-session-exercises/{se_id}/sets",
         headers=auth_headers,
-        json={"weight": 40.0, "reps": 12, "effort_level": "medium"},
+        json={"weight": 60.0, "reps": 8, "effort_level": "medium"},
     )
     finish_resp = await client.post(
         f"/workouts/{workout['id']}/finish", headers=auth_headers
@@ -98,6 +106,50 @@ async def test_finishing_a_session_refreshes_state_and_next_prescription(
     assert nxt is not None
     assert nxt.provisional is True
     assert nxt.reason_code
+
+    # --- Различающая проверка порядка (см. докстринг модуля и ревью) ---
+    #
+    # nxt.provisional/reason_code выше НЕ различают правильный и сломанный
+    # порядок: seeded_history сама по себе даёт непустой базис, поэтому эти
+    # поля непустые в обоих случаях (ревьюер проверил экспериментом — тест
+    # проходил даже с переставленным циклом пересчёта).
+    #
+    # working_e1rm кэша (UserExerciseProgressionState) — различает надёжно.
+    # rebuild_state (api/services/progression/state.py) идёт по истории в
+    # хронологическом порядке и на каждой пригодной сессии ПЕРЕЗАПИСЫВАЕТ
+    # working значением e1RM этой сессии — в переменной остаётся e1RM
+    # ПОСЛЕДНЕЙ по времени сессии. load_history() отбирает только сессии со
+    # status == "finished" (api/services/progression/repository.py).
+    #
+    # Если порядок в finish_workout правильный (status/finished_at выставлены
+    # ДО пересчёта), только что залогированная сессия 60кг x8 уже "finished"
+    # и попадает в историю как самая свежая — working_e1rm посчитается по
+    # ней. Если порядок сломан (пересчёт раньше), эта сессия всё ещё "active"
+    # и в историю не попадёт — working_e1rm останется от seeded_history
+    # (40кг x12), то есть заметно меньше.
+    row = (
+        await db.execute(
+            select(UserExerciseProgressionState).where(
+                UserExerciseProgressionState.app_user_id == test_user.id,
+                UserExerciseProgressionState.exercise_id == seeded_history.id,
+            )
+        )
+    ).scalars().first()
+    assert row is not None
+
+    # RIR для effort_level="medium" — 2 (api/services/progression/params.py,
+    # EFFORT_TO_RIR); формула e1RM — api/services/progression/metrics.py.
+    expected_with_current_session = e1rm(60.0, 8, 2)
+    expected_without_current_session = e1rm(40.0, 12, 2)
+    # Подстраховка: если бы кто-то поменял веса фикстуры/сессии так, что
+    # значения e1RM случайно совпали, сам тест перестал бы что-либо
+    # различать — эта проверка не даст этому пройти незамеченным.
+    assert expected_with_current_session != pytest.approx(
+        expected_without_current_session
+    )
+
+    assert row.working_e1rm == pytest.approx(expected_with_current_session)
+    assert row.working_e1rm != pytest.approx(expected_without_current_session)
 
 
 @pytest.mark.asyncio
