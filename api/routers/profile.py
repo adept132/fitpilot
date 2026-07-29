@@ -130,6 +130,12 @@ async def update_profile_settings(
     if payload.plate_config_lbs is not None:
         current_settings["plate_config_lbs"] = payload.plate_config_lbs
 
+    if payload.body_measurements_enabled is not None:
+        current_settings["body_measurements_enabled"] = payload.body_measurements_enabled
+
+    if payload.reminders_enabled is not None:
+        current_settings["reminders_enabled"] = payload.reminders_enabled
+
     # P0-06: ручной выбор схемы прогрессии по упражнениям
     # (settings["progression"]["overrides"][exercise_id] = scheme).
     # Мусорное имя схемы молча ляжет в settings и будет тихо игнорироваться
@@ -152,8 +158,41 @@ async def update_profile_settings(
     # нечисловой ключ (например, "abc") просто никогда не совпадёт с
     # str(exercise_id) в resolve.override_for и будет безопасно проигнорирован
     # движком — отдельно отвергать его нет смысла, он не может ничего сломать.
+    #
+    # Остаточная находка ревью: payload.progression типизирован как
+    # Dict[str, Any] в UpdateSettingsRequest, поэтому FastAPI/pydantic сам
+    # отвергнет progression-не-словарь (list/str/int) 422-м до входа сюда.
+    # Но overrides — Any внутри этого словаря, никакой схемной проверки не
+    # проходит, и .get("overrides") может вернуть что угодно: список, строку,
+    # число. Тогда `overrides.items()` падает необработанным AttributeError —
+    # клиент получает 500 вместо 422. Проверяем оба уровня явно и здесь, а не
+    # полагаемся только на pydantic — типы в UpdateSettingsRequest могут
+    # ослабнуть в будущем незаметно для этого обработчика.
     if payload.progression is not None:
-        overrides = payload.progression.get("overrides") or {}
+        if not isinstance(payload.progression, dict):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Поле progression должно быть объектом (например "
+                    '{"overrides": {...}}), получено: '
+                    f"{type(payload.progression).__name__}"
+                ),
+            )
+
+        raw_overrides = payload.progression.get("overrides")
+        if raw_overrides is None:
+            overrides: dict = {}
+        elif not isinstance(raw_overrides, dict):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Поле progression.overrides должно быть объектом "
+                    "(ключ — id упражнения строкой, значение — имя схемы "
+                    f"или null), получено: {type(raw_overrides).__name__}"
+                ),
+            )
+        else:
+            overrides = raw_overrides
 
         unknown: list[str] = []
         for exercise_key, scheme in overrides.items():
@@ -224,6 +263,26 @@ async def update_profile_onboarding(
     # Если ты добавил microcycle_length в БД, раскомментируй:
     # if hasattr(payload, 'microcycle_length') and payload.microcycle_length:
     #     profile.microcycle_length = payload.microcycle_length
+
+    # 2b. Антропометрия (вес/рост) — журналируем новой записью (append-only).
+    # Переносим недостающее измерение из последней записи, чтобы не потерять его
+    # при сохранении только одного поля.
+    if payload.weight is not None or payload.height is not None:
+        last_anthro = (await db.execute(
+            select(UserAnthropometry)
+            .where(UserAnthropometry.app_user_id == current_user.id)
+            .order_by(desc(UserAnthropometry.recorded_at))
+            .limit(1)
+        )).scalars().first()
+
+        new_weight = payload.weight if payload.weight is not None else (last_anthro.weight if last_anthro else None)
+        new_height = payload.height if payload.height is not None else (last_anthro.height if last_anthro else None)
+
+        db.add(UserAnthropometry(
+            app_user_id=current_user.id,
+            weight=new_weight,
+            height=new_height,
+        ))
 
     # Активируем PRO Mode для продвинутых
     if profile.experience_level == "advanced":
