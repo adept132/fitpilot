@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest_asyncio
 from fastapi import Depends
@@ -257,6 +258,50 @@ async def fresh_exercise(db: AsyncSession, test_user: AppUser):
     db.add(ex)
     await db.commit()
     yield ex
+
+
+@pytest_asyncio.fixture
+async def finished_session_with_prescription(client, auth_headers, seeded_history):
+    """Завершённая тренировка: у упражнения непустой `prescription`, а в кэше
+    состояния (`UserExerciseProgressionState`) — непустой `next_prescription`.
+
+    Ровно то, что нужно тестам синхронизации P0-06 (Задача 16): дельта
+    `/sync/changes` обязана отдать оба.
+
+    Строится реальным HTTP-потоком (start -> exercises -> sets -> finish), как
+    и фикстуры test_progression_lifecycle.py, а НЕ прямой записью в БД —
+    так предписания считает настоящий движок, а не рука тестировщика. Именно
+    поэтому используются `client`/`seeded_history` (коммитящее соединение
+    test_user), а не `db_session`/`app_user`: смешивание привело бы к вечной
+    блокировке, описанной в комментарии выше про фикстуры репозитория.
+    """
+    workout = (
+        await client.post("/workouts/start", headers=auth_headers, json={"source": "free"})
+    ).json()
+    add = (
+        await client.post(
+            f"/workouts/{workout['id']}/exercises",
+            headers=auth_headers,
+            json={"exercise_id": seeded_history.id},
+        )
+    ).json()
+    se_id = add["exercises"][-1]["id"]
+
+    await client.post(
+        f"/workout-session-exercises/{se_id}/sets",
+        headers=auth_headers,
+        json={"weight": 42.5, "reps": 10, "effort_level": "medium"},
+    )
+    finish_resp = await client.post(
+        f"/workouts/{workout['id']}/finish", headers=auth_headers
+    )
+    assert finish_resp.status_code == 200, finish_resp.text
+
+    return SimpleNamespace(
+        exercise_id=seeded_history.id,
+        workout_id=workout["id"],
+        session_exercise_id=se_id,
+    )
 
 
 # --- Фикстуры для тестов репозитория движка прогрессии (P0-06) ---

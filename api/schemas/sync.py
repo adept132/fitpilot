@@ -56,6 +56,9 @@ class SyncExerciseSnapshot(BaseModel):
     recommended_rep_min: int | None = None
     recommended_rep_max: int | None = None
     target_sets: int | None = None
+    # P0-06. Write-once: сервер принимает это поле только если у него самого
+    # пусто, — пользователь тренировался против того, что видел на экране.
+    prescription: dict | None = None
     deleted: bool = False
     updated_at: datetime | None = None
     sets: list[SyncSetSnapshot] = []
@@ -121,6 +124,10 @@ class SyncChangesResponse(BaseModel):
     # а не client_uuid: у тренировок, созданных легаси-эндпоинтами, client_uuid нет.
     versions: dict[str, int] = {}
     tombstones: list[SyncTombstoneItem] = []
+    # str(exercise_id) -> предварительное предписание на следующую тренировку.
+    # Едет на устройство целиком, чтобы упражнение, добавленное офлайн,
+    # получило рекомендацию без обращения к сети.
+    prescriptions: dict[str, dict] = {}
     # Курсор для следующего запроса. Всегда серверное время — локальные часы
     # устройства не участвуют, иначе расхождение часов теряет изменения.
     server_time: datetime

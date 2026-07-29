@@ -23,6 +23,7 @@ from api.services.app_user_service import get_current_app_user
 from api.services.models import (
     AppUser,
     SyncTombstone,
+    UserExerciseProgressionState,
     WorkoutSession,
     WorkoutSessionExercise,
     WorkoutSessionSet,
@@ -245,6 +246,11 @@ async def _apply_snapshot(
         exercise.recommended_rep_min = ex_snap.recommended_rep_min
         exercise.recommended_rep_max = ex_snap.recommended_rep_max
         exercise.target_sets = ex_snap.target_sets
+        # Write-once: серверное предписание — то, что пользователь уже видел.
+        # Клиентское принимаем только когда своего нет (упражнение добавлено
+        # офлайн и предписание пришло из локального кэша).
+        if not exercise.prescription and ex_snap.prescription:
+            exercise.prescription = ex_snap.prescription
         await db.flush()
         id_map[ex_snap.client_uuid] = exercise.id
 
@@ -422,6 +428,25 @@ async def sync_changes(
         tomb_stmt = tomb_stmt.where(SyncTombstone.deleted_at > since)
     tombs = (await db.execute(tomb_stmt.limit(500))).scalars().all()
 
+    # Предварительные предписания по всем упражнениям пользователя. Их немного
+    # (по одному на упражнение с историей), и они нужны целиком: локальный
+    # кэш обслуживает добавление любого упражнения офлайн.
+    state_rows = (
+        (
+            await db.execute(
+                select(UserExerciseProgressionState).where(
+                    UserExerciseProgressionState.app_user_id == app_user_id,
+                    UserExerciseProgressionState.next_prescription.isnot(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    prescriptions = {
+        str(row.exercise_id): row.next_prescription for row in state_rows
+    }
+
     return SyncChangesResponse(
         workouts=rows,
         # Ключ — серверный id тренировки: он есть всегда, в отличие от client_uuid
@@ -435,6 +460,7 @@ async def sync_changes(
             )
             for t in tombs
         ],
+        prescriptions=prescriptions,
         server_time=cursor,
         has_more=has_more,
     )
