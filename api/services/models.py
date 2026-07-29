@@ -32,6 +32,12 @@ class AppUser(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(),
                                                  onupdate=func.now())
     last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Заявка на удаление аккаунта. Пока стоит — доступ к API закрыт, но данные
+    # ещё живы: у пользователя есть DELETION_GRACE_PERIOD, чтобы передумать.
+    # Физическое удаление делает purge_user (см. api/services/account_service.py).
+    deletion_requested_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
 
     # Связи (One-to-One / One-to-Many)
     profile: Mapped[Optional["AppUserProfile"]] = relationship(
@@ -117,6 +123,8 @@ class Exercise(Base):
     difficulty: Mapped[str] = mapped_column(String(20), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text)
     source: Mapped[str] = mapped_column(String(20), default='default')
+    # Идемпотентный ключ offline-создания кастомного упражнения (дедуп повтора).
+    client_uuid: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     app_user_id: Mapped[Optional[int]] = mapped_column(
         BigInteger,
         ForeignKey("app_users.id", ondelete="CASCADE"),
@@ -124,6 +132,14 @@ class Exercise(Base):
         index=True
     )
     video_url: Mapped[Optional[str]] = mapped_column(String(500))
+
+    # Относительные пути к изображениям техники (из free-exercise-db), например
+    # ["exercises/12/0.jpg", "exercises/12/1.jpg"]. Абсолютный URL собирает роутер
+    # из request.base_url + /media/. Пустой список — картинок нет.
+    image_urls: Mapped[list] = mapped_column(JSONB, default=list, server_default='[]')
+    # True, когда картинка взята у «родственника» (другое оборудование, то же
+    # движение) — техника лишь примерная. Фронт показывает предупреждение и блюр.
+    image_approx: Mapped[bool] = mapped_column(Boolean, default=False, server_default='false')
 
     # --- НОВЫЕ ПОЛЯ КЛАССИФИКАЦИИ ---
     action: Mapped[ExerciseAction] = mapped_column(
@@ -259,6 +275,17 @@ class AppUserMesocycle(Base):
 class WorkoutSession(Base):
     __tablename__ = "workout_sessions"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Клиентский идемпотентный ключ для offline-синхронизации (см. /sync/workouts).
+    # Уникальность обеспечивается на уровне приложения в рамках app_user (как import_key):
+    # init_db добавляет колонку, но не создаёт констрейнты/индексы.
+    client_uuid: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    # Счётчик успешных синхронизаций — основа оптимистичной блокировки: клиент шлёт
+    # base_version, сервер при расхождении отвечает 409 с актуальным состоянием.
+    # Отдельно от updated_at намеренно: func.now() в Postgres — время начала
+    # транзакции, у двух конкурентных записей оно может совпасть.
+    sync_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False,
                                              index=True)
     source: Mapped[str] = mapped_column(String(32), nullable=False)  # free | split_day | plan
@@ -286,6 +313,18 @@ class WorkoutSession(Base):
     session_rpe_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    # --- Импорт истории из CSV ---
+    # ВАЖНО: source не расширяем значением 'import' — на него навешен
+    # CheckConstraint (см. __table_args__), а init_db обновляет только
+    # таблицы/колонки и НЕ трогает существующие констрейнты. Провенанс
+    # импорта держим в отдельных полях, source остаётся 'free'.
+    import_source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # Детерминированный ключ тренировки в файле — по нему отсекаем повторный
+    # импорт того же файла (проверка на уровне приложения: ALTER ADD COLUMN
+    # не создаёт индексов, при росте объёмов индекс добавить вручную).
+    import_key: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
@@ -307,6 +346,8 @@ class WorkoutSession(Base):
 class WorkoutSessionExercise(Base):
     __tablename__ = "workout_session_exercises"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Клиентский идемпотентный ключ для offline-синхронизации (см. /sync/workouts).
+    client_uuid: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     workout_session_id: Mapped[int] = mapped_column(ForeignKey("workout_sessions.id", ondelete="CASCADE"),
                                                     nullable=False, index=True)
     exercise_id: Mapped[int] = mapped_column(ForeignKey("exercises.id", ondelete="RESTRICT"), nullable=False,
@@ -323,6 +364,11 @@ class WorkoutSessionExercise(Base):
     )
     recommended_rep_min: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     recommended_rep_max: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Поподходное предписание движка прогрессии (P0-06). Write-once: непустое
+    # значение не переписывается ни пересчётом, ни merge при синхронизации —
+    # иначе evaluate() сравнит факт с целью, которой пользователь не видел.
+    prescription: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    target_sets: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
@@ -339,6 +385,8 @@ class WorkoutSessionExercise(Base):
 class WorkoutSessionSet(Base):
     __tablename__ = "workout_session_sets"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Клиентский идемпотентный ключ для offline-синхронизации (см. /sync/workouts).
+    client_uuid: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     workout_session_exercise_id: Mapped[int] = mapped_column(
         ForeignKey("workout_session_exercises.id", ondelete="CASCADE"), nullable=False, index=True)
     set_number: Mapped[int] = mapped_column(nullable=False)
@@ -373,7 +421,55 @@ class WorkoutSessionSet(Base):
     )
 
 
+class SyncTombstone(Base):
+    """Надгробие удалённой сущности — чтобы удаление доехало до других устройств.
+
+    Хард-delete не оставляет следа, и дельта-выборка GET /sync/changes не смогла бы
+    сообщить второму устройству, что тренировку удалили. Отдельная таблица вместо
+    soft-delete выбрана осознанно: WorkoutSession селектится в ~20 местах, и
+    добавление "deleted_at IS NULL" во все запросы — несоразмерный риск.
+    """
+    __tablename__ = "sync_tombstones"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    entity_type: Mapped[str] = mapped_column(String(32), nullable=False)  # workout
+    client_uuid: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    server_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    deleted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )
+
+
 # --- ДАННЫЕ ПОЛЬЗОВАТЕЛЯ ---
+
+class ExerciseImportAlias(Base):
+    """Запоминает, как внешнее имя упражнения (например, англоязычное
+    'Bench Press (Barbell)' из Strong) легло на наше упражнение.
+
+    Нужна, чтобы повторный импорт не переспрашивал пользователя то, что он
+    уже сопоставил руками.
+    """
+    __tablename__ = "exercise_import_aliases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source: Mapped[str] = mapped_column(String(32), default="strong", server_default="strong")
+    # Имя как в файле, приведённое к нижнему регистру и обрезанное.
+    external_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    exercise_id: Mapped[int] = mapped_column(
+        ForeignKey("exercises.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    exercise: Mapped["Exercise"] = relationship("Exercise", lazy="noload")
+
 
 class UserExercise(Base):
     __tablename__ = 'user_exercises'
@@ -414,11 +510,32 @@ class UserAnthropometry(Base):
     birth_date: Mapped[Optional[date_type]] = mapped_column(Date)
     height: Mapped[Optional[float]] = mapped_column()
     weight: Mapped[Optional[float]] = mapped_column()
+    body_fat: Mapped[Optional[float]] = mapped_column()  # % жира
     activity_level: Mapped[Optional[str]] = mapped_column()
+    # Идемпотентный ключ offline-записи (дедуп повторной отправки одного замера).
+    client_uuid: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
 
     # updated_at больше не нужен, так как мы не обновляем эту строку, а пишем новую
 
     app_user: Mapped["AppUser"] = relationship("AppUser", back_populates="anthropometry_history")
+
+
+class BodyMeasurement(Base):
+    """Замер-обхват (талия/грудь/бёдра/рука/бедро). Журнал (append-only): один
+    ключ метрики — много записей во времени, для графиков и целей по замерам.
+    Вес и % жира живут в UserAnthropometry (там же рост для ИМТ)."""
+    __tablename__ = 'body_measurements'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False, index=True
+    )
+    metric_key: Mapped[str] = mapped_column(String(30), nullable=False)  # waist|chest|hips|arm|thigh|...
+    value: Mapped[float] = mapped_column(nullable=False)  # см
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    # Идемпотентный ключ offline-записи (дедуп повторной отправки одного замера).
+    client_uuid: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
 
 
 class UserObservation(Base):
@@ -454,13 +571,21 @@ class UserObservation(Base):
 class UserGoal(Base):
     __tablename__ = 'user_goals'
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Идемпотентный ключ offline-создания (дедуп повторной отправки).
+    client_uuid: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False)
+    # strength | bodyweight | body_fat | measurement | frequency
     goal_type: Mapped[str] = mapped_column(String(50), nullable=False)
     target_value: Mapped[float] = mapped_column(nullable=False)
     unit: Mapped[Optional[str]] = mapped_column(String(20))
     exercise_id: Mapped[Optional[int]] = mapped_column(ForeignKey('exercises.id', ondelete='SET NULL'))
+    # Для силовых целей: целевое число повторов (target_value = целевой вес).
+    target_reps: Mapped[Optional[int]] = mapped_column(Integer)
+    # Для целей-замеров: ключ метрики (waist/chest/...). Задел под Этап 3.
+    metric_key: Mapped[Optional[str]] = mapped_column(String(30))
     deadline: Mapped[Optional[date_type]] = mapped_column(Date)
-    is_completed: Mapped[bool] = mapped_column(default=False)
+    is_completed: Mapped[bool] = mapped_column(default=False, server_default='false')
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     app_user: Mapped["AppUser"] = relationship('AppUser', back_populates='goals')
     exercise: Mapped[Optional["Exercise"]] = relationship('Exercise')
@@ -515,6 +640,64 @@ class UserExercisePreference(Base):
         UniqueConstraint('app_user_id', 'exercise_id', name='unique_user_exercise_pref_ex'),
         UniqueConstraint('app_user_id', 'user_exercise_id', name='unique_user_exercise_pref_user_ex'),
     )
+
+
+class UserExerciseNote(Base):
+    """Личная заметка пользователя к упражнению (техника, ощущения, настройки тренажёра)."""
+    __tablename__ = 'user_exercise_notes'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False,
+                                             index=True)
+    exercise_id: Mapped[int] = mapped_column(ForeignKey('exercises.id', ondelete='CASCADE'), nullable=False, index=True)
+    note: Mapped[str] = mapped_column(Text, nullable=False, default='', server_default='')
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint('app_user_id', 'exercise_id', name='unique_user_exercise_note'),
+    )
+
+
+class UserExerciseProgressionState(Base):
+    """Кэш состояния прогрессии по упражнению.
+
+    СТРОГО ПРОИЗВОДНАЯ таблица: всё содержимое восстанавливается функцией
+    progression.state.rebuild_state(). Расхождение чинится пересчётом, а не
+    ручным фиксом; при бампе engine_version состояние не мигрируется.
+    """
+
+    __tablename__ = "user_exercise_progression_state"
+    __table_args__ = (
+        UniqueConstraint("app_user_id", "exercise_id", name="uq_progression_state"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("app_users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    exercise_id: Mapped[int] = mapped_column(
+        ForeignKey("exercises.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    working_e1rm: Mapped[Optional[float]] = mapped_column(nullable=True)
+    training_max: Mapped[Optional[float]] = mapped_column(nullable=True)
+    best_e1rm_ever: Mapped[Optional[float]] = mapped_column(nullable=True)
+    consecutive_misses: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    sessions_since_gain: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_top_weight: Mapped[Optional[float]] = mapped_column(nullable=True)
+    last_scheme: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    last_session_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    # Предварительное предписание на следующий раз: контекст будущей
+    # тренировки неизвестен, поэтому считается по tier_fallback и текущей фазе.
+    next_prescription: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+
+    recomputed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    engine_version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 
 class AdvancedGeneratorPreset(Base):
