@@ -58,3 +58,8 @@ class UpdateSettingsRequest(BaseModel):
     # Конфиг калькулятора блинов (отдельно на единицу): {barWeights, selectedBar, plates}
     plate_config_kg: Optional[Dict[str, Any]] = None
     plate_config_lbs: Optional[Dict[str, Any]] = None
+    # P0-06: ручной выбор схемы прогрессии по упражнениям — settings["progression"]["overrides"].
+    # Здесь просто dict: имена схем валидирует PATCH /profile/settings (нужен
+    # доступ к KNOWN_SCHEMES из api/services/progression/resolve.py, а схема
+    # запроса не должна знать про сервисный слой).
+    progression: Optional[Dict[str, Any]] = None

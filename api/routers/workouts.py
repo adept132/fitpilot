@@ -20,7 +20,7 @@ from api.services.progression.engine import plan_exercise
 from api.services.progression.resolve import override_for
 from api.services.workout_superset_service import WorkoutSupersetService
 from api.services.models import WorkoutSession, WorkoutSessionExercise, Exercise, WorkoutSessionSet, AppUser, \
-    AppUserProfile
+    AppUserProfile, AppUserMesocycle, MesocyclePhase
 
 router = APIRouter(tags=["workouts"])
 
@@ -415,6 +415,36 @@ async def get_exercise_autoprogression(
     experience_level = profile.experience_level if profile else None
     settings = profile.settings if profile else None
 
+    # Фаза мезоцикла нужна схеме percent_1rm и правилу deload_phase, но обе
+    # сравнивают со строковым effort_tier ("prefailure"/"failure"/"deload"/...),
+    # а не с номером фазы. WorkoutSession.mesocycle_phase — это НОМЕР (int), не
+    # название (см. развёрнутый комментарий в
+    # api/services/progression/repository.py::_load_deload_map) — просто
+    # str(...) от него дал бы "1"/"2"/... и обе проверки молча никогда бы не
+    # сработали. Тот же join по (app_user_mesocycle_id, phase_number), что и в
+    # _load_deload_map, но для одной сессии — репозиторий трогать нельзя
+    # (не в списке файлов задачи), поэтому запрос локальный.
+    phase_effort_tier = "medium"
+    workout_session = session_exercise.workout_session
+    if (
+        workout_session.app_user_mesocycle_id is not None
+        and workout_session.mesocycle_phase is not None
+    ):
+        tier_stmt = (
+            select(MesocyclePhase.effort_tier)
+            .join(
+                AppUserMesocycle,
+                AppUserMesocycle.mesocycle_id == MesocyclePhase.mesocycle_id,
+            )
+            .where(
+                AppUserMesocycle.id == workout_session.app_user_mesocycle_id,
+                MesocyclePhase.phase_number == workout_session.mesocycle_phase,
+            )
+        )
+        tier = (await db.execute(tier_stmt)).scalar_one_or_none()
+        if tier is not None:
+            phase_effort_tier = tier
+
     data = await compute_autoprogression(
         db,
         session_exercise,
@@ -423,6 +453,7 @@ async def get_exercise_autoprogression(
         settings,
         target_reps=target_reps,
         target_effort=target_effort,
+        phase_effort_tier=phase_effort_tier,
     )
 
     return AutoprogressionResponse(**data)

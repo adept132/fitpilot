@@ -7,6 +7,7 @@ from api.schemas.profile import ProfileResponse, UpdateProfileRequest
 from api.schemas.оnboarding import UpdateSettingsRequest, VolumeBudget, OnboardingWidgetRequest
 from api.services.app_user_service import get_current_app_user
 from api.services.models import AppUser, AppUserProfile, UserAnthropometry
+from api.services.progression.resolve import KNOWN_SCHEMES
 from api.services.volume_calculator import calculate_volume_budget
 
 router = APIRouter(tags=["profile"])
@@ -128,6 +129,29 @@ async def update_profile_settings(
         current_settings["plate_config_kg"] = payload.plate_config_kg
     if payload.plate_config_lbs is not None:
         current_settings["plate_config_lbs"] = payload.plate_config_lbs
+
+    # P0-06: ручной выбор схемы прогрессии по упражнениям
+    # (settings["progression"]["overrides"][exercise_id] = scheme).
+    # Мусорное имя схемы молча ляжет в settings и будет тихо игнорироваться
+    # движком (resolve.override_for сверяется с KNOWN_SCHEMES и на неизвестное
+    # имя отдаёт None) — пользователь решит, что настроил, а ничего не
+    # изменится. Отказываем сразу и явно, а не тихо игнорируем.
+    if payload.progression is not None:
+        overrides = payload.progression.get("overrides") or {}
+        unknown = sorted(set(overrides.values()) - KNOWN_SCHEMES)
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Неизвестные схемы прогрессии: {', '.join(unknown)}",
+            )
+        # Мёрджим overrides по exercise_id, а не заменяем весь словарь целиком —
+        # иначе сохранение схемы для упражнения A стирало бы ранее сохранённую
+        # схему для упражнения B (тот же приём уже применён выше для weight_steps).
+        current_progression = dict(current_settings.get("progression") or {})
+        merged_overrides = dict(current_progression.get("overrides") or {})
+        merged_overrides.update(overrides)
+        current_progression["overrides"] = merged_overrides
+        current_settings["progression"] = current_progression
 
     profile.settings = current_settings
     await db.commit()
