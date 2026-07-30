@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from types import MappingProxyType
 from typing import Any, Mapping, Optional
 
 from api.services.readiness import params
@@ -22,6 +23,12 @@ class CheckinSignals:
     soreness: Mapping[str, int] = field(default_factory=dict)  # muscle -> 0..3
     pain: Mapping[str, int] = field(default_factory=dict)      # place -> 0..3
     observed_at: Optional[datetime] = None
+
+    def __post_init__(self) -> None:
+        # frozen=True блокирует только переассоединение атрибутов, но не мутацию
+        # содержимого. MappingProxyType делает словари неизменяемыми.
+        object.__setattr__(self, "soreness", MappingProxyType(self.soreness))
+        object.__setattr__(self, "pain", MappingProxyType(self.pain))
 
 
 @dataclass(frozen=True)

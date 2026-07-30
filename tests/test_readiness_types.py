@@ -132,3 +132,17 @@ def test_observation_kinds_cover_the_checkin():
     assert params.KIND_STRESS == "stress"
     assert params.KIND_SORENESS == "soreness"
     assert params.KIND_PAIN == "pain"
+
+
+def test_checkin_signals_soreness_is_truly_immutable():
+    """Проверяет, что soreness защищён от мутации, а не только от переассоединения."""
+    s = CheckinSignals(soreness={"quads": 2})
+    with pytest.raises(TypeError):
+        s.soreness["quads"] = 99
+
+
+def test_checkin_signals_pain_is_truly_immutable():
+    """Проверяет, что pain защищён от мутации, а не только от переассоединения."""
+    s = CheckinSignals(pain={"knee": 1})
+    with pytest.raises(TypeError):
+        s.pain["knee"] = 3
