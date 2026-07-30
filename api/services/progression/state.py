@@ -103,32 +103,31 @@ def evaluate(
     if not usable:
         return Outcome(status="no_basis")
 
-    hit = miss = deviated = overshoot = 0
+    hit = miss = deviated = overshoot = strained = 0
     achieved: Optional[float] = None
 
     for s in usable:
         sp = _prescription_for(prescription, s.set_number)
+        if sp is None:
+            continue
 
         if s.weight_kg is not None:
             value = e1rm(float(s.weight_kg), int(s.reps), int(s.rir))
             achieved = value if achieved is None else max(achieved, value)
 
-        # P0-06 C3: доп. защита от TypeError (float() argument ... NoneType) —
-        # _requires_weight() выше уже не должна пропускать сюда факт без веса,
-        # когда предписание ЭТОГО set_number его ожидает (см. её докстринг),
-        # но working_sets() фильтрует по ОДНОМУ флагу на всю сессию, а не по
-        # set_number. s.weight_kg is not None — вторая, независимая гарантия
-        # на случай прескрипшена, не покрытого этим инвариантом.
-        if (
-            sp.weight_kg is not None
-            and s.weight_kg is not None
-            and abs(float(s.weight_kg) - sp.weight_kg) > step_kg
-        ):
+        if sp.weight_kg is not None and s.weight_kg is not None and abs(float(s.weight_kg) - sp.weight_kg) > step_kg:
             deviated += 1
             continue
         if s.reps < sp.rep_min:
             miss += 1
             continue
+
+        # P0-07 §8.1: цель взята — но какой ценой. Условие узкое: работа на
+        # нуле там, где запас предписан. Предписанный RIR 1 или AMRAP с
+        # RIR 0 сигналом не считаются, это штатный режим схемы.
+        if int(sp.rir) >= params.STRAIN_MIN_PRESCRIBED_RIR and int(s.rir) <= 0:
+            strained += 1
+
         if sp.rep_max is not None and s.reps > sp.rep_max:
             overshoot += 1
             hit += 1
@@ -141,11 +140,11 @@ def evaluate(
         status = "deviated"
     elif miss:
         status = "miss"
+    elif strained and strained >= total * params.STRAIN_SET_RATIO:
+        # Последний подход до отказа — обычная практика; сигналом считаем
+        # только когда так прошла половина рабочих подходов и больше.
+        status = "strained"
     elif overshoot and overshoot == hit:
-        # overshoot выставляется, только если ВСЕ засчитанные подходы ушли
-        # выше rep_max. Смешанный случай (часть выше потолка, часть в
-        # диапазоне) — это "hit": частичный перебор не даёт достаточных
-        # оснований для ускоренного роста веса на всех подходах.
         status = "overshoot"
     else:
         status = "hit"
@@ -156,6 +155,7 @@ def evaluate(
         miss_sets=miss,
         total_sets=total,
         achieved_e1rm=achieved,
+        strained_sets=strained,
     )
 
 

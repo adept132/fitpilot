@@ -136,7 +136,7 @@ class ExerciseHistory:
 class Outcome:
     """Вердикт по прошлой сессии.
 
-    status: hit | miss | deviated | overshoot | skipped | no_basis
+    status: hit | miss | deviated | strained | overshoot | skipped | no_basis
     """
 
     status: str
@@ -144,6 +144,9 @@ class Outcome:
     miss_sets: int = 0
     total_sets: int = 0
     achieved_e1rm: Optional[float] = None
+    # P0-07: сколько рабочих подходов сделано в упор — вес и повторы взяты,
+    # но ценой отказа там, где запас был предписан.
+    strained_sets: int = 0
 
 
 @dataclass(frozen=True)
