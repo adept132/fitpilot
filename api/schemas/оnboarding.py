@@ -63,3 +63,7 @@ class UpdateSettingsRequest(BaseModel):
     # доступ к KNOWN_SCHEMES из api/services/progression/resolve.py, а схема
     # запроса не должна знать про сервисный слой).
     progression: Optional[Dict[str, Any]] = None
+    # P0-07: тумблер контура сбора готовности.
+    # {"checkin_enabled": bool}. Полностью выключает и предсессионный
+    # чек-ин, и вопрос о боли в итогах тренировки.
+    readiness: Optional[dict] = None

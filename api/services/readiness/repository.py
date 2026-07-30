@@ -21,6 +21,24 @@ from api.services.readiness import params
 from api.services.readiness.types import CheckinSignals, ExerciseTarget
 
 
+def checkin_enabled(settings: Optional[dict[str, Any]]) -> bool:
+    """Включён ли контур сбора (спека §10).
+
+    Выключен — значит вердикт всегда None, движок ведёт себя как P0-06,
+    и вопрос о боли в итогах тренировки тоже не показывается.
+
+    settings — свободный JSONB: туда мог попасть мусор от старых сборок,
+    поэтому нестрогая проверка типа, а не settings["readiness"]["..."].
+    """
+    block = (settings or {}).get("readiness")
+    if not isinstance(block, dict):
+        return True
+    value = block.get("checkin_enabled")
+    if not isinstance(value, bool):
+        return True
+    return value
+
+
 def build_exercise_target(exercise: Any) -> ExerciseTarget:
     """Строка БД -> чистый ExerciseTarget с нормализованными ключами.
 

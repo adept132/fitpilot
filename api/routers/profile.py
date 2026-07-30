@@ -100,8 +100,17 @@ async def update_profile_settings(
     )
     profile = profile_result.scalars().first()
 
+    # P0-07: ленивое создание строки профиля, а не 404. До этой задачи
+    # PATCH /profile/settings требовал, чтобы пользователь уже прошёл
+    # онбординг (там создаётся AppUserProfile, см. update_profile_onboarding
+    # ниже) — иначе ловил 404 на ровном месте. Тумблер readiness должен быть
+    # доступен и до онбординга (см. /readiness/checkin/context, которая
+    # профиля не требует вовсе), поэтому заводим строку здесь же тем же
+    # приёмом, что и update_profile_onboarding.
     if not profile:
-        raise HTTPException(status_code=404, detail="Профиль не найден")
+        profile = AppUserProfile(app_user_id=current_user.id)
+        db.add(profile)
+        await db.flush()
 
     # Обновляем JSONB поле settings (частично — только переданные поля)
     current_settings = dict(profile.settings) if profile.settings else {}
@@ -223,6 +232,21 @@ async def update_profile_settings(
                 merged_overrides[exercise_key] = scheme
         current_progression["overrides"] = merged_overrides
         current_settings["progression"] = current_progression
+
+    # P0-07: тумблер чек-ина. Валидируем явно — settings это свободный
+    # JSONB, и мусор оттуда позже вылезет 500-й, а не 422-й.
+    if payload.readiness is not None:
+        if not isinstance(payload.readiness, dict):
+            raise HTTPException(status_code=422, detail="readiness должен быть объектом")
+        block = dict(current_settings.get("readiness") or {})
+        if "checkin_enabled" in payload.readiness:
+            value = payload.readiness["checkin_enabled"]
+            if not isinstance(value, bool):
+                raise HTTPException(
+                    status_code=422, detail="checkin_enabled должен быть булевым"
+                )
+            block["checkin_enabled"] = value
+        current_settings["readiness"] = block
 
     profile.settings = current_settings
     await db.commit()

@@ -12,6 +12,7 @@ from api.routers.mesocycles import router as mesocycles_router
 from api.routers.microcycles import router as microcycles_router
 from api.routers.plans import router as plans_router
 from api.routers.calendar import router as calendar_router
+from api.routers.readiness import router as readiness_router
 
 app = FastAPI(title="FitPilot API")
 
@@ -28,6 +29,7 @@ app.include_router(exercises_router)
 app.include_router(profile_router)
 app.include_router(calendar_router)
 app.include_router(workout_supersets_router)
+app.include_router(readiness_router)
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
