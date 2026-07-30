@@ -100,17 +100,8 @@ async def update_profile_settings(
     )
     profile = profile_result.scalars().first()
 
-    # P0-07: ленивое создание строки профиля, а не 404. До этой задачи
-    # PATCH /profile/settings требовал, чтобы пользователь уже прошёл
-    # онбординг (там создаётся AppUserProfile, см. update_profile_onboarding
-    # ниже) — иначе ловил 404 на ровном месте. Тумблер readiness должен быть
-    # доступен и до онбординга (см. /readiness/checkin/context, которая
-    # профиля не требует вовсе), поэтому заводим строку здесь же тем же
-    # приёмом, что и update_profile_onboarding.
     if not profile:
-        profile = AppUserProfile(app_user_id=current_user.id)
-        db.add(profile)
-        await db.flush()
+        raise HTTPException(status_code=404, detail="Профиль не найден")
 
     # Обновляем JSONB поле settings (частично — только переданные поля)
     current_settings = dict(profile.settings) if profile.settings else {}
