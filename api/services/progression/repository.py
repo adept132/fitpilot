@@ -19,6 +19,9 @@ from api.services.progression import params
 from api.services.progression.metrics import effort_to_rir
 from api.services.progression.rounding import step_kg
 from api.services.progression.state import rebuild_state
+from api.services.readiness.repository import build_exercise_target
+from api.services.readiness.types import ReadinessVerdict
+from api.services.readiness.verdict import level_for_exercise
 from api.services.progression.types import (
     ENGINE_VERSION,
     ExerciseHistory,
@@ -264,6 +267,7 @@ async def build_context(
     settings: Optional[dict[str, Any]],
     rep_range_source: str = params.REP_SOURCE_FALLBACK,
     phase_effort_tier: str = "medium",
+    readiness: Optional[ReadinessVerdict] = None,
 ) -> SchemeContext:
     """Собрать контекст движка из строк БД. Наружу — только dataclasses."""
     exercise = session_exercise.exercise
@@ -281,6 +285,11 @@ async def build_context(
             getattr(exercise, "fatigue_tier", 2), params.TIER_REP_FALLBACK[2]
         )
         rep_range_source = params.REP_SOURCE_FALLBACK
+
+    # P0-07: уровень готовности резолвится ЗДЕСЬ, а не в ядре движка.
+    # Ядро не должно знать ни про JOINT_IMPACT, ни про мышцы — в
+    # SchemeContext приходит готовый скаляр.
+    exercise_readiness = level_for_exercise(readiness, build_exercise_target(exercise))
 
     return SchemeContext(
         history=history,
@@ -304,6 +313,8 @@ async def build_context(
         phase_effort_tier=phase_effort_tier,
         days_since_last_session=_days_since(history),
         settings=settings or {},
+        readiness_level=exercise_readiness.level,
+        readiness_source=exercise_readiness.source,
     )
 
 

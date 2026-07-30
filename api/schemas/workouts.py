@@ -122,6 +122,10 @@ class AddWorkoutExerciseRequest(BaseModel):
     exercise_id: int = Field(gt=0)
     notes: str | None = None
     superset_group: str | None = Field(default=None, max_length=64)
+    # P0-07: чек-ин физически предшествует созданию сессии (спека §6.1),
+    # поэтому вердикт учитывается ОДНОЙ записью предписания и write-once
+    # инвариант P0-06 §9.3 остаётся целым.
+    readiness_checkin_uuid: str | None = None
 
 
 class AddWorkoutSetRequest(BaseModel):

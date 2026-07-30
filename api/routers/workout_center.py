@@ -18,6 +18,7 @@ from api.services.progression import params as progression_params
 from api.services.progression import repository as progression_repo
 from api.services.progression.engine import plan_exercise
 from api.services.progression.resolve import override_for
+from api.services.readiness import repository as readiness_repo
 
 # ОБНОВЛЕННЫЕ ИМПОРТЫ МОДЕЛЕЙ БАЗЫ ДАННЫХ
 from api.services.models import (
@@ -472,6 +473,12 @@ async def start_workout(
         experience_level = profile.experience_level if profile else None
         settings = profile.settings if profile else None
 
+        # Вердикт один на всю сессию — резолвим до цикла, как и фазу
+        # мезоцикла (тот же принцип, что и P0-06 C2: не плодить запросы).
+        readiness_verdict = await readiness_repo.verdict_for_checkin(
+            session, app_user.id, payload.readiness_checkin_uuid, settings
+        )
+
         # Фаза мезоцикла одна на всю сессию — резолвим один раз до цикла,
         # а не на каждое упражнение (иначе N лишних запросов джойна поверх
         # уже существующего N+1 build_context по load_history, P0-06 C2).
@@ -533,6 +540,7 @@ async def start_workout(
                     "rep_range_source", progression_params.REP_SOURCE_FALLBACK
                 ),
                 phase_effort_tier=phase_effort_tier,
+                readiness=readiness_verdict,
             )
             prescription = plan_exercise(
                 ctx, override=override_for(settings, new_ex.exercise_id)

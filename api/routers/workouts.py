@@ -19,6 +19,7 @@ from api.services.progression import params as progression_params
 from api.services.progression import repository as progression_repo
 from api.services.progression.engine import plan_exercise
 from api.services.progression.resolve import override_for
+from api.services.readiness import repository as readiness_repo
 from api.services.workout_superset_service import WorkoutSupersetService
 from api.services.models import WorkoutSession, WorkoutSessionExercise, Exercise, WorkoutSessionSet, AppUser, \
     AppUserProfile
@@ -244,6 +245,10 @@ async def add_exercise_to_workout(
         db, workout.app_user_mesocycle_id, workout.mesocycle_phase
     )
 
+    readiness_verdict = await readiness_repo.verdict_for_checkin(
+        db, current_app_user.id, payload.readiness_checkin_uuid, settings
+    )
+
     # Предписание считаем сразу: пользователь должен увидеть цель до первого
     # подхода, а evaluate() потом сравнит факт именно с ней.
     ctx = await progression_repo.build_context(
@@ -257,6 +262,7 @@ async def add_exercise_to_workout(
         # его выше (rec_data), раньше значение молча отбрасывалось.
         rep_range_source=rec_data.get("rep_range_source", progression_params.REP_SOURCE_FALLBACK),
         phase_effort_tier=phase_effort_tier,
+        readiness=readiness_verdict,
     )
     prescription = plan_exercise(
         ctx, override=override_for(settings, session_exercise.exercise_id)

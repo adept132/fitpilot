@@ -74,6 +74,10 @@ class StartWorkoutPayload(BaseModel):
     split_day_id: UUID | None = None  # <-- БЫЛО int | None
     plan_id: Optional[int] = None
     calendar_day_id: Optional[int] = None
+    # P0-07: чек-ин физически предшествует созданию сессии (спека §6.1),
+    # поэтому вердикт учитывается ОДНОЙ записью предписания и write-once
+    # инвариант P0-06 §9.3 остаётся целым.
+    readiness_checkin_uuid: Optional[str] = None
 
 
 class StartWorkoutResponse(BaseModel):

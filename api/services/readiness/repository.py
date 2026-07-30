@@ -164,6 +164,28 @@ async def load_signals(
     )
 
 
+async def verdict_for_checkin(
+    session: AsyncSession,
+    app_user_id: int,
+    checkin_client_uuid: Optional[str],
+    settings: Optional[dict[str, Any]] = None,
+):
+    """Вердикт по uuid чек-ина. None — вердикта нет, движок как P0-06.
+
+    None возвращается в трёх случаях: uuid не прислали, чек-ины выключены
+    в настройках, наблюдений по этому uuid нет (например, офлайн-чек-ин
+    ещё не доехал синхронизацией — это штатная ситуация, а не ошибка).
+    """
+    from api.services.readiness.verdict import build_verdict
+
+    if not checkin_client_uuid:
+        return None
+    if not checkin_enabled(settings):
+        return None
+    signals = await load_signals(session, app_user_id, checkin_client_uuid)
+    return build_verdict(signals)
+
+
 async def active_pain(
     session: AsyncSession, app_user_id: int, now: Optional[datetime] = None
 ) -> dict[str, int]:
