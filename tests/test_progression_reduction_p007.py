@@ -137,3 +137,79 @@ def test_held_weight_lands_on_the_equipment_grid():
 def test_every_new_reason_has_text():
     for code in ("strained_hold", "exercise_skipped", "layoff_soft"):
         assert params.REASON_TEXTS[code].strip()
+
+
+# --- 1. Точные граничные дни ---
+
+
+def test_day_10_does_not_fire_soft_layoff():
+    # Охраняет ошибку > vs >= : LAYOFF_SOFT_DAYS = 10, правило 9 требует
+    # days_since_last_session > 10, поэтому день 10 не должен срабатывать.
+    result = apply_reduction(presc(), ctx(days_since_last_session=10))
+    assert result.reason_code == "progressed"
+
+
+def test_day_21_fires_soft_layoff_not_hard_layoff():
+    # Охраняет ошибку > vs >= : LAYOFF_DAYS = 21, правило 2 требует > 21,
+    # поэтому день 21 попадает в диапазон правила 9 (10, 21].
+    result = apply_reduction(presc(), ctx(days_since_last_session=21))
+    assert result.reason_code == "layoff_soft"
+    assert result.top_weight == pytest.approx(ANCHOR)
+
+
+# --- 2. Якоря для правил 8 и 9 ---
+
+
+def test_exercise_skipped_needs_an_anchor():
+    # Правило 8 требует якоря; без него не срабатывается.
+    result = apply_reduction(
+        presc(), ctx(last_session_skipped=True, state=ProgressionState())
+    )
+    assert result.reason_code == "progressed"
+
+
+def test_soft_layoff_needs_an_anchor():
+    # Правило 9 требует якоря; без него не срабатывается.
+    result = apply_reduction(presc(), ctx(days_since_last_session=14, state=ProgressionState()))
+    assert result.reason_code == "progressed"
+
+
+# --- 3. Сетка оборудования для правил 7 и 9 ---
+
+
+def test_strained_hold_lands_on_equipment_grid():
+    # Якорь мог прийти мимо сетки; это НОВОЕ предписание.
+    # Для barbell с шагом 2.5: 41.3 -> 42.5
+    result = apply_reduction(
+        presc(),
+        ctx(last_outcome=strained_outcome(), state=ProgressionState(last_top_weight=41.3)),
+    )
+    assert result.top_weight == pytest.approx(42.5)
+
+
+def test_soft_layoff_lands_on_equipment_grid():
+    # Якорь мог прийти мимо сетки; это НОВОЕ предписание.
+    # Для barbell с шагом 2.5: 41.3 -> 42.5
+    result = apply_reduction(
+        presc(),
+        ctx(days_since_last_session=14, state=ProgressionState(last_top_weight=41.3)),
+    )
+    assert result.top_weight == pytest.approx(42.5)
+
+
+# --- 4. Порядок правил: стёртая нагрузка выше пропуска упражнения ---
+
+
+def test_strained_hold_outranks_exercise_skipped():
+    # Оба условия верны: стёртая нагрузка И упражнение было пропущено.
+    # Правило 7 (strained_hold) стоит раньше правила 8 (exercise_skipped),
+    # поэтому оно и должно победить. Это порядок — в коде сейчас неявный.
+    result = apply_reduction(
+        presc(),
+        ctx(
+            last_outcome=strained_outcome(),
+            last_session_skipped=True,
+            state=ProgressionState(last_top_weight=ANCHOR),
+        ),
+    )
+    assert result.reason_code == "strained_hold"
