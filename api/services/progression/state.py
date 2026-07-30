@@ -91,7 +91,7 @@ def evaluate(
     facts: Sequence[SetFact],
     step_kg: float,
 ) -> Outcome:
-    """Вердикт по сессии. Приоритет: no_basis, deviated, miss, overshoot, hit."""
+    """Вердикт по сессии. Приоритет: no_basis, deviated, miss, strained, overshoot, hit."""
     if prescription is None or not prescription.sets:
         return Outcome(status="no_basis")
 
@@ -115,6 +115,12 @@ def evaluate(
             value = e1rm(float(s.weight_kg), int(s.reps), int(s.rir))
             achieved = value if achieved is None else max(achieved, value)
 
+        # P0-06 C3: доп. защита от TypeError (float() argument ... NoneType) —
+        # _requires_weight() выше уже не должна пропускать сюда факт без веса,
+        # когда предписание ЭТОГО set_number его ожидает (см. её докстринг),
+        # но working_sets() фильтрует по ОДНОМУ флагу на всю сессию, а не по
+        # set_number. s.weight_kg is not None — вторая, независимая гарантия
+        # на случай прескрипшена, не покрытого этим инвариантом.
         if sp.weight_kg is not None and s.weight_kg is not None and abs(float(s.weight_kg) - sp.weight_kg) > step_kg:
             deviated += 1
             continue
