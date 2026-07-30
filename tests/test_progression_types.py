@@ -42,8 +42,9 @@ def test_open_rep_max_survives_round_trip():
     assert restored.sets[1].rep_max is None
 
 
-def test_engine_version_is_one():
-    assert ENGINE_VERSION == 1
+def test_engine_version_is_two():
+    # P0-07 бампит версию: в Prescription появились поля объёма.
+    assert ENGINE_VERSION == 2
 
 
 def test_prescription_is_immutable():
@@ -63,6 +64,13 @@ def test_every_reason_code_has_text():
         "bootstrap_no_prescription",
         "needs_external_load",
         "no_basis",
+        # --- P0-07 ---
+        "strained_hold",
+        "exercise_skipped",
+        "layoff_soft",
+        "pain_hold",
+        "soreness_limit",
+        "readiness_limit",
     }
     assert set(params.REASON_TEXTS) == expected
     assert all(text.strip() for text in params.REASON_TEXTS.values())

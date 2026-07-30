@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
-ENGINE_VERSION = 1
+ENGINE_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -69,6 +69,13 @@ class Prescription:
     basis: dict[str, Any] = field(default_factory=dict)
     engine_version: int = ENGINE_VERSION
     provisional: bool = False
+    # --- P0-07: подрезка объёма ---
+    # Отдельно от reason_code намеренно: иначе причина объёма затирала бы
+    # причину веса, и пользователь с крепатурой перестал бы видеть, что у
+    # него вдобавок плато.
+    volume_delta: int = 0
+    volume_reason_code: Optional[str] = None
+    volume_reason_text: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +86,9 @@ class Prescription:
             "basis": dict(self.basis),
             "engine_version": self.engine_version,
             "provisional": self.provisional,
+            "volume_delta": self.volume_delta,
+            "volume_reason_code": self.volume_reason_code,
+            "volume_reason_text": self.volume_reason_text,
         }
 
     @staticmethod
@@ -91,6 +101,9 @@ class Prescription:
             basis=dict(raw.get("basis") or {}),
             engine_version=int(raw.get("engine_version", ENGINE_VERSION)),
             provisional=bool(raw.get("provisional", False)),
+            volume_delta=int(raw.get("volume_delta", 0) or 0),
+            volume_reason_code=raw.get("volume_reason_code"),
+            volume_reason_text=raw.get("volume_reason_text"),
         )
 
     @property
@@ -169,3 +182,14 @@ class SchemeContext:
     phase_effort_tier: str = "medium"
     days_since_last_session: Optional[int] = None
     settings: dict[str, Any] = field(default_factory=dict)
+    # --- P0-07 ---
+    # Уровень готовности, УЖЕ разрешённый для этого упражнения
+    # (readiness.verdict.level_for_exercise). Ядро движка не знает ни про
+    # JOINT_IMPACT, ни про мышцы: сюда приходит готовый скаляр.
+    readiness_level: str = "ok"
+    readiness_source: Optional[str] = None  # pain | soreness | global
+    # Самая свежая сессия с упражнением была без залогированных подходов.
+    # Отдельно от last_outcome: _latest_outcome намеренно пролистывает
+    # пропуски в поисках последней результативной сессии, и менять его
+    # семантику ради одного правила нельзя.
+    last_session_skipped: bool = False
