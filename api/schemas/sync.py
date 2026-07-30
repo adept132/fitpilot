@@ -7,6 +7,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from api.schemas.readiness import CheckinRequest
 from api.schemas.workouts import (
     WorkoutSessionDetailResponse,
     WorkoutSource,
@@ -152,6 +153,24 @@ class SyncConflictResponse(BaseModel):
     workout: WorkoutSessionDetailResponse
 
 
+class SyncObservationsRequest(BaseModel):
+    """Пачка наблюдений из офлайн-очереди.
+
+    Отдельно от /sync/workouts намеренно: наблюдения append-only и
+    дедуплицируются по client_uuid, они не участвуют ни в версионировании,
+    ни в 409/merge (спека P0-07 §12.1).
+    """
+
+    observations: list[CheckinRequest] = []
+
+
+class SyncObservationsResponse(BaseModel):
+    """Итог приёма пачки: сколько записано, сколько уже было (повтор очереди)."""
+
+    accepted: int = 0
+    duplicates: int = 0
+
+
 class SyncTombstoneItem(BaseModel):
     """Удалённая на другом устройстве сущность."""
     client_uuid: str
@@ -170,6 +189,9 @@ class SyncChangesResponse(BaseModel):
     # Едет на устройство целиком, чтобы упражнение, добавленное офлайн,
     # получило рекомендацию без обращения к сети.
     prescriptions: dict[str, dict] = {}
+    # P0-07: вес прошлой сессии по упражнениям. Устройству он нужен, чтобы
+    # применить субъективный потолок офлайн — без якоря ограничивать нечего.
+    last_top_weights: dict[str, float] = {}
     # Курсор для следующего запроса. Всегда серверное время — локальные часы
     # устройства не участвуют, иначе расхождение часов теряет изменения.
     server_time: datetime

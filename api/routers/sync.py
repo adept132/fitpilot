@@ -12,6 +12,8 @@ from api.deps import get_db
 from api.schemas.sync import (
     SyncChangesResponse,
     SyncConflictResponse,
+    SyncObservationsRequest,
+    SyncObservationsResponse,
     SyncTombstoneItem,
     SyncWorkoutResponse,
     SyncWorkoutSnapshot,
@@ -28,6 +30,8 @@ from api.services.models import (
     WorkoutSessionExercise,
     WorkoutSessionSet,
 )
+from api.services.readiness import repository as readiness_repo
+from api.services.readiness.types import CheckinSignals
 
 router = APIRouter(tags=["sync"])
 
@@ -340,6 +344,41 @@ async def _apply_snapshot(
     )
 
 
+@router.post("/sync/observations", response_model=SyncObservationsResponse)
+async def sync_observations(
+    payload: SyncObservationsRequest,
+    current_user: AppUser = Depends(get_current_app_user),
+    db: AsyncSession = Depends(get_db),
+) -> SyncObservationsResponse:
+    """Принять пачку офлайн-наблюдений чек-ина. Идемпотентно по client_uuid.
+
+    Отдельная ручка от /sync/workouts намеренно (спека P0-07 §12.1):
+    наблюдения append-only и не участвуют ни в версионировании, ни в
+    409/merge — тащить их в отточенную конфликтную логику P0-03 значило
+    бы рисковать работающим кодом ради экономии одной ручки.
+    """
+    accepted = duplicates = 0
+    for item in payload.observations:
+        rows = await readiness_repo.save_signals(
+            db,
+            current_user.id,
+            CheckinSignals(
+                sleep=item.sleep,
+                stress=item.stress,
+                soreness=item.soreness,
+                pain=item.pain,
+            ),
+            item.source,
+            item.client_uuid,
+        )
+        if rows:
+            accepted += 1
+        else:
+            duplicates += 1
+    await db.commit()
+    return SyncObservationsResponse(accepted=accepted, duplicates=duplicates)
+
+
 @router.get("/sync/changes", response_model=SyncChangesResponse)
 async def sync_changes(
     since: datetime | None = Query(
@@ -448,6 +487,13 @@ async def sync_changes(
     prescriptions = {
         str(row.exercise_id): row.next_prescription for row in state_rows
     }
+    # P0-07 §9.2: якорь для офлайн-потолка. Едет рядом с предписанием и
+    # из той же выборки — лишнего запроса не появляется.
+    last_top_weights = {
+        str(row.exercise_id): float(row.last_top_weight)
+        for row in state_rows
+        if row.last_top_weight is not None
+    }
 
     return SyncChangesResponse(
         workouts=rows,
@@ -463,6 +509,7 @@ async def sync_changes(
             for t in tombs
         ],
         prescriptions=prescriptions,
+        last_top_weights=last_top_weights,
         server_time=cursor,
         has_more=has_more,
     )
