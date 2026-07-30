@@ -1,0 +1,11 @@
+{
+  "name": "плохой сон и высокий стресс дают глобальный limit",
+  "signals": {"sleep": 1, "stress": 5},
+  "expect_verdict": {"level": "limit", "reason_code": "readiness_limit", "completeness": "full"},
+  "targets": [
+    {"target": {"exercise_id": 1, "main_muscle": "quads", "secondary_muscles": ["glutes"], "action": "squat"},
+     "expect": {"level": "limit", "source": "global"}},
+    {"target": {"exercise_id": 2, "main_muscle": "chest", "secondary_muscles": ["triceps"], "action": "push"},
+     "expect": {"level": "limit", "source": "global"}}
+  ]
+}

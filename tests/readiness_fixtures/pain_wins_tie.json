@@ -1,0 +1,9 @@
+{
+  "name": "при равных уровнях источником становится боль, а не крепатура",
+  "signals": {"sleep": 5, "stress": 1, "soreness": {"quads": 3}, "pain": {"knee": 2}},
+  "expect_verdict": {"level": "ok", "reason_code": "readiness_ok", "completeness": "full"},
+  "targets": [
+    {"target": {"exercise_id": 1, "main_muscle": "quads", "secondary_muscles": [], "action": "squat"},
+     "expect": {"level": "limit", "source": "pain"}}
+  ]
+}

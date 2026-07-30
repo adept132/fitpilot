@@ -1,0 +1,9 @@
+{
+  "name": "неизвестный паттерн снимает требование по движению — решаем по мышце",
+  "signals": {"sleep": 5, "stress": 1, "pain": {"knee": 1}},
+  "expect_verdict": {"level": "ok", "reason_code": "readiness_ok", "completeness": "full"},
+  "targets": [
+    {"target": {"exercise_id": 1, "main_muscle": "quads", "secondary_muscles": [], "action": "unknown"},
+     "expect": {"level": "limit", "source": "pain"}}
+  ]
+}

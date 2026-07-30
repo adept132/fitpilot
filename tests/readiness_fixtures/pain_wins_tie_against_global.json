@@ -1,0 +1,9 @@
+{
+  "name": "плохой сон и высокий стресс дают глобальный limit, но при равенстве с болью источником становится боль",
+  "signals": {"sleep": 1, "stress": 5, "pain": {"knee": 2}},
+  "expect_verdict": {"level": "limit", "reason_code": "readiness_limit", "completeness": "full"},
+  "targets": [
+    {"target": {"exercise_id": 1, "main_muscle": "quads", "secondary_muscles": [], "action": "squat"},
+     "expect": {"level": "limit", "source": "pain"}}
+  ]
+}

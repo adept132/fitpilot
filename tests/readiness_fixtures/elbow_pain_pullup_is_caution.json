@@ -1,0 +1,13 @@
+{
+  "name": "боль в локте: сгибания limit, подтягивания caution, присед не тронут",
+  "signals": {"sleep": 5, "stress": 1, "pain": {"elbow": 2}},
+  "expect_verdict": {"level": "ok", "reason_code": "readiness_ok", "completeness": "full"},
+  "targets": [
+    {"target": {"exercise_id": 1, "main_muscle": "biceps", "secondary_muscles": [], "action": "flexion"},
+     "expect": {"level": "limit", "source": "pain"}},
+    {"target": {"exercise_id": 2, "main_muscle": "lats", "secondary_muscles": ["biceps", "mid_back"], "action": "pull"},
+     "expect": {"level": "caution", "source": "pain"}},
+    {"target": {"exercise_id": 3, "main_muscle": "quads", "secondary_muscles": ["glutes"], "action": "squat"},
+     "expect": {"level": "ok", "source": null}}
+  ]
+}
