@@ -27,6 +27,24 @@ def presc(n=4, amrap_last=False) -> Prescription:
     )
 
 
+def presc_kinds(kinds: list[str]) -> Prescription:
+    """Вспомогательная функция для создания предписания с явным списком видов подходов.
+
+    Позволяет тестировать AMRAP в произвольных позициях, не только в конце.
+    Например: presc_kinds(["normal", "amrap", "normal", "normal"])
+    """
+    sets = []
+    for i, kind in enumerate(kinds, start=1):
+        rep_max = None if kind == "amrap" else 12
+        sets.append(SetPrescription(i, 40.0, 8, rep_max, 2, kind))
+    return Prescription(
+        scheme="double",
+        sets=tuple(sets),
+        reason_code="progressed",
+        reason_text="x",
+    )
+
+
 def ctx(**kw) -> SchemeContext:
     base = dict(
         history=ExerciseHistory(exercise_id=1),
@@ -189,3 +207,77 @@ def test_property_floor_is_respected(level, n):
         p, ctx(readiness_level=level, readiness_source="pain")
     )
     assert len(result.sets) >= params.VOLUME_MIN_SETS or result is p
+
+
+def test_amrap_in_middle_position_is_protected():
+    # Срезка в позиции limit хочет снять 2 подхода. AMRAP в позиции 2.
+    # Неправильная реализация, защищающая только sets[-1], удалила бы
+    # AMRAP в середине вместе с нормальными подходами в конце.
+    # Эта проверка ловит баг: [N, A, N, N] должен остаться [N, A].
+    p = presc_kinds(["normal", "amrap", "normal", "normal"])
+    result = apply_volume_trim(
+        p, ctx(readiness_level="limit", readiness_source="pain")
+    )
+    amrap_before = sum(1 for s in p.sets if s.kind == "amrap")
+    amrap_after = sum(1 for s in result.sets if s.kind == "amrap")
+    assert amrap_before == amrap_after == 1
+    assert [s.set_number for s in result.sets] == [1, 2]
+    assert result.sets[1].kind == "amrap"
+
+
+def test_amrap_in_middle_of_longer_prescription():
+    # AMRAP в позиции 3 из 5. Limit срезает 2 подхода.
+    # Без правильной логики (foreach set kind != "amrap"), реализация,
+    # ориентированная на sets[-1], либо не срезала бы ничего (если бы
+    # проверяла последний), либо срезала бы неправильно.
+    # Должны остаться [N, N, A] в позициях 1, 2, 3.
+    p = presc_kinds(["normal", "normal", "amrap", "normal", "normal"])
+    result = apply_volume_trim(
+        p, ctx(readiness_level="limit", readiness_source="pain")
+    )
+    amrap_before = sum(1 for s in p.sets if s.kind == "amrap")
+    amrap_after = sum(1 for s in result.sets if s.kind == "amrap")
+    assert amrap_before == amrap_after == 1
+    assert len(result.sets) == 3
+    assert [s.set_number for s in result.sets] == [1, 2, 3]
+    assert result.sets[2].kind == "amrap"
+
+
+def test_two_non_adjacent_amraps_are_both_protected():
+    # AMRAP в позициях 2 и 4. Limit срезает 2 подхода (оба нормальные).
+    # Реализация с защитой только sets[-1] удалила бы первый AMRAP,
+    # оставив только последний. Мы проверяем, что оба сохранены.
+    # Алгоритм срезает N с конца: позицию 3, потом позицию 1.
+    # После срезки остаются [A, A] в исходных позициях 2 и 4, переномерованные как [1, 2].
+    p = presc_kinds(["normal", "amrap", "normal", "amrap"])
+    result = apply_volume_trim(
+        p, ctx(readiness_level="limit", readiness_source="pain")
+    )
+    amrap_before = sum(1 for s in p.sets if s.kind == "amrap")
+    amrap_after = sum(1 for s in result.sets if s.kind == "amrap")
+    assert amrap_before == amrap_after == 2
+    amrap_positions = [i for i, s in enumerate(result.sets) if s.kind == "amrap"]
+    assert len(amrap_positions) == 2
+    assert [s.set_number for s in result.sets] == [1, 2]
+    assert result.volume_delta == -2
+
+
+def test_amrap_heavy_prescription():
+    # AMRAP в позициях 2, 3, 4 (три AMRAP на четырёхсетовом предписании).
+    # Limit хочет срезать 2 подхода, но removable == 1 (только один N).
+    # Алгоритм сможет срезать только 1 подход.
+    # Результат должен сохранить все три AMRAP.
+    # Защита sets[-1] не поймёт, что нужно сохранить ВСЕ AMRAP — срезала бы,
+    # если бы в конце был нормальный подход.
+    p = presc_kinds(["normal", "amrap", "amrap", "amrap"])
+    result = apply_volume_trim(
+        p, ctx(readiness_level="limit", readiness_source="pain")
+    )
+    amrap_before = sum(1 for s in p.sets if s.kind == "amrap")
+    amrap_after = sum(1 for s in result.sets if s.kind == "amrap")
+    assert amrap_before == amrap_after == 3
+    # Срезано только 1 (единственный removable), а не 2 (как хотел limit).
+    assert len(result.sets) == 3
+    assert all(s.kind == "amrap" for s in result.sets)
+    assert [s.set_number for s in result.sets] == [1, 2, 3]
+    assert result.volume_delta == -1
