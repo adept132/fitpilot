@@ -191,3 +191,54 @@ def apply_reduction(prescription: Prescription, ctx: SchemeContext) -> Prescript
 
     # 10. Ничего не мешает — предписание схемы как есть.
     return prescription
+
+
+# Источник уровня -> причина. Уровень limit наступает по трём разным
+# поводам, и пользователю важно знать, по какому именно.
+_CAP_REASON_BY_SOURCE: dict[str, str] = {
+    "pain": "pain_hold",
+    "soreness": "soreness_limit",
+    "global": "readiness_limit",
+}
+
+
+def apply_readiness_cap(
+    prescription: Prescription, ctx: SchemeContext
+) -> Prescription:
+    """Субъективный потолок поверх результата таблицы (спека P0-07 §7.2).
+
+    ПОТОЛОК, А НЕ СТРОКА ТАБЛИЦЫ. Если поставить боль первой строкой, где
+    первое совпадение выигрывает, она вытеснит plateau_reset и удержит вес
+    на last_top_weight — то есть ВЫШЕ, чем назначило объективное правило.
+    Сигнал безопасности повышал бы нагрузку. min() устраняет это по
+    построению.
+
+    caution вес не трогает вовсе, только объём: заморозить прогрессию
+    из-за одной плохой ночи несоразмерно — человек со скверным сном не
+    прогрессировал бы никогда.
+    """
+    if not prescription.sets:
+        return prescription
+    if ctx.readiness_source is None or ctx.readiness_level != "limit":
+        return prescription
+
+    anchor = ctx.state.last_top_weight
+    if anchor is None:
+        # Переякорить не на что — выдумывать вес нельзя. Объём при этом
+        # всё равно урежется, и причина объёма пользователя предупредит.
+        return prescription
+
+    current = prescription.top_weight
+    if current is None:
+        # Упражнение со своим весом: ограничивать нечего.
+        return prescription
+
+    capped = _on_grid(ctx, anchor)
+    if capped is None or current <= capped:
+        # Объективный слой уже увёл вес не выше потолка — тот не связал,
+        # и объективная причина остаётся на месте.
+        return prescription
+
+    return _with_weight(
+        prescription, capped, _CAP_REASON_BY_SOURCE[ctx.readiness_source]
+    )
