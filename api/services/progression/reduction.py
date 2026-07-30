@@ -164,5 +164,30 @@ def apply_reduction(prescription: Prescription, ctx: SchemeContext) -> Prescript
     if ctx.state.stalled and anchor is not None:
         return _with_weight(prescription, _reduced(ctx, anchor), "plateau_reset")
 
-    # 7. Ничего не мешает — предписание схемы как есть.
+    # --- P0-07: новые ОБЪЕКТИВНЫЕ строки. Все три удерживающие и стоят
+    # после снижающих 2, 4, 6 — снижение сильнее удержания (спека §7.1).
+
+    # 7. Цель взята ценой отказа: рост останавливаем, но не откатываем.
+    #    Сознательный подход до отказа — не провал, наказывать за него
+    #    снижением было бы багом.
+    if outcome is not None and outcome.status == "strained" and anchor is not None:
+        return _with_weight(prescription, _on_grid(ctx, anchor), "strained_hold")
+
+    # 8. Упражнение было в сессии, но подходов не залогировано.
+    #    Отдельный флаг, а не outcome.status: _latest_outcome намеренно
+    #    пролистывает пропуски в поисках последней результативной сессии,
+    #    и менять его семантику ради одного правила нельзя.
+    if ctx.last_session_skipped and anchor is not None:
+        return _with_weight(prescription, _on_grid(ctx, anchor), "exercise_skipped")
+
+    # 9. Средний перерыв. Строка 2 уже забрала всё, что длиннее LAYOFF_DAYS,
+    #    поэтому сюда попадает только (LAYOFF_SOFT_DAYS, LAYOFF_DAYS].
+    if (
+        ctx.days_since_last_session is not None
+        and ctx.days_since_last_session > params.LAYOFF_SOFT_DAYS
+        and anchor is not None
+    ):
+        return _with_weight(prescription, _on_grid(ctx, anchor), "layoff_soft")
+
+    # 10. Ничего не мешает — предписание схемы как есть.
     return prescription
