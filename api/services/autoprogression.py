@@ -145,6 +145,23 @@ async def compute_autoprogression(
     from api.services.progression import repository
     from api.services.progression.engine import plan_exercise
     from api.services.progression.resolve import override_for
+    from api.services.progression.types import Prescription
+
+    # P0-07: если предписание уже сохранено — отдаём ЕГО, а не пересчёт.
+    #
+    # Вердикт чек-ина готовности приходит движку ТОЛЬКО в момент создания
+    # сессии. Пересчёт здесь его не видит и вернул бы вес без субъективного
+    # потолка и причину без учёта чек-ина: пользователь читал бы в карточке
+    # одно число, а целью, записанной в БД и оцениваемой потом evaluate(),
+    # было бы другое. Это же и есть смысл write-once — показанное обязано
+    # совпадать с сохранённым.
+    #
+    # Исключение — пикеры свободной тренировки (target_reps): там
+    # пользователь спрашивает «а если», и пересчёт как раз осмыслен.
+    if session_exercise.prescription and target_reps is None:
+        stored = Prescription.from_dict(session_exercise.prescription)
+        if stored.sets:
+            return _response_from(stored)
 
     ctx = await repository.build_context(
         session,
@@ -172,6 +189,15 @@ async def compute_autoprogression(
         provisional=provisional,
     )
 
+    return _response_from(prescription)
+
+
+def _response_from(prescription) -> dict:
+    """Проекция предписания в форму AutoprogressionResponse.
+
+    Одна функция на оба пути — сохранённое предписание и свежий пересчёт,
+    — чтобы форма ответа не разъехалась между ними.
+    """
     first = prescription.sets[0] if prescription.sets else None
     return {
         "has_basis": bool(prescription.sets),
