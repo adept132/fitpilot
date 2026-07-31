@@ -374,7 +374,25 @@ async def sync_observations(
         if rows:
             accepted += 1
         else:
-            duplicates += 1
+            # save_signals() отдаёт [] в двух разных ситуациях, и это не одно
+            # и то же: (1) client_uuid уже встречался — настоящий повтор из
+            # офлайн-очереди, честный дубль; (2) в самом item нет ни одного
+            # ответа (sleep/stress/soreness/pain всё пусто) — по докстрингу
+            # CheckinRequest пропущенный вопрос это не ошибка, а валидная
+            # первая отправка, которой просто нечего было писать в БД.
+            # Различить их можно без похода в БД — по содержимому payload:
+            # если item пуст, значит нулевой rows объясняется этим, а не
+            # тем, что client_uuid уже был.
+            item_is_empty = (
+                item.sleep is None
+                and item.stress is None
+                and not item.soreness
+                and not item.pain
+            )
+            if item_is_empty:
+                accepted += 1
+            else:
+                duplicates += 1
     await db.commit()
     return SyncObservationsResponse(accepted=accepted, duplicates=duplicates)
 
