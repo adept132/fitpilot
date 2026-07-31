@@ -37,6 +37,25 @@ async def test_persist_writes_prescription_and_projection(db_session, session_ex
 
 
 @pytest.mark.asyncio
+async def test_projection_carries_the_trimmed_set_count(db_session, session_exercise):
+    """P0-07: подрезка объёма должна быть ВИДНА пользователю.
+
+    apply_volume_trim убирает подходы из Prescription.sets, но интерфейс
+    показывает плоское target_sets. Без этой проекции причина «сократили
+    число подходов» появлялась, а сама цифра не менялась.
+    """
+    session_exercise.target_sets = 4
+    await db_session.flush()
+
+    # Предписание на два подхода — как после трима с уровнем limit.
+    repository.persist_prescription(session_exercise, sample_prescription())
+    await db_session.flush()
+
+    assert len(session_exercise.prescription["sets"]) == 2
+    assert session_exercise.target_sets == 2
+
+
+@pytest.mark.asyncio
 async def test_persist_is_write_once(db_session, session_exercise):
     repository.persist_prescription(session_exercise, sample_prescription(42.5))
     await db_session.flush()

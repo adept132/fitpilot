@@ -353,6 +353,16 @@ def persist_prescription(
     session_exercise.recommended_rep_max = first.rep_max
     session_exercise.recommended_rir = first.rir
 
+    # P0-07: число подходов — тоже проекция предписания, а не независимое
+    # поле. apply_volume_trim режет Prescription.sets, а интерфейс показывает
+    # плоское target_sets — без этой строки причина «сократили число
+    # подходов» появлялась, а сама цифра не менялась.
+    #
+    # Накопления трима между тренировками не будет: строка
+    # WorkoutSessionExercise создаётся заново на каждую сессию и target_sets
+    # каждый раз заново приходит из плана.
+    session_exercise.target_sets = len(prescription.sets)
+
 
 async def _get_or_create_state(
     session: AsyncSession, app_user_id: int, exercise_id: int
