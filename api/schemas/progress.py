@@ -34,6 +34,31 @@ class FatigueArchitectureResponse(BaseModel):
     history: List[FatigueWeekData]
 
 
+class ForecastPoint(BaseModel):
+    date: str          # прогнозная дата
+    weeks: float       # недель от последней тренировки
+    value: float       # прогноз e1RM (кг), точечный
+    low: float         # нижняя граница диапазона
+    high: float        # верхняя граница
+
+
+class ExerciseForecastResponse(BaseModel):
+    exercise_id: int
+    name: str
+    has_data: bool
+    current_e1rm: Optional[float] = None       # кг (канон)
+    last_date: Optional[str] = None
+    # Темп роста e1RM, кг/неделю. basis: regression | factor | single | insufficient
+    slope_per_week: Optional[float] = None
+    trend_basis: str = "insufficient"
+    n_points: int = 0
+    # «Биологический потолок» темпа из коэффициента автопрогрессии — для оценки
+    # реалистичности «что-если» на клиенте.
+    ceiling_slope_per_week: Optional[float] = None
+    sessions_per_week: Optional[float] = None
+    projections: List[ForecastPoint] = []
+
+
 class ReadinessBand(BaseModel):
     # Абсолютных процентов усталости здесь нет: только z-оценка к собственной
     # истории (может отсутствовать при cold-start) и качественная полоса.

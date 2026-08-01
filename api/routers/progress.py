@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.deps import get_db
 from api.schemas.exercises import ExerciseFullHistoryResponse
 from api.schemas.progress import (
+    ExerciseForecastResponse,
     FatigueWeekData,
     FatigueArchitectureResponse,
     ReadinessResponse,
@@ -20,6 +21,7 @@ from api.schemas.progress import (
 from api.services.app_user_service import get_current_app_user
 from api.services.exercise_search_service import ExerciseSearchService
 from api.services.fatigue.service import compute_readiness
+from api.services.forecast_service import build_strength_forecast
 from api.services.models import Exercise, WorkoutSessionSet, WorkoutSessionExercise, AppUserProfile, WorkoutSession
 from api.services.statistics_service import get_weekly_performed_sets
 
@@ -75,6 +77,31 @@ async def get_exercise_history(
         raise HTTPException(status_code=404, detail="Упражнение не найдено или по нему нет записей")
 
     return history_data
+
+
+@router.get("/progress/exercise-forecast/{exercise_id}", response_model=ExerciseForecastResponse)
+async def get_exercise_forecast(
+        exercise_id: int,
+        session: AsyncSession = Depends(get_db),
+        current_user=Depends(get_current_app_user),
+):
+    """Прогноз e1RM по упражнению: текущий уровень, темп роста, потолок и точки
+    прогнозной линии. Интерактивный «что-если» клиент считает локально."""
+    profile = (await session.execute(
+        select(AppUserProfile).where(AppUserProfile.app_user_id == current_user.id)
+    )).scalar_one_or_none()
+
+    forecast = await build_strength_forecast(
+        session=session,
+        user_id=current_user.id,
+        exercise_id=exercise_id,
+        experience_level=profile.experience_level if profile else None,
+        settings=profile.settings if profile else None,
+    )
+    if forecast is None:
+        raise HTTPException(status_code=404, detail="Упражнение не найдено")
+
+    return ExerciseForecastResponse(**forecast)
 
 
 @router.get("/progress/fatigue/{muscle_group}", response_model=FatigueArchitectureResponse)
