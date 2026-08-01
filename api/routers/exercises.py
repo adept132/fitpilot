@@ -1,7 +1,7 @@
 from typing import Optional, List
 
 from sqlalchemy import func, select, case, desc, update
-from fastapi import APIRouter, Depends, Query, HTTPException, status
+from fastapi import APIRouter, Depends, Query, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -13,7 +13,7 @@ from api.services.exercise_utils import get_base_exercise_query
 from api.services.fatigue_tiers import calculate_fatigue_tier
 from api.services.heuristics import HeuristicsEngine
 from app.database import get_session
-from api.services.models import Exercise, WorkoutSession, WorkoutSessionExercise, WorkoutSessionSet, AppUser
+from api.services.models import Exercise, WorkoutSession, WorkoutSessionExercise, WorkoutSessionSet, AppUser, WorkoutPlanExercise, UserExerciseNote
 from api.schemas.exercises import (
     ExerciseListItemResponse,
     ExerciseDetailResponse,
@@ -22,13 +22,27 @@ from api.schemas.exercises import (
     ExerciseHistoryWorkoutSetResponse,
     ExerciseLastPerformanceResponse, ExerciseSearchItem, MuscleGroupItem, LastWorkoutResponse,
     ExerciseAlternativeResponse, ReplaceExerciseRequest, CustomExerciseCreate,
+    ExerciseNoteRequest, ExerciseNoteResponse,
+    ExerciseClassifyRequest, ExerciseClassifyResponse,
 )
 
 router = APIRouter(tags=["exercises"])
 
 
+def _thumb_url(request: Request, image_urls, image_approx) -> tuple[Optional[str], bool]:
+    """Первое фото техники -> абсолютный URL миниатюры + флаг «примерная».
+    Работает и для ORM-объекта, и для dict (ветка поиска через ExerciseMatcher)."""
+    urls = image_urls or []
+    approx = bool(image_approx)
+    if not urls:
+        return None, approx
+    base = str(request.base_url).rstrip("/")
+    return f"{base}/media/{str(urls[0]).lstrip('/')}", approx
+
+
 @router.get("/exercises", response_model=list[ExerciseListItemResponse])
 async def list_exercises(
+        request: Request,
         q: str | None = Query(default=None),
         type: str | None = Query(default=None),
         equipment: str | None = Query(default=None),
@@ -54,6 +68,9 @@ async def list_exercises(
 
     for item in items:
         if isinstance(item, dict):
+            image_url, image_approx = _thumb_url(
+                request, item.get("image_urls"), item.get("image_approx")
+            )
             response_items.append(
                 ExerciseListItemResponse(
                     id=item.get("id"),
@@ -66,9 +83,14 @@ async def list_exercises(
                     fatigue_tier=item.get("fatigue_tier") or 2,
                     # 2. ВОЗВРАЩАЕМ source ИЗ СЛОВАРЯ
                     source=item.get("source") or "default",
+                    image_url=image_url,
+                    image_approx=image_approx,
                 )
             )
         else:
+            image_url, image_approx = _thumb_url(
+                request, item.image_urls, item.image_approx
+            )
             response_items.append(
                 ExerciseListItemResponse(
                     id=item.id,
@@ -81,6 +103,8 @@ async def list_exercises(
                     fatigue_tier=item.fatigue_tier,
                     # 2. ВОЗВРАЩАЕМ source ИЗ ОБЪЕКТА БД
                     source=item.source,
+                    image_url=image_url,
+                    image_approx=image_approx,
                 )
             )
 
@@ -89,6 +113,7 @@ async def list_exercises(
 @router.get("/exercises/{exercise_id}", response_model=ExerciseDetailResponse)
 async def get_exercise_detail(
     exercise_id: int,
+    request: Request,
     session: AsyncSession = Depends(get_db),
     app_user: AppUser = Depends(get_current_app_user),
 ):
@@ -99,6 +124,23 @@ async def get_exercise_detail(
 
     if exercise is None:
         raise HTTPException(status_code=404, detail="Exercise not found")
+
+    # Личная заметка текущего пользователя к этому упражнению
+    note_row = await session.execute(
+        select(UserExerciseNote.note).where(
+            UserExerciseNote.app_user_id == app_user.id,
+            UserExerciseNote.exercise_id == exercise_id,
+        )
+    )
+    note = note_row.scalar_one_or_none()
+
+    # Относительные пути из БД -> абсолютные URL на нашу статику (/media/...).
+    # base_url уже включает схему и хост, поэтому host в БД не хардкодим.
+    base = str(request.base_url).rstrip("/")
+    image_urls = [
+        f"{base}/media/{path.lstrip('/')}"
+        for path in (exercise.image_urls or [])
+    ]
 
     return ExerciseDetailResponse(
         id=exercise.id,
@@ -111,7 +153,48 @@ async def get_exercise_detail(
         description=exercise.description,
         source=exercise.source,
         video_url=exercise.video_url,
+        image_urls=image_urls,
+        image_approx=bool(exercise.image_approx),
+        note=note,
     )
+
+
+@router.put("/exercises/{exercise_id}/note", response_model=ExerciseNoteResponse)
+async def update_exercise_note(
+    exercise_id: int,
+    payload: ExerciseNoteRequest,
+    session: AsyncSession = Depends(get_db),
+    app_user: AppUser = Depends(get_current_app_user),
+):
+    # Проверяем, что упражнение доступно пользователю
+    exists = await session.execute(
+        get_base_exercise_query(app_user.id).where(Exercise.id == exercise_id)
+    )
+    if exists.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Exercise not found")
+
+    note_text = payload.note.strip()
+
+    existing = await session.execute(
+        select(UserExerciseNote).where(
+            UserExerciseNote.app_user_id == app_user.id,
+            UserExerciseNote.exercise_id == exercise_id,
+        )
+    )
+    row = existing.scalar_one_or_none()
+
+    if row is None:
+        row = UserExerciseNote(
+            app_user_id=app_user.id,
+            exercise_id=exercise_id,
+            note=note_text,
+        )
+        session.add(row)
+    else:
+        row.note = note_text
+
+    await session.commit()
+    return ExerciseNoteResponse(note=note_text)
 
 @router.get(
     "/exercises/{exercise_id}/history",
@@ -299,6 +382,7 @@ async def get_exercise_last_performance(
                 effort_level=s.effort_level,
                 notes=s.notes,
                 is_completed=s.is_completed,
+                parent_set_id=s.parent_set_id
             )
             for s in completed_sets
         ],
@@ -306,6 +390,7 @@ async def get_exercise_last_performance(
 
 @router.get("/search", response_model=list[ExerciseSearchItem])
 async def search_exercises(
+    request: Request,
     q: Optional[str] = None,
     muscle_group: Optional[str] = None,
     type: Optional[str] = None,
@@ -314,7 +399,7 @@ async def search_exercises(
     session: AsyncSession = Depends(get_session),
     user: AppUser = Depends(get_current_app_user),
 ):
-    return await ExerciseSearchService.search_exercises(
+    results = await ExerciseSearchService.search_exercises(
         session=session,
         user_id=user.id,
         q=q,
@@ -323,6 +408,42 @@ async def search_exercises(
         equipment=equipment,
         recent=recent,
     )
+
+    # Сервис отдаёт либо ORM-объекты (без q), либо dict (ветка ExerciseMatcher).
+    # Приводим к единой схеме и подставляем абсолютный URL миниатюры.
+    items: list[ExerciseSearchItem] = []
+    for it in results:
+        if isinstance(it, dict):
+            image_url, image_approx = _thumb_url(
+                request, it.get("image_urls"), it.get("image_approx")
+            )
+            items.append(ExerciseSearchItem(
+                id=it.get("id"),
+                name=it.get("name"),
+                main_muscle_group=it.get("main_muscle_group") or "unknown",
+                secondary_muscle_groups=it.get("secondary_muscle_groups") or [],
+                category=it.get("category") or "base",
+                equipment_needed=it.get("equipment_needed"),
+                source=it.get("source") or "default",
+                image_url=image_url,
+                image_approx=image_approx,
+            ))
+        else:
+            image_url, image_approx = _thumb_url(
+                request, it.image_urls, it.image_approx
+            )
+            items.append(ExerciseSearchItem(
+                id=it.id,
+                name=it.name,
+                main_muscle_group=it.main_muscle_group,
+                secondary_muscle_groups=it.secondary_muscle_groups or [],
+                category=it.category,
+                equipment_needed=it.equipment_needed,
+                source=it.source,
+                image_url=image_url,
+                image_approx=image_approx,
+            ))
+    return items
 
 
 # --- GROUPS ---
@@ -408,15 +529,32 @@ async def get_exercise_alternatives(
     result = await db.execute(query)
     rows = result.all()
 
-    # 4. Формируем ответ, склеивая объект Exercise и вычисленный score
+    # 4. Формируем ответ, склеивая объект Exercise и вычисленный score.
+    #    Причины совпадения выводим из полей (мышца — жёсткий фильтр, поэтому
+    #    в match_reasons не дублируется; её фронт берёт из main_muscle_group).
+    #    unknown исключаем: два неклассифицированных упражнения не образуют
+    #    осмысленного совпадения, хотя в score их равенство и даёт баллы.
+    target_equipment = set(target_ex.equipment_needed or [])
+
     alternatives = []
     for ex_obj, score in rows:
+        # Enum'ы наследуют str, поэтому сравнение со строкой "unknown" работает
+        # и для enum-инстанса, и для сырой строки — не зависим от десериализации.
+        reasons = []
+        if ex_obj.action == target_ex.action and ex_obj.action != "unknown":
+            reasons.append("pattern")
+        if ex_obj.vector == target_ex.vector and ex_obj.vector != "unknown":
+            reasons.append("direction")
+        if target_equipment and target_equipment & set(ex_obj.equipment_needed or []):
+            reasons.append("equipment")
+
         alt_data = ExerciseAlternativeResponse(
             id=ex_obj.id,
             name=ex_obj.name,
             main_muscle_group=ex_obj.main_muscle_group,
             equipment_needed=ex_obj.equipment_needed,
-            match_score=score
+            match_score=score,
+            match_reasons=reasons,
         )
         alternatives.append(alt_data)
 
@@ -450,7 +588,7 @@ async def replace_session_exercise(
     if not new_ex:
         raise HTTPException(status_code=404, detail="Новое упражнение не найдено в БД")
 
-    # === НОВЫЙ БЛОК: Защита от дубликатов ===
+    # === Защита от дубликатов ===
     duplicate_check = await db.execute(
         select(WorkoutSessionExercise).where(
             WorkoutSessionExercise.workout_session_id == session_id,
@@ -463,69 +601,131 @@ async def replace_session_exercise(
             detail="Это упражнение уже добавлено в текущую тренировку"
         )
 
-    # 3. Анализируем подходы (Сортируем для порядка)
+    # Запоминаем исходное упражнение ДО подмены — понадобится для замены в плане.
+    old_exercise_id = target_session_ex.exercise_id
     all_sets = sorted(target_session_ex.sets, key=lambda s: s.set_number)
-    completed_sets = [s for s in all_sets if s.is_completed]
-    uncompleted_sets = [s for s in all_sets if not s.is_completed]
-
-    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
-    # Блокируем замену ТОЛЬКО если подходы ЕСТЬ, и при этом они все выполнены.
-    # Если подходов 0, all_sets = пустой список (False), и мы спокойно идем дальше.
-    if all_sets and not uncompleted_sets:
-        raise HTTPException(status_code=400, detail="Все подходы выполнены, заменять нечего")
 
     # ==========================================
-    # СЦЕНАРИЙ 1: 0 выполненных подходов
+    # ЛОГИКА ЗАМЕНЫ В СЕССИИ
     # ==========================================
-    if not completed_sets:
-        # Оптимизация: вместо физического удаления строки и создания новой,
-        # мы просто подменяем ID упражнения. order_index и superset_group остаются нетронутыми!
+    if not all_sets:
+        # Нет подходов -> свап на месте. order_index и superset_group не трогаем.
+        #
+        # P0-06 C1, осознанно отложено: движок здесь НЕ пересчитывается.
+        # target_session_ex.exercise_id меняется на другое упражнение, но
+        # write-once в persist_prescription не даёт переписать уже
+        # сохранённое prescription — если оно было посчитано для старого
+        # упражнения (add_exercise_to_workout вызывает движок сразу при
+        # добавлении), после свапа оно останется привязанным к строке, но
+        # будет описывать УЖЕ НЕ ТО упражнение. Корректная починка требует
+        # решения, как именно инвалидировать/пересчитать prescription при
+        # замене (сбросить и пересчитать заново, что противоречит духу
+        # write-once, или завести отдельное поле версии упражнения в
+        # предписании) — отдельная задача, не C1/C2/C3 этого захода.
         target_session_ex.exercise_id = payload.new_exercise_id
-
-        # Сбрасываем вес/повторы в невыполненных сетах (новое упражнение = другие веса)
-        for s in uncompleted_sets:
-            s.weight = None
-            s.reps = None
-
-        await db.commit()
-        return {"status": "replaced", "mode": "full_replace"}
-
-    # ==========================================
-    # СЦЕНАРИЙ 2: Разрезание упражнения
-    # ==========================================
+        session_mode = "full_replace"
+        session_status = "replaced"
     else:
-        # 1. Сдвигаем order_index у всех последующих упражнений на +1, чтобы освободить слот
-        shift_query = (
+        # Есть подходы -> старое упражнение остаётся с его подходами как реальная
+        # проделанная работа, новое упражнение добавляем сразу следом с пустыми подходами.
+        #
+        # Освобождаем слот target.order_index + 1 сдвигом последующих упражнений на +1.
+        # Прямой "order_index + 1" одним UPDATE нарушает уникальный индекс
+        # (workout_session_id, order_index) — строка 2->3 пишется, пока 3 ещё занята.
+        # Поэтому сдвигаем через временное большое смещение: каждый UPDATE оставляет
+        # БД в бесконфликтном состоянии.
+        target_order = target_session_ex.order_index
+        OFFSET = 1_000_000
+
+        # 1. Уводим последующие в высокий диапазон (коллизий с 1..N нет).
+        await db.execute(
             update(WorkoutSessionExercise)
             .where(
                 WorkoutSessionExercise.workout_session_id == session_id,
-                WorkoutSessionExercise.order_index > target_session_ex.order_index
+                WorkoutSessionExercise.order_index > target_order,
             )
-            .values(order_index=WorkoutSessionExercise.order_index + 1)
+            .values(order_index=WorkoutSessionExercise.order_index + OFFSET)
         )
-        await db.execute(shift_query)
 
-        # 2. Создаем новое упражнение прямо под старым
+        # 2. Вставляем новое упражнение в освободившийся слот сразу после старого.
+        #
+        # P0-06 C1, осознанно отложено: движок здесь НЕ вызывается, у
+        # new_session_ex prescription остаётся пустым. Отличие от свободного
+        # добавления (add_exercise_to_workout, workouts.py) в том, что это
+        # "замена в середине тренировки" — нет загруженного профиля
+        # (experience_level/settings) и нет резолва фазы мезоцикла в этом
+        # месте кода, оба надо тащить сюда так же, как в C1 для start_workout.
+        # Решение: отложить, а не тихо оставить как есть — пользователь,
+        # которому заменили упражнение НЕ в конце тренировки (веток
+        # "keep_and_add"), увидит его без цели до следующего раза, когда его
+        # добавят явно через add_exercise_to_workout или до финиша сессии
+        # (finish_workout считает next_prescription, но не prescription
+        # текущей сессии). Зафиксировано как известный разрыв для отдельной
+        # задачи, а не тихий пропуск.
         new_session_ex = WorkoutSessionExercise(
-            session_id=session_id,
+            workout_session_id=session_id,
             exercise_id=payload.new_exercise_id,
-            order_index=target_session_ex.order_index + 1,
+            order_index=target_order + 1,
             superset_group=target_session_ex.superset_group,  # Копируем ID суперсета!
-            notes=None
+            target_sets=target_session_ex.target_sets,
+            notes=None,
         )
         db.add(new_session_ex)
-        await db.flush()  # Получаем ID нового session_exercise
+        await db.flush()
 
-        # 3. Переносим невыполненные сеты в новое упражнение
-        # Важно: пересчитываем set_number с 1
-        for idx, s in enumerate(uncompleted_sets, start=1):
-            s.session_exercise_id = new_session_ex.id
-            s.set_number = idx
-            s.weight = None  # Очищаем историю веса старого упражнения
-            s.reps = None
+        # 3. Возвращаем последующие обратно, теперь они встают за новым (target+2, ...).
+        await db.execute(
+            update(WorkoutSessionExercise)
+            .where(
+                WorkoutSessionExercise.workout_session_id == session_id,
+                WorkoutSessionExercise.order_index > OFFSET,
+            )
+            .values(order_index=WorkoutSessionExercise.order_index - (OFFSET - 1))
+        )
 
-        await db.commit()
-        return {"status": "split", "mode": "partial_transfer"}
+        session_mode = "keep_and_add"
+        session_status = "added"
+
+    # ==========================================
+    # ЗАМЕНА В ПЛАНЕ (опционально)
+    # ==========================================
+    plan_updated = False
+    if payload.update_plan:
+        workout = await db.get(WorkoutSession, session_id)
+        if workout and workout.plan_id:
+            plan_ex_result = await db.execute(
+                select(WorkoutPlanExercise)
+                .where(WorkoutPlanExercise.plan_id == workout.plan_id)
+                .order_by(WorkoutPlanExercise.order_index)
+            )
+            plan_exercises = list(plan_ex_result.scalars().all())
+
+            # Не дублируем: пропускаем, если новое упражнение уже есть в плане.
+            already_in_plan = any(
+                pe.exercise_id == payload.new_exercise_id for pe in plan_exercises
+            )
+            old_plan_ex = next(
+                (pe for pe in plan_exercises if pe.exercise_id == old_exercise_id),
+                None,
+            )
+            if old_plan_ex and not already_in_plan:
+                old_plan_ex.exercise_id = payload.new_exercise_id
+                plan_updated = True
+
+    await db.commit()
+    return {"status": session_status, "mode": session_mode, "plan_updated": plan_updated}
+
+
+@router.post("/exercises/classify", response_model=ExerciseClassifyResponse)
+async def classify_exercise(
+    payload: ExerciseClassifyRequest,
+    app_user: AppUser = Depends(get_current_app_user),
+):
+    """Авто-заполнение: по названию предлагает мышцы/вторичные/оборудование.
+    kNN по мультиязычным эмбеддингам с фолбэком на разбор названия."""
+    from api.services.exercise_classifier import classify
+
+    return ExerciseClassifyResponse(**classify(payload.name))
 
 
 @router.post("/exercises", response_model=ExerciseSearchItem, status_code=status.HTTP_201_CREATED)
@@ -534,6 +734,18 @@ async def create_custom_exercise(
         db: AsyncSession = Depends(get_db),
         current_app_user=Depends(get_current_app_user)
 ):
+    # 0. Идемпотентность offline-повтора: если упражнение с этим client_uuid уже
+    # создано — возвращаем его, а не 409/дубль.
+    if getattr(payload, "client_uuid", None):
+        existing = (await db.execute(
+            select(Exercise).where(
+                Exercise.app_user_id == current_app_user.id,
+                Exercise.client_uuid == payload.client_uuid,
+            )
+        )).scalar_one_or_none()
+        if existing:
+            return existing
+
     # 1. Защита от дубликатов
     duplicate_stmt = select(Exercise).where(
         func.lower(Exercise.name) == payload.name.lower(),
@@ -580,6 +792,7 @@ async def create_custom_exercise(
     new_exercise = Exercise(
         name=payload.name,
         source="custom",
+        client_uuid=getattr(payload, "client_uuid", None),
         app_user_id=current_app_user.id,
         category=category_calc,
         main_muscle_group=payload.main_muscle_group,

@@ -88,7 +88,9 @@ class ExerciseMatcher:
                 'main_muscle_group': exercise.main_muscle_group,
                 'secondary_muscle_groups': exercise.secondary_muscle_groups,
                 'equipment_needed': exercise.equipment_needed,
-                'difficulty': exercise.difficulty
+                'difficulty': exercise.difficulty,
+                'image_urls': exercise.image_urls,
+                'image_approx': exercise.image_approx,
             })
 
         return matches
@@ -126,7 +128,9 @@ class ExerciseMatcher:
                     'main_muscle_group': exercise.main_muscle_group,
                     'secondary_muscle_groups': exercise.secondary_muscle_groups,
                     'equipment_needed': exercise.equipment_needed,
-                    'difficulty': exercise.difficulty
+                    'difficulty': exercise.difficulty,
+                    'image_urls': exercise.image_urls,
+                    'image_approx': exercise.image_approx,
                 })
 
         return matches

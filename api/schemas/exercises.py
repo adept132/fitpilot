@@ -14,6 +14,8 @@ class ExerciseListItemResponse(BaseModel):
     equipment_needed: list[str]
     fatigue_tier: int
     source: str
+    image_url: str | None = None  # Миниатюра техники (первое фото), абсолютный URL
+    image_approx: bool = False  # True — фото родственника (техника примерная)
 
 
 class ExerciseDetailResponse(BaseModel):
@@ -27,6 +29,17 @@ class ExerciseDetailResponse(BaseModel):
     description: str | None = None
     source: str | None = None
     video_url: str | None = None
+    image_urls: list[str] = []  # Абсолютные URL картинок техники (start/end)
+    image_approx: bool = False  # True — картинка родственника (техника примерная)
+    note: str | None = None  # Личная заметка текущего пользователя
+
+
+class ExerciseNoteRequest(BaseModel):
+    note: str
+
+
+class ExerciseNoteResponse(BaseModel):
+    note: str
 
 
 class ExerciseHistoryItemResponse(BaseModel):
@@ -46,6 +59,7 @@ class ExerciseHistoryWorkoutSetResponse(BaseModel):
     reps: int | None = None
     notes: str | None = None
     is_completed: bool
+    parent_set_id: int | None = None
 
 
 class ExerciseHistoryWorkoutDetailResponse(BaseModel):
@@ -84,6 +98,8 @@ class ExerciseSearchItem(BaseModel):
     category: str
     equipment_needed: Optional[List[str]] = None
     source: str
+    image_url: str | None = None  # Миниатюра техники (первое фото), абсолютный URL
+    image_approx: bool = False  # True — фото родственника (техника примерная)
 
 
 class MuscleGroupItem(BaseModel):
@@ -107,12 +123,20 @@ class ExerciseAlternativeResponse(BaseModel):
     main_muscle_group: str
     equipment_needed: List[str]
     match_score: int  # <-- Сюда бэкенд положит баллы совпадения
+    # Причины совпадения для UI: почему это хорошая замена. Ключи из фикс.
+    # набора: "pattern" (тот же паттерн), "direction" (то же направление),
+    # "equipment" (пересекается оборудование). Мышца всегда совпадает (жёсткий
+    # фильтр) — её фронт показывает из main_muscle_group.
+    match_reasons: List[str] = []
 
     class Config:
         from_attributes = True
 
 class ReplaceExerciseRequest(BaseModel):
     new_exercise_id: int
+    # Если тренировка привязана к плану и update_plan=True,
+    # заменяем упражнение не только в сессии, но и в самом плане (WorkoutPlanExercise).
+    update_plan: bool = False
 
 class HistorySetResponse(BaseModel):
     weight: float
@@ -140,3 +164,18 @@ class CustomExerciseCreate(BaseModel):
     secondary_muscle_groups: Optional[List[str]] = []
     equipment_needed: Optional[List[str]] = []
     description: Optional[str] = None
+    # Идемпотентный ключ offline-создания (дедуп повтора).
+    client_uuid: Optional[str] = None
+
+
+class ExerciseClassifyRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=200)
+
+
+class ExerciseClassifyResponse(BaseModel):
+    # Предложение для авто-заполнения (поля редактируемые на клиенте).
+    main_muscle_group: str | None = None
+    secondary_muscle_groups: List[str] = []
+    equipment_needed: List[str] = []
+    confidence: float = 0.0  # 0..1 — насколько уверенно (низкое => «проверьте»)
+    source: str = "knn"  # knn | fallback | empty

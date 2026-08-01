@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from api.services import equipment
 from api.services.exercise_utils import get_base_exercise_query
 from api.services.models import Exercise, WorkoutSession, WorkoutSessionExercise
 from api.services.exercise_matcher import ExerciseMatcher
@@ -29,56 +30,13 @@ def normalize_exercise_type(value: Optional[str]) -> Optional[str]:
     return mapping.get(value, value)
 
 def normalize_equipment_values(equipment_needed) -> set[str]:
-    if equipment_needed is None:
-        return set()
-
-    if isinstance(equipment_needed, str):
-        raw_values = [equipment_needed]
-    else:
-        raw_values = list(equipment_needed)
-
-    normalized = set()
-
-    for item in raw_values:
-        if not item:
-            continue
-
-        value = str(item).strip().lower().replace("ё", "е")
-
-        if value:
-            normalized.add(value)
-
-    return normalized
+    # Канонические EN-значения (RU-синонимы/старые значения тоже принимаются).
+    return set(equipment.normalize_equipment_list(equipment_needed))
 
 
 def classify_equipment(equipment_needed) -> str:
-    normalized = normalize_equipment_values(equipment_needed)
-
-    if not normalized:
-        return "unknown"
-
-    machine_values = {
-        "тренажер",
-        "тренажеры",
-        "машина смита",
-        "смит",
-    }
-
-    free_values = {
-        "штанга",
-        "гантели",
-        "гантель",
-        "перекладина",
-        "скамья",
-    }
-
-    if normalized.intersection(machine_values):
-        return "machine"
-
-    if normalized.intersection(free_values):
-        return "free"
-
-    return "unknown"
+    # "machine" | "free" | "unknown" — по каноническому оборудованию.
+    return equipment.classify_bucket(equipment_needed)
 
 
 def matches_equipment_filter(equipment_needed, equipment_filter: str | None) -> bool:
