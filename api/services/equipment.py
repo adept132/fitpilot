@@ -99,6 +99,93 @@ def normalize_equipment(value: Optional[str]) -> Optional[str]:
     return None
 
 
+# --- Разбор свободного текста (названия упражнения) -------------------------
+#
+# normalize_equipment выше работает с ГОТОВЫМИ значениями: они приходят из БД
+# или из формы и совпадают со словарём точно. Название упражнения — другой
+# случай: там живые словоформы ("на турникЕ", "с гантелЯМИ", "со штангОЙ"), и
+# точное сравнение их не ловит. Перечислять падежи руками уже пробовали —
+# словарь неизбежно оказывается дырявым. Поэтому здесь сопоставление идёт по
+# ОСНОВЕ слова: "турник" покрывает турник/турника/турнике/турником.
+
+# Пары соседних слов разбираются раньше одиночных основ: "машина Смита" — это
+# смит-машина, а не generic "машина".
+_TEXT_PHRASES = [
+    (("свободн", "вес"), FREE_MACHINE),
+    (("машин", "смит"), SMITH),
+    (("вес", "тел"), BODYWEIGHT),
+    (("собственн", "вес"), BODYWEIGHT),
+]
+
+_TEXT_STEMS = [
+    ("штанг", BARBELL),
+    ("ez", BARBELL),
+    ("гантел", DUMBBELL),
+    ("гир", KETTLEBELL),
+    ("турник", PULLUP_BAR),
+    ("перекладин", PULLUP_BAR),
+    ("брус", DIP_BARS),
+    ("скам", BENCH),
+    ("смит", SMITH),
+    ("тренажер", BLOCK_MACHINE),
+    ("кроссовер", BLOCK_MACHINE),
+    ("машин", BLOCK_MACHINE),
+    ("блок", BLOCK_MACHINE),
+    ("трос", BLOCK_MACHINE),
+    ("резинк", BAND),
+    ("эспандер", BAND),
+    ("лент", BAND),
+]
+
+
+def tokenize(text: Optional[str]) -> List[str]:
+    """Название -> слова в нижнем регистре, ё приведена к е."""
+    if not text:
+        return []
+    normalized = str(text).lower().replace("ё", "е")
+    word: List[str] = []
+    words: List[str] = []
+    for ch in normalized:
+        if ch.isalnum():
+            word.append(ch)
+        elif word:
+            words.append("".join(word))
+            word = []
+    if word:
+        words.append("".join(word))
+    return words
+
+
+def equipment_from_text(text: Optional[str]) -> List[str]:
+    """Оборудование, упомянутое в названии упражнения (по основам слов)."""
+    tokens = tokenize(text)
+    consumed = set()
+    found: List[str] = []
+
+    def add(canon: str) -> None:
+        if canon not in found:
+            found.append(canon)
+
+    for i in range(len(tokens) - 1):
+        if i in consumed or i + 1 in consumed:
+            continue
+        for (first, second), canon in _TEXT_PHRASES:
+            if tokens[i].startswith(first) and tokens[i + 1].startswith(second):
+                add(canon)
+                consumed.update((i, i + 1))
+                break
+
+    for i, token in enumerate(tokens):
+        if i in consumed:
+            continue
+        for stem, canon in _TEXT_STEMS:
+            if token.startswith(stem):
+                add(canon)
+                break
+
+    return found
+
+
 def normalize_equipment_list(items) -> List[str]:
     if items is None:
         return []

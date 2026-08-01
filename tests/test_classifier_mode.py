@@ -78,31 +78,9 @@ def test_classify_falls_back_without_model(monkeypatch):
     assert result["confidence"] == 0.0
 
 
-@pytest.mark.parametrize(
-    "name, muscle, equipment",
-    [
-        # Работает: ключевое слово попадает в _FALLBACK_MUSCLE как подстрока.
-        ("жим лёжа", "Грудь", []),
-        ("сгибания на бицепс с гантелями", "Бицепс", []),
-        ("тяга верхнего блока", "Широчайшие", []),
-        # Известные пробелы фолбэка — зафиксированы намеренно, чтобы регресс
-        # был виден, а улучшение словаря сразу уронило тест и потребовало
-        # осознанного обновления ожиданий.
-        ("жим штанги лёжа", None, ["barbell"]),  # 'жим лежа' не подстрока
-        ("французский жим", None, []),
-        ("гиперэкстензия", None, []),
-        ("подтягивания на турнике", "Широчайшие", []),  # 'турник' не опознан
-    ],
-)
-def test_fallback_quality_is_documented(monkeypatch, name, muscle, equipment):
-    monkeypatch.delenv("CLASSIFIER_MODE", raising=False)
-    monkeypatch.setattr(clf, "_embedder", clf._Embedder())
-
-    result = clf.classify(name)
-
-    assert result["source"] == "fallback"
-    assert result["main_muscle_group"] == muscle
-    assert result["equipment_needed"] == equipment
+# Качество самого лексического разбора покрыто в test_fallback_lexicon.py —
+# здесь проверяется только то, что при выключенном режиме мы попадаем именно
+# в эту ветку.
 
 
 def test_classify_empty_name_is_not_a_fallback(monkeypatch):
