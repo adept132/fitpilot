@@ -354,7 +354,7 @@ BACKEND: C:\Users\Admin\PycharmProjects\FitPilotBot\api
 │   └──   - async def get_current_firebase_claims()
 ├── main.py
 │   ├── FUNCTIONS
-│   └──   - async def health()
+│   └──   - async def health_check()
 ├── migration.py
 │   ├── FUNCTIONS
 │   └──   - async def run_auto_tagger()
