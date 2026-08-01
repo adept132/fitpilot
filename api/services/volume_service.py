@@ -2,6 +2,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from api.services.models import AppUserProfile, SplitBlueprint, UserSplit, SplitDaySlot, DayBlueprint
+from api.services.muscle_keys import to_system_key
 
 class VolumeService:
     @staticmethod
@@ -50,7 +51,10 @@ class VolumeService:
             is_target_day = (day.name.lower() == day_tag.lower() or template_val.lower() == day_tag.lower())
 
             for target in day.muscle_targets:
-                muscle = target.muscle_group_id.lower()
+                # muscle_group_id comes in mixed encodings (EN system key, Russian
+                # display name, or UPPERCASE UI code). Normalize to the EN system
+                # key so the weekly_targets lookup below actually matches.
+                muscle = to_system_key(target.muscle_group_id) or target.muscle_group_id.lower()
                 muscle_frequencies[muscle] = muscle_frequencies.get(muscle, 0) + 1
                 if is_target_day:
                     muscles_in_day.add(muscle)

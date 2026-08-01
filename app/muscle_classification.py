@@ -34,6 +34,7 @@ class MuscleGroups:
 
     # Пресс
     ABS = "Пресс"
+    OBLIQUES = "Косые мышцы"
 
     # Функциональные группы
     PUSH_MUSCLES = [CHEST, ANTERIOR_DELT, LATERAL_DELT, TRICEPS]
