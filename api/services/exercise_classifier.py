@@ -80,8 +80,21 @@ class _Embedder:
                 self._ready = False
                 return
 
+            # Арена аллокатора onnxruntime на первом инференсе занимала ~380 МБ
+            # под сиквенс длиной до max_position_embeddings, хотя название
+            # упражнения — это десяток токенов. С выключенной ареной инференс
+            # стоит +2 МБ. Один поток: запрос короткий, параллелить нечего, а
+            # каждый поток держит свой пул.
+            options = ort.SessionOptions()
+            options.enable_cpu_mem_arena = False
+            options.enable_mem_pattern = False
+            options.intra_op_num_threads = 1
+            options.inter_op_num_threads = 1
+
             self._session = ort.InferenceSession(
-                str(model_path), providers=["CPUExecutionProvider"]
+                str(model_path),
+                sess_options=options,
+                providers=["CPUExecutionProvider"],
             )
             self._input_names = {i.name for i in self._session.get_inputs()}
             self._tokenizer = Tokenizer.from_file(str(tok_path))

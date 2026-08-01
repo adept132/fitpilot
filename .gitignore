@@ -32,10 +32,11 @@ credentials.json
 scripts/.cache/
 
 # === ML-артефакты классификатора упражнений ===
-# model_quantized.onnx и индекс лежат в Git LFS (см. .gitattributes).
-# Полновесная model.onnx (470 МБ) рантаймом НЕ используется — exercise_classifier
-# грузит только квантованную версию.
-api/data/embedder/model.onnx
+# В репозитории лежит ОБРЕЗАННЫЙ под наш домен эмбеддер (api/data/embedder,
+# ~66 МБ) — он помещается в обычные git-блобы, LFS для него не нужен.
+# Исходная необрезанная модель (578 МБ) нужна только чтобы повторить обрезку
+# скриптом scripts/prune_embedder_vocab.py и в историю не едет.
+api/data/embedder_full/
 
 # Сгенерированные ingest_exercise_images.py страницы ручного ревью картинок.
 scripts/review.html
