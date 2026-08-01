@@ -84,11 +84,13 @@ async def add_new_exercise_to_superset(
         exercise_id=payload.exercise_id,
     )
 
+    # Прокидываем target_sets в сервис
     item = await WorkoutSupersetService.add_new_exercise_to_superset(
         session=session,
         app_user_id=app_user.id,
         superset_group=superset_group,
         exercise_id=payload.exercise_id,
+        target_sets=payload.target_sets, # <--- ДОБАВЛЯЕМ ПЕРЕДАЧУ ПАРАМЕТРА
     )
     return {"session_exercise_id": item.id}
 

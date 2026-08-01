@@ -58,6 +58,7 @@ class CreateSupersetRequest(BaseModel):
 
 class AddExerciseToSupersetRequest(BaseModel):
     session_exercise_id: int
+    target_sets: int | None = None
 
 
 class AddNewExerciseToSupersetRequest(BaseModel):
@@ -80,6 +81,7 @@ class SupersetFlowExerciseItem(BaseModel):
     recommended_rir: Optional[int] = None
     recommended_rep_min: Optional[int] = None
     recommended_rep_max: Optional[int] = None
+    target_sets:Optional[int] = None
 
 
 class SupersetFlowResponse(BaseModel):

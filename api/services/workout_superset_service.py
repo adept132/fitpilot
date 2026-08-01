@@ -379,6 +379,7 @@ class WorkoutSupersetService:
             app_user_id: int,
             superset_group: str,
             exercise_id: int,
+            target_sets: int | None = None,
     ):
         member_result = await session.execute(
             select(WorkoutSessionExercise)
@@ -420,6 +421,7 @@ class WorkoutSupersetService:
             exercise_id=exercise_id,
             order_index=next_order_index,
             superset_group=superset_group,
+            target_sets=target_sets,
             notes=None,
         )
 
@@ -533,6 +535,7 @@ class WorkoutSupersetService:
                     "recommended_rir": exercise.recommended_rir,
                     "recommended_rep_min": exercise.recommended_rep_min,
                     "recommended_rep_max": exercise.recommended_rep_max,
+                    "target_sets": exercise.target_sets
                 }
             )
 
