@@ -57,3 +57,50 @@ class UpdatePlanContextPayload(BaseModel):
 class WorkoutCenterPlanRead(BaseModel):
     id: int
     name: str
+
+
+class GenerateConfig(BaseModel):
+    use_supersets: bool = False
+    duration_minutes: Optional[int] = None
+    accent_muscle: Optional[str] = None
+    seed: Optional[int] = None
+
+
+class GeneratePlanRequest(BaseModel):
+    blueprint_id: Optional[UUID] = None
+    # When set, generate only the split day whose DayBlueprint.name matches
+    # (single-day generation for the "choose plan" flow). None = whole week.
+    day_name: Optional[str] = None
+    config: GenerateConfig = Field(default_factory=GenerateConfig)
+
+
+class GeneratedExerciseOut(BaseModel):
+    exercise_id: int
+    name: str
+    target_sets: int
+    order_index: int
+    superset_group_id: Optional[str] = None
+    fatigue_tier: int
+    primary_muscle: str
+    secondary_muscle: Optional[str] = None
+
+
+class GeneratedDayOut(BaseModel):
+    day_tag: str
+    day_name: str
+    exercises: List[GeneratedExerciseOut]
+    coverage: Dict[str, Dict[str, int]]
+    warnings: List[str] = Field(default_factory=list)
+
+
+class GeneratePlanResponse(BaseModel):
+    days: List[GeneratedDayOut]
+
+
+class ConfirmPlanRequest(BaseModel):
+    days: List[GeneratedDayOut]
+
+
+class ConfirmPlanResponse(BaseModel):
+    status: str
+    created_plan_ids: List[int]

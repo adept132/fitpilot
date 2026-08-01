@@ -1,3 +1,5 @@
+from typing import Optional as _Optional
+from datetime import date as _date
 from fastapi import APIRouter, Depends, status, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session, selectinload
@@ -6,13 +8,122 @@ from api.deps import get_db
 from api.schemas.plan import WorkoutPlanCreate, PlanApplyRequest
 from api.services.app_user_service import get_current_app_user
 from api.services.models import Mesocycle, MesocyclePhase, WorkoutPlan, AppUserProfile, WorkoutPlanExercise, \
-    WorkoutSession, WorkoutSessionExercise, WorkoutSessionSet, Exercise
+    WorkoutSession, WorkoutSessionExercise, WorkoutSessionSet
 from api.services.validator import AntiSuicideValidator, PlanExerciseInput
+from api.services.scheduling_engine import SchedulingEngine
+from api.services.models import UserSplit, SplitBlueprint, SplitDaySlot, DayBlueprint, Exercise
+from api.services.volume_service import VolumeService
+from api.services.plan_generator_service import build_day
+from api.services.muscle_keys import key_for_muscle
+from api.services.exercise_selection_engine import SelectionConfig, SelectionPolicy
 from api.services.progression import repository as progression_repo
 from api.services.progression.engine import plan_exercise
 from api.services.progression.resolve import override_for
+from api.schemas.plan import (
+    GeneratePlanRequest, GeneratePlanResponse, GeneratedDayOut, GeneratedExerciseOut,
+    ConfirmPlanRequest, ConfirmPlanResponse,
+)
+from api.schemas.commands import (ApplyCommandsRequest, ApplyCommandsResponse, CommandOut, ClarifyOut)
+from api.services.commands.schema import Command, CommandType
+from api.services.commands.parser import parse as parse_comment
+from api.services.commands.executor import apply as apply_commands_exec
 
 router = APIRouter(prefix="/plans", tags=["Plans"])
+
+LOCATION_EQUIPMENT = {
+    "gym": None,
+    "free_weights": {"barbell", "dumbbell", "kettlebell", "bench", "pullup_bar", "dip_bars", "bodyweight"},
+    "home": {"dumbbell", "kettlebell", "band", "bodyweight", "pullup_bar"},
+}
+
+
+def _allowed_equipment(locations) -> _Optional[set]:
+    locs = locations or ["gym"]
+    if any(l == "gym" for l in locs):
+        return None
+    allowed: set = set()
+    for l in locs:
+        s = LOCATION_EQUIPMENT.get(l)
+        if s is None:
+            return None
+        allowed |= s
+    return allowed or None
+
+
+async def _load_generation_context(db, current_user, blueprint_id):
+    prof_res = await db.execute(select(AppUserProfile).where(
+        AppUserProfile.app_user_id == current_user.id))
+    profile = prof_res.scalar_one_or_none()
+    if not profile or not profile.volume_budget:
+        raise HTTPException(400, "Онбординг не завершён: нет объёмного бюджета")
+
+    if blueprint_id is None:
+        us_res = await db.execute(select(UserSplit).where(
+            UserSplit.app_user_id == current_user.id, UserSplit.is_active == True))  # noqa: E712
+        active = us_res.scalar_one_or_none()
+        if not active:
+            raise HTTPException(400, "Нет активного сплита и не передан blueprint_id")
+        blueprint_id = active.blueprint_id
+
+    bp_res = await db.execute(
+        select(SplitBlueprint).where(SplitBlueprint.id == blueprint_id).options(
+            selectinload(SplitBlueprint.slots).selectinload(SplitDaySlot.day)
+            .selectinload(DayBlueprint.muscle_targets)))
+    blueprint = bp_res.scalar_one_or_none()
+    if not blueprint or not blueprint.slots:
+        raise HTTPException(404, "Сплит пуст или не найден")
+
+    pool_res = await db.execute(select(Exercise).where(
+        (Exercise.source == "default") | (Exercise.app_user_id == current_user.id)))
+    pool = list(pool_res.scalars().all())
+    return profile, blueprint, pool
+
+
+@router.post("/generate", response_model=GeneratePlanResponse)
+async def generate_plan(request: GeneratePlanRequest,
+                        db: AsyncSession = Depends(get_db),
+                        current_user=Depends(get_current_app_user)):
+    profile, blueprint, pool = await _load_generation_context(
+        db, current_user, request.blueprint_id)
+
+    allowed = _allowed_equipment((profile.settings or {}).get("locations"))
+    prehab = (profile.settings or {}).get("prehab_flags", [])
+    cfg = SelectionConfig(use_supersets=request.config.use_supersets,
+                          accent_muscle=request.config.accent_muscle,
+                          seed=request.config.seed)
+
+    seen: set = set()
+    days_out: list[GeneratedDayOut] = []
+    for slot in sorted(blueprint.slots, key=lambda s: s.day_order):
+        day_bp = slot.day
+        # Single-day mode: skip every day except the requested one.
+        if request.day_name and day_bp.name != request.day_name:
+            continue
+        tmpl = day_bp.template_type.value if hasattr(day_bp.template_type, "value") else str(day_bp.template_type)
+        is_rest = tmpl in ("active_rest", "rest") or not day_bp.muscle_targets
+        # Dedup and tag by the day's NAME, not the template value: the scheduler
+        # (SchedulingEngine._score_and_find_best_plan) matches plan.day_tag against
+        # the calendar day's name (day_bp.name). Multi-word names like
+        # "Arms & Shoulders" would never match the template value "arms_shoulders".
+        if is_rest or day_bp.name in seen:
+            continue
+        seen.add(day_bp.name)
+
+        targets_raw = await VolumeService.calculate_session_targets(db, current_user.id, day_bp.name)
+        targets = {k: v["target_sets"] for k, v in targets_raw.items()}
+        if not targets:
+            continue
+        gen = build_day(day_bp.name, day_bp.name, targets, pool, allowed, prehab,
+                        profile.experience_level, cfg, SelectionPolicy())
+        days_out.append(GeneratedDayOut(
+            day_tag=gen.day_tag, day_name=gen.day_name, coverage=gen.coverage,
+            warnings=gen.warnings,
+            exercises=[GeneratedExerciseOut(
+                exercise_id=e.exercise_id, name=e.name, target_sets=e.sets,
+                order_index=e.order_index, superset_group_id=e.superset_group_id,
+                fatigue_tier=e.fatigue_tier, primary_muscle=e.primary_muscle,
+                secondary_muscle=e.secondary_muscle) for e in gen.exercises]))
+    return GeneratePlanResponse(days=days_out)
 
 @router.get("/")
 def get_plans(db: Session = Depends(get_db), current_user=Depends(get_current_app_user)):
@@ -146,6 +257,80 @@ def delete_plan(plan_id: int, db: Session = Depends(get_db), current_user=Depend
     return {"status": "success", "message": "План удален"}
 
 
+async def _load_commands_context(db, current_user, blueprint_id):
+    prof_res = await db.execute(select(AppUserProfile).where(AppUserProfile.app_user_id == current_user.id))
+    profile = prof_res.scalar_one_or_none()
+    pool_res = await db.execute(select(Exercise).where(
+        (Exercise.source == "default") | (Exercise.app_user_id == current_user.id)))
+    return profile, list(pool_res.scalars().all())
+
+
+@router.post("/commands/apply", response_model=ApplyCommandsResponse)
+async def apply_commands(request: ApplyCommandsRequest, db: AsyncSession = Depends(get_db),
+                         current_user=Depends(get_current_app_user)):
+    profile, pool = await _load_commands_context(db, current_user, request.context.get("blueprint_id"))
+    exp = profile.experience_level if profile else "beginner"
+
+    log = [Command.from_dict(c.model_dump()) for c in request.command_log]
+    draft_ex = [e.model_dump() for e in request.base_draft.exercises]
+
+    clarify = None
+    parsed = []
+    if request.new_comment:
+        new_cmds = parse_comment(request.new_comment, draft_ex, rng_seed=len(log))
+        clar = next((c for c in new_cmds if c.type == CommandType.CLARIFY), None)
+        if clar:
+            clarify = ClarifyOut(**clar.params)
+        else:
+            log = log + new_cmds
+            parsed = new_cmds
+
+    settings = (profile.settings if profile else {}) or {}
+    allowed = _allowed_equipment(settings.get("locations")) if profile else None
+    ctx = {"allowed_equipment": allowed, "prehab_flags": settings.get("prehab_flags", [])}
+    final_ex, _summaries, warns = apply_commands_exec(draft_ex, log, pool, ctx, exp)
+
+    # Fix 3: recompute coverage["filled"] from the post-command exercise list
+    # instead of echoing request.base_draft.coverage unchanged — otherwise the
+    # mobile "цели X/Y" goal indicator goes stale as soon as commands add/remove
+    # exercises. Semantics mirror plan_generator_service.build_day: filled =
+    # sum of target_sets for exercises whose primary_muscle maps (via
+    # key_for_muscle) to that EN system key. Each base-coverage key keeps its
+    # original (fixed) target; keys that only appear post-edit (e.g. via
+    # ADD_MUSCLE) are added with target=0 so newly-covered muscles show up too.
+    base_coverage = request.base_draft.coverage or {}
+    filled_by_key: dict = {}
+    for e in final_ex:
+        k = key_for_muscle(e.get("primary_muscle"))
+        if k:
+            filled_by_key[k] = filled_by_key.get(k, 0) + (e.get("target_sets") or 0)
+    coverage = {key: {"target": val.get("target", 0), "filled": filled_by_key.get(key, 0)}
+                for key, val in base_coverage.items()}
+    for key, filled in filled_by_key.items():
+        if key not in coverage:
+            coverage[key] = {"target": 0, "filled": filled}
+
+    # NOTE: pydantic v2's `model_copy(update=...)` does NOT validate/coerce the
+    # updated fields, and BaseModel construction skips re-validating a field
+    # whose value is *already* an instance of the target model class (default
+    # `revalidate_instances='never'`). Both combined mean a plain
+    # `request.base_draft.model_copy(update={"exercises": final_ex, ...})`
+    # followed by `ApplyCommandsResponse(final_draft=final_draft, ...)` would
+    # silently leave `final_draft.exercises` as raw dicts (verified: attribute
+    # access like `e.exercise_id` then raises AttributeError). Rebuilding via
+    # the normal GeneratedDayOut(...) constructor forces full validation, so
+    # `final_ex` (plain dicts from the executor) is coerced into
+    # GeneratedExerciseOut instances.
+    final_draft = GeneratedDayOut(
+        day_tag=request.base_draft.day_tag, day_name=request.base_draft.day_name,
+        coverage=coverage, exercises=final_ex, warnings=warns)
+    reply = clarify.question if clarify else ("Готово: " + "; ".join(c.summary for c in parsed) if parsed else "Ок.")
+    return ApplyCommandsResponse(
+        final_draft=final_draft,
+        parsed_commands=[CommandOut(**c.to_dict()) for c in (log if not clarify else [])],
+        reply=reply, clarify=clarify)
+
+
 @router.post("/{plan_id}/apply")
 async def apply_plan_to_calendar(
         plan_id: int,
@@ -262,3 +447,40 @@ async def apply_plan_to_calendar(
         "message": "План успешно применен",
         "session_id": new_session.id
     }
+
+
+@router.post("/generate/confirm", response_model=ConfirmPlanResponse)
+async def confirm_generated_plan(request: ConfirmPlanRequest,
+                                 db: AsyncSession = Depends(get_db),
+                                 current_user=Depends(get_current_app_user)):
+    prof_res = await db.execute(select(AppUserProfile).where(
+        AppUserProfile.app_user_id == current_user.id))
+    profile = prof_res.scalar_one_or_none()
+    experience = profile.experience_level if profile else "beginner"
+
+    created: list[int] = []
+    for day in request.days:
+        AntiSuicideValidator.validate_workout_plan(
+            experience,
+            [PlanExerciseInput(exercise_id=e.exercise_id, fatigue_tier=e.fatigue_tier,
+                               primary_muscle=e.primary_muscle, secondary_muscle=e.secondary_muscle,
+                               target_sets=e.target_sets,
+                               superset_group_id=e.superset_group_id) for e in day.exercises])
+        plan = WorkoutPlan(app_user_id=current_user.id,
+                           name=f"{day.day_name} (сгенерировано)",
+                           day_tag=day.day_tag.lower(), micro_tag="adaptive", meso_tag="adaptive")
+        db.add(plan)
+        await db.flush()
+        for e in day.exercises:
+            db.add(WorkoutPlanExercise(
+                plan_id=plan.id, exercise_id=e.exercise_id, order_index=e.order_index,
+                superset_group_id=e.superset_group_id, target_sets=e.target_sets))
+        created.append(plan.id)
+    await db.commit()
+
+    us_res = await db.execute(select(UserSplit).where(
+        UserSplit.app_user_id == current_user.id, UserSplit.is_active == True))  # noqa: E712
+    if us_res.scalar_one_or_none():
+        await SchedulingEngine.rebind_plans(db, current_user.id, _date.today())
+
+    return ConfirmPlanResponse(status="success", created_plan_ids=created)
