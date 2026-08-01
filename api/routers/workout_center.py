@@ -392,6 +392,7 @@ async def start_workout(
     meso_id = None
     current_phase = None
     micro_id = None
+    current_day_index = None
 
     # 1. Если это тренировка из Календаря, берем ИДЕАЛЬНЫЕ данные от движка
     if payload.calendar_day_id:
@@ -401,6 +402,9 @@ async def start_workout(
             meso_id = cal_day.user_mesocycle_id
             current_phase = cal_day.mesocycle_phase_number
             micro_id = cal_day.user_microcycle_id
+            # Реальный день внутри микроцикла (1, 2, 3...) — питает DUP-движок,
+            # чтобы RIR/диапазон повторов считались по фактическому дню, а не по хардкоду.
+            current_day_index = cal_day.microcycle_day_number
 
             # Можно сразу перевести день календаря в статус "completed" или "in_progress"
             # cal_day.status = "in_progress"
@@ -456,7 +460,9 @@ async def start_workout(
 
     # --- РАСПАКОВКА ПЛАНА ЧЕРЕЗ DUP-ДВИЖОК (Если есть план) ---
     if payload.plan_id:
-        compiled_exercises = await calculate_exercise_recommendations(session, app_user.id, plan_id=payload.plan_id)
+        compiled_exercises = await calculate_exercise_recommendations(
+            session, app_user.id, plan_id=payload.plan_id, current_day_index=current_day_index
+        )
 
         # P0-06 C1: до этого фикса /workouts/start с plan_id создавал
         # WorkoutSessionExercise только со снимками recommended_*, ни разу не
@@ -480,7 +486,7 @@ async def start_workout(
         )
 
         # Фаза мезоцикла одна на всю сессию — резолвим один раз до цикла,
-        # а не на каждое упражнение (иначе N лишних запросов джойна поверх
+        # а не на каждое упражнение (иначе N лишних запросов join'а поверх
         # уже существующего N+1 build_context по load_history, P0-06 C2).
         phase_effort_tier = await progression_repo.resolve_phase_effort_tier(
             session, workout.app_user_mesocycle_id, workout.mesocycle_phase
@@ -508,25 +514,10 @@ async def start_workout(
                 recommended_rir=ex_data.get("recommended_rir"),
                 recommended_rep_min=ex_data.get("recommended_rep_min"),
                 recommended_rep_max=ex_data.get("recommended_rep_max"),
-                # Блокер 2 (финальное ревью P0-06): раньше target_sets плана
-                # использовался только ниже, для создания подходов, и не
-                # попадал в саму строку сессии — build_context брал дефолт
-                # (session_exercise.target_sets or 3), и предписание
-                # считалось на 3 подхода независимо от того, что говорил план.
-                # plans.py::apply_plan_to_calendar приведён к тому же поведению.
-                target_sets=ex_data.get("target_sets"),
+                target_sets=ex_data.get("target_sets")  # <--- СОХРАНЯЕМ В БД ЗДЕСЬ
             )
             session.add(new_ex)
             await session.flush()
-
-            for i in range(ex_data["target_sets"]):
-                new_set = WorkoutSessionSet(
-                    workout_session_exercise_id=new_ex.id,
-                    set_number=i + 1,
-                    set_type="normal",
-                    is_completed=False
-                )
-                session.add(new_set)
 
             new_ex.exercise = exercises_by_id.get(ex_data["exercise_id"])
 
@@ -613,7 +604,7 @@ async def finish_workout(
 
     # P0-06 C2: фаза мезоцикла одна на всю сессию (WorkoutSession.mesocycle_phase),
     # резолвим ОДИН раз до цикла — иначе на каждое упражнение сессии пришёлся бы
-    # свой запрос джойна, что усугубило бы уже существующий N+1 build_context
+    # свой запрос join'а, что усугубило бы уже существующий N+1 build_context
     # (по load_history на упражнение).
     phase_effort_tier = await progression_repo.resolve_phase_effort_tier(
         db, workout.app_user_mesocycle_id, workout.mesocycle_phase

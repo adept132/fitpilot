@@ -63,6 +63,35 @@ class SchedulingEngine:
         return best_plan_id
 
     @staticmethod
+    async def rebind_plans(session: AsyncSession, app_user_id: int, from_date: date) -> int:
+        """Re-score user plans onto future non-rest calendar days (fills plan_id)."""
+        plans_res = await session.execute(
+            select(WorkoutPlan).where(WorkoutPlan.app_user_id == app_user_id)
+        )
+        user_plans = list(plans_res.scalars().all())
+
+        days_res = await session.execute(
+            select(UserCalendarDay).where(
+                UserCalendarDay.app_user_id == app_user_id,
+                UserCalendarDay.target_date >= from_date,
+                UserCalendarDay.is_rest_day == False,  # noqa: E712
+            )
+        )
+        days = list(days_res.scalars().all())
+
+        updated = 0
+        for day in days:
+            new_id = SchedulingEngine._score_and_find_best_plan(
+                plans=user_plans, target_day_name=day.day_tag or "",
+                meso_tag=day.meso_tag or "medium", micro_tag=day.micro_tag or "adaptive",
+            )
+            if new_id is not None and new_id != day.plan_id:
+                day.plan_id = new_id
+                updated += 1
+        await session.commit()
+        return updated
+
+    @staticmethod
     async def launch_and_unroll_plan(
             session: AsyncSession,
             app_user_id: int,
