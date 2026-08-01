@@ -8,6 +8,8 @@ class OnboardingWidgetRequest(BaseModel):
     training_frequency: Optional[int] = None
     microcycle_length: Optional[int] = None
     focus_muscles: Optional[list[str]] = None
+    weight: Optional[float] = Field(default=None, gt=0, le=500)
+    height: Optional[float] = Field(default=None, gt=0, le=300)
 
     @root_validator(pre=False, skip_on_failure=True)
     def check_frequency_bounds(cls, values):
@@ -58,6 +60,10 @@ class UpdateSettingsRequest(BaseModel):
     # Конфиг калькулятора блинов (отдельно на единицу): {barWeights, selectedBar, plates}
     plate_config_kg: Optional[Dict[str, Any]] = None
     plate_config_lbs: Optional[Dict[str, Any]] = None
+    # Композиция тела: вести ли замеры-обхваты (иначе % жира только вручную).
+    body_measurements_enabled: Optional[bool] = None
+    # Локальные напоминания (дедлайны целей, обновление замеров).
+    reminders_enabled: Optional[bool] = None
     # P0-06: ручной выбор схемы прогрессии по упражнениям — settings["progression"]["overrides"].
     # Здесь просто dict: имена схем валидирует PATCH /profile/settings (нужен
     # доступ к KNOWN_SCHEMES из api/services/progression/resolve.py, а схема
