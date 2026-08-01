@@ -25,3 +25,18 @@ credentials.json
 # === Базы данных и Логи ===
 *.sqlite3
 *.log
+
+# === Кэш сборочных скриптов ===
+# scripts/.cache — скачанный free-exercise-db (~100 МБ картинок), пересобирается
+# ingest_exercise_images.py. В репозитории не нужен.
+scripts/.cache/
+
+# === ML-артефакты классификатора упражнений ===
+# model_quantized.onnx и индекс лежат в Git LFS (см. .gitattributes).
+# Полновесная model.onnx (470 МБ) рантаймом НЕ используется — exercise_classifier
+# грузит только квантованную версию.
+api/data/embedder/model.onnx
+
+# Сгенерированные ingest_exercise_images.py страницы ручного ревью картинок.
+scripts/review.html
+scripts/review-propagate.html
