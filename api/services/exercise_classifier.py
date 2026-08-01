@@ -11,6 +11,7 @@ kNN по мультиязычным эмбеддингам над размече
 from __future__ import annotations
 
 import json
+import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -24,6 +25,22 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 INDEX_VECS = DATA_DIR / "exercise_index.npy"
 INDEX_LABELS = DATA_DIR / "exercise_index.json"
 EMBEDDER_DIR = DATA_DIR / "embedder"
+
+
+def _onnx_enabled() -> bool:
+    """Включён ли тяжёлый ONNX-путь (CLASSIFIER_MODE=onnx).
+
+    Выключен по умолчанию, и это осознанный fail-safe. Модель с токенайзером на
+    250k токенов даёт пик ~900 МБ: 155 МБ сессия, 245 МБ токенайзер, ~380 МБ
+    арена аллокатора на первом инференсе. На инстансе с 512 МБ процесс убивает
+    OOM-killer, а не исключение — поэтому мягкий фолбэк ниже (except Exception)
+    в этом сценарии не срабатывает НИ РАЗУ, и каждое нажатие «Определить
+    автоматически» заново роняет сервис.
+
+    Забытая переменная окружения должна деградировать в качество, а не в
+    падение, поэтому включать режим нужно явно.
+    """
+    return (os.getenv("CLASSIFIER_MODE") or "").strip().lower() == "onnx"
 
 TOP_K = 10
 MIN_SIM = 0.30  # ниже — считаем, что близких соседей нет (низкая уверенность)
@@ -45,6 +62,12 @@ class _Embedder:
         self._input_names: set = set()
 
     def _load(self) -> None:
+        # Проверяем режим ДО импорта onnxruntime: сам импорт стоит ~16 МБ,
+        # а создание сессии — сотни.
+        if not _onnx_enabled():
+            self._ready = False
+            return
+
         try:
             import onnxruntime as ort
             from tokenizers import Tokenizer

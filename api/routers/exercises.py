@@ -2,6 +2,7 @@ from typing import Optional, List
 
 from sqlalchemy import func, select, case, desc, update
 from fastapi import APIRouter, Depends, Query, HTTPException, status, Request
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -723,9 +724,13 @@ async def classify_exercise(
 ):
     """Авто-заполнение: по названию предлагает мышцы/вторичные/оборудование.
     kNN по мультиязычным эмбеддингам с фолбэком на разбор названия."""
-    from api.services.exercise_classifier import classify
+    from api.services import exercise_classifier
 
-    return ExerciseClassifyResponse(**classify(payload.name))
+    # classify() синхронный, и первый вызов может занять секунды (ленивая
+    # загрузка модели). Прямой вызов из async-эндпоинта заморозил бы event-loop
+    # целиком — то есть один пользователь подвесил бы приложение всем.
+    result = await run_in_threadpool(exercise_classifier.classify, payload.name)
+    return ExerciseClassifyResponse(**result)
 
 
 @router.post("/exercises", response_model=ExerciseSearchItem, status_code=status.HTTP_201_CREATED)
