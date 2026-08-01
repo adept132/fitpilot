@@ -197,7 +197,7 @@ class QuickLogParser:
                 category=category,
                 main_muscle_group=muscle_group,
                 secondary_muscle_groups=[],
-                equipment_needed=['Штанга', 'Гантели'],  # Базовое оборудование
+                equipment_needed=['barbell', 'dumbbell'],  # Базовое оборудование
                 difficulty='intermediate'
             )
 

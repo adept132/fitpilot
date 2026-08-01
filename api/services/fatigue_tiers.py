@@ -1,33 +1,33 @@
 # api/services/fatigue_scorer.py
 from typing import List
 
+from api.services import equipment as equip
+
 # Кластеризация мышц (строгий маппинг кириллицы)
 LARGE_MUSCLES = {'грудь', 'широчайшие', 'квадрицепсы', 'ягодицы'}
 MEDIUM_MUSCLES = {'средняя часть спины', 'пресс', 'бицепсы ног', 'передняя дельта', 'средняя дельта', 'задняя дельта'}
 SMALL_MUSCLES = {'бицепс', 'трицепс', 'трапеция', 'предплечья', 'абдукторы', 'аддукторы', 'икры'}
 
-# Оценка оборудования
+# Оценка оборудования (ключи — канонические EN-значения)
 EQUIPMENT_SCORES = {
     # Свободные веса (Высокий стресс ЦНС, максимальная стабилизация)
-    'штанга': 3,
+    equip.BARBELL: 3,
 
     # Независимые свободные веса (Высокий стресс, но вес обычно меньше штанги)
-    'гантели': 2,
-    'гиря': 2,
+    equip.DUMBBELL: 2,
+    equip.KETTLEBELL: 2,
 
     # Работа со своим весом / Частичная опора (Средний стресс)
-    'свой вес': 1,
-    'турник': 1,
-    'перекладина': 1,  # Синоним для турника
-    'брусья': 1,
-    'скамья': 1,
+    equip.BODYWEIGHT: 1,
+    equip.PULLUP_BAR: 1,
+    equip.DIP_BARS: 1,
+    equip.BENCH: 1,
 
     # Изолированные, блочные и стабилизированные (Низкий системный стресс)
-    'тренажер': 0,
-    'кроссовер': 0,
-    'смит': 0,
-    'машина смита': 0,  # Синоним для Смита
-    'фитнес-резинка': 0
+    equip.BLOCK_MACHINE: 0,
+    equip.FREE_MACHINE: 0,
+    equip.SMITH: 0,
+    equip.BAND: 0,
 }
 
 
@@ -55,9 +55,9 @@ def get_equipment_score(equipment_list: List[str]) -> int:
 
     scores = []
     for eq in equipment_list:
-        eq_norm = eq.strip().lower()
-        # Если оборудование есть в словаре - берем его балл, иначе 1 (собственный вес)
-        scores.append(EQUIPMENT_SCORES.get(eq_norm, 1))
+        canon = equip.normalize_equipment(eq)
+        # Если оборудование известно - берем его балл, иначе 1 (собственный вес)
+        scores.append(EQUIPMENT_SCORES.get(canon, 1))
 
     return max(scores)
 
@@ -71,9 +71,12 @@ def calculate_fatigue_tier(
     """
     Детерминированная модель Fatigue Score.
     """
-    # 1. Коэффициент категории (Базовое = 5, Изолирующее = 1)
+    # 1. Коэффициент категории (Базовое = 4, Изолирующее = 1)
+    # 4 (не 5): база на крупную мышцу набирает 4+3=7 ещё до оборудования, поэтому
+    # свободные веса/своё тело остаются tier-1 (score 10+), а тренажёрные/блочные
+    # компаунды (equip=0) опускаются в tier-2 (score 7-8.5), расширяя средний тир.
     cat_norm = category.strip().lower() if category else ""
-    score_category = 5 if cat_norm == 'базовое' else 1
+    score_category = 4 if cat_norm == 'базовое' else 1
 
     # 2. Коэффициент мышечной массы
     score_primary_muscle = get_muscle_score(main_muscle, is_primary=True)

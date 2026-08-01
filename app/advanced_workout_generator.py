@@ -79,10 +79,14 @@ def _norm(s: Optional[str]) -> str:
 
 
 def canonical_equipment(value: str) -> Optional[str]:
+    # Единый нормализатор: RU-синонимы/старые значения/EN -> канонический EN.
+    from api.services import equipment as _equip
+
+    canon = _equip.normalize_equipment(value)
+    if canon:
+        return canon
     v = _norm(value)
-    if not v:
-        return None
-    return EQUIPMENT_CANONICAL.get(v, v)  # если неизвестно — оставим как есть
+    return v or None  # неизвестное — оставим как есть
 
 
 # -----------------------------

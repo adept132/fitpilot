@@ -72,11 +72,11 @@ class ExerciseCreator:
         equipment_words = {
             'штанга': 'barbell',
             'гантел': 'dumbbell',
-            'тренажер': 'machine',
-            'блок': 'cable',
+            'тренажер': 'block_machine',
+            'блок': 'block_machine',
             'весом тела': 'bodyweight',
             'гиря': 'kettlebell',
-            'эспандер': 'resistance_band',
+            'эспандер': 'band',
         }
 
         for word, equipment in equipment_words.items():
