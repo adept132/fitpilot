@@ -140,3 +140,103 @@ def test_at_most_one_proposal_even_when_all_triggers_fire():
 def test_payload_carries_the_evidence():
     result = decide(_inp(fatigue=FatigueSignal(fatigued_days=6, band_known=True)))
     assert result[0].payload["fatigued_days"] == 6
+
+
+# --- Триггер по переносу плановой разгрузки ---
+
+def test_dropped_load_proposes_postponing_the_planned_deload():
+    """Плановая разгрузка уже на носу (2 тренировки), а нагрузка упала.
+    Разгружаться не от чего — сдвигаем планы."""
+    inp = _inp(
+        workouts_to_planned_deload=2,
+        fatigue=FatigueSignal(chronic_level=30.0, chronic_at_block_start=100.0),
+    )
+    result = decide(inp)
+    assert [p.kind for p in result] == [params.KIND_POSTPONE_DELOAD]
+    assert result[0].reason_code == params.REASON_LOAD_DROPPED
+    assert "chronic_ratio" in result[0].payload
+    assert result[0].payload["chronic_ratio"] == 0.3
+
+
+def test_postpone_is_not_proposed_when_load_held_up():
+    """Хроническая нагрузка не упала достаточно сильно — разгружаться не нужно,
+    плановая разгрузка пойдёт по графику."""
+    inp = _inp(
+        workouts_to_planned_deload=2,
+        fatigue=FatigueSignal(chronic_level=90.0, chronic_at_block_start=100.0),
+    )
+    assert _kinds(inp) == []
+
+
+def test_postpone_needs_a_baseline():
+    """Без исходного уровня нагрузки на старте блока нельзя считать падение.
+    Оба случая — None и 0.0 — должны быть обработаны без деления на ноль."""
+    # Case 1: chronic_at_block_start = None
+    inp = _inp(
+        workouts_to_planned_deload=2,
+        fatigue=FatigueSignal(chronic_level=30.0, chronic_at_block_start=None),
+    )
+    assert _kinds(inp) == []
+
+    # Case 2: chronic_at_block_start = 0.0
+    inp = _inp(
+        workouts_to_planned_deload=2,
+        fatigue=FatigueSignal(chronic_level=30.0, chronic_at_block_start=0.0),
+    )
+    assert _kinds(inp) == []
+
+
+def test_postpone_not_proposed_while_planned_deload_is_far():
+    """Хроническая нагрузка упала, но до плановой разгрузки ещё далеко
+    (8 тренировок > PLANNED_DELOAD_NEAR_WORKOUTS=3) — не предлагаем перенос."""
+    inp = _inp(
+        workouts_to_planned_deload=8,
+        fatigue=FatigueSignal(chronic_level=30.0, chronic_at_block_start=100.0),
+    )
+    assert _kinds(inp) == []
+
+
+def test_early_deload_and_postpone_are_mutually_exclusive():
+    """Когда плановая разгрузка рядом, предохранитель отключает досрочную разгрузку.
+    Если при этом сработали условия переноса плановой, только перенос выйдет
+    в результате."""
+    inp = _inp(
+        workouts_to_planned_deload=2,
+        fatigue=FatigueSignal(
+            fatigued_days=9,
+            band_known=True,
+            chronic_level=30.0,
+            chronic_at_block_start=100.0,
+        ),
+    )
+    result = decide(inp)
+    assert len(result) == 1
+    assert result[0].kind == params.KIND_POSTPONE_DELOAD
+
+
+# --- Границы порогов плато ---
+
+def test_plateau_triggers_exactly_at_the_minimum_exercises():
+    """Ровно на пороге PLATEAU_MIN_EXERCISES (3 упражнения с историей):
+    - С 2 вставшими (2/3 ≈ 0.67 > 0.5) предложение есть
+    - С 1 вставшим (1/3 ≈ 0.33 < 0.5) предложения нет"""
+    # Ровно 3 упражнения, 2 вставших — триггер сработает
+    inp = _inp(plateau=PlateauSignal(exercises_with_history=3, stalled=2))
+    result = decide(inp)
+    assert len(result) == 1
+    assert result[0].kind == params.KIND_EARLY_DELOAD
+    assert result[0].reason_code == params.REASON_BLOCK_PLATEAU
+
+    # Ровно 3 упражнения, 1 вставшее — триггер не сработает
+    inp = _inp(plateau=PlateauSignal(exercises_with_history=3, stalled=1))
+    assert _kinds(inp) == []
+
+
+def test_readiness_window_shorter_than_limit_is_safe():
+    """Окно вердиктов может быть меньше чем READINESS_LIMIT_WINDOW (5).
+    Слайс не должен вызвать ошибку, и если недостаточно limit'ов,
+    предложения не должно быть."""
+    # Всего 2 вердикта, оба limit — это меньше чем READINESS_LIMIT_WINDOW=5
+    # и меньше чем READINESS_LIMIT_COUNT=3
+    signal = ReadinessSignal(recent_levels=("limit", "limit"))
+    assert _kinds(_inp(readiness=signal)) == []
