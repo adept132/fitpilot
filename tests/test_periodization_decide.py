@@ -111,6 +111,21 @@ def test_only_one_early_deload_per_block():
     assert _kinds(inp) == []
 
 
+def test_no_proposal_when_next_phase_is_already_deload():
+    """Иначе получаются две разгрузки подряд: предложенная досрочная и уже
+    запланированная сразу за ней. Число тренировок до плановой разгрузки
+    здесь высокое (первый день семидневной фазы), так что предохранитель
+    по workouts_to_planned_deload не сработал бы — нужен именно этот."""
+    inp = _inp(
+        position=_pos(next_phase_is_deload=True),
+        workouts_to_planned_deload=8,
+        fatigue=FatigueSignal(fatigued_days=9, sharp_rise=True, band_known=True),
+        plateau=PlateauSignal(exercises_with_history=6, stalled=5),
+        readiness=ReadinessSignal(recent_levels=("limit", "limit", "limit")),
+    )
+    assert _kinds(inp) == []
+
+
 def test_at_most_one_proposal_even_when_all_triggers_fire():
     inp = _inp(
         fatigue=FatigueSignal(fatigued_days=9, sharp_rise=True, band_known=True),

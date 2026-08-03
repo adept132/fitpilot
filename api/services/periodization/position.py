@@ -48,6 +48,11 @@ def position(block: BlockState, today: date) -> BlockPosition:
         cursor = end
 
     current = block.phases[current_index]
+    is_last_phase = current_index == len(block.phases) - 1
+    next_phase_is_deload = (
+        not is_last_phase
+        and block.phases[current_index + 1].effort_tier == params.DELOAD_TIER
+    )
 
     return BlockPosition(
         phase_number=current.phase_number,
@@ -56,8 +61,9 @@ def position(block: BlockState, today: date) -> BlockPosition:
         phases_total=len(block.phases),
         day_in_block=day_in_block,
         days_to_deload=_days_to_deload(block, day_in_block, current_index, phase_start_day),
-        is_last_phase=current_index == len(block.phases) - 1,
+        is_last_phase=is_last_phase,
         is_complete=is_complete,
+        next_phase_is_deload=next_phase_is_deload,
     )
 
 

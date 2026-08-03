@@ -87,3 +87,47 @@ def test_date_before_start_clamps_to_first_day():
     assert pos.day_in_block == 1
     assert pos.phase_ordinal == 1
     assert pos.is_complete is False
+
+
+def test_next_phase_is_deload_true_when_following_phase_in_list_is_deload():
+    block = _block("easy", "medium", "deload")
+    pos = position(block, date(2026, 8, 10))  # 8-й день — фаза "medium"
+    assert pos.effort_tier == "medium"
+    assert pos.next_phase_is_deload is True
+
+
+def test_next_phase_is_deload_false_when_following_phase_is_not_deload():
+    block = _block("easy", "medium", "deload")
+    pos = position(block, START)  # 1-й день — фаза "easy", дальше "medium"
+    assert pos.effort_tier == "easy"
+    assert pos.next_phase_is_deload is False
+
+
+def test_next_phase_is_deload_false_for_last_phase():
+    block = _block("easy", "medium")
+    pos = position(block, date(2026, 8, 10))  # 8-й день — последняя фаза
+    assert pos.is_last_phase is True
+    assert pos.next_phase_is_deload is False
+
+
+def test_next_phase_is_deload_follows_list_order_not_phase_number():
+    """Порядок в списке решает, а не phase_number соседа."""
+    block = BlockState(
+        block_index=1,
+        phases=(
+            PhaseSnapshot(1, "Накопление", "medium", 7),
+            PhaseSnapshot(3, "Разгрузка", "deload", 7),
+            PhaseSnapshot(2, "Тяжёлая", "prefailure", 7),
+        ),
+        start_date=START,
+        microcycle_length=7,
+    )
+    pos = position(block, START)  # 1-й день — "Накопление", дальше по списку "Разгрузка"
+    assert pos.phase_number == 1
+    assert pos.next_phase_is_deload is True
+
+    pos_deload = position(block, date(2026, 8, 10))  # сама "Разгрузка"
+    assert pos_deload.phase_number == 3
+    assert pos_deload.effort_tier == "deload"
+    # дальше по списку "Тяжёлая", не разгрузка
+    assert pos_deload.next_phase_is_deload is False

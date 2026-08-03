@@ -51,6 +51,7 @@ class BlockPosition:
     days_to_deload: Optional[int]
     is_last_phase: bool
     is_complete: bool
+    next_phase_is_deload: bool = False  # следующая ПО СПИСКУ фаза — разгрузка
 
 
 @dataclass(frozen=True)

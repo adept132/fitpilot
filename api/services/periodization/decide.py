@@ -46,6 +46,13 @@ def _triggers_allowed(inp: DecisionInput) -> bool:
         and inp.workouts_to_planned_deload <= params.PLANNED_DELOAD_NEAR_WORKOUTS
     ):
         return False
+    if inp.position.next_phase_is_deload:
+        # Следующая по списку фаза блока уже разгрузка — вставлять досрочную
+        # перед ней значит получить две подряд (14 дней простоя вместо 7).
+        # Предохранитель по числу тренировок это не покрывает: в начале
+        # длинной фазы до плановой разгрузки может быть далеко по трудодням,
+        # но по фазам она уже следующая.
+        return False
     return True
 
 
