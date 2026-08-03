@@ -57,6 +57,22 @@ def test_insert_deload_rejects_unknown_phase():
         insert_deload(BASE, after_phase_number=99, length_days=7)
 
 
+def test_insert_deload_before_existing_deload_changes_nothing():
+    """Фаза 4 в BASE уже deload — вставка после фазы 3 не должна давать
+    две разгрузки подряд (14 дней простоя вместо 7)."""
+    result = insert_deload(BASE, after_phase_number=3, length_days=7)
+    assert result == BASE
+
+
+def test_insert_deload_after_the_first_phase():
+    result = insert_deload(BASE, after_phase_number=1, length_days=7)
+    assert [p.effort_tier for p in result] == [
+        "easy", "deload", "medium", "prefailure", "deload",
+    ]
+    existing = [p for p in result if p.phase_number != 5]
+    assert [p.phase_number for p in existing] == [1, 2, 3, 4]
+
+
 def test_postpone_deload_extends_the_phase_before_it():
     result = postpone_deload(BASE, extra_days=7)
     assert result[2].length_days == 14
@@ -68,10 +84,37 @@ def test_postpone_deload_without_deload_is_a_noop():
     assert postpone_deload(no_deload, extra_days=7) == no_deload
 
 
+def test_postpone_deload_when_deload_is_first_is_a_noop():
+    deload_first = (PhaseSnapshot(1, "Разгрузка", "deload", 7),) + BASE[:3]
+    assert postpone_deload(deload_first, extra_days=7) == deload_first
+
+
+def test_postpone_deload_extends_only_the_first_deload():
+    two_deloads = BASE + (
+        PhaseSnapshot(5, "Средняя-2", "medium", 7),
+        PhaseSnapshot(6, "Разгрузка-2", "deload", 7),
+    )
+    result = postpone_deload(two_deloads, extra_days=7)
+    assert result[2].length_days == 14
+    assert result[4].length_days == 7
+    assert [p.phase_number for p in result] == [1, 2, 3, 4, 5, 6]
+
+
 def test_split_after_returns_head_and_tail():
     head, tail = split_after(BASE, phase_number=2)
     assert [p.phase_number for p in head] == [1, 2]
     assert [p.phase_number for p in tail] == [3, 4]
+
+
+def test_split_after_last_phase_gives_empty_tail():
+    head, tail = split_after(BASE, phase_number=4)
+    assert [p.phase_number for p in head] == [1, 2, 3, 4]
+    assert tail == ()
+
+
+def test_split_after_unknown_phase_raises():
+    with pytest.raises(ValueError):
+        split_after(BASE, phase_number=99)
 
 
 def test_tier_for_finds_by_stable_number():
@@ -82,3 +125,8 @@ def test_tier_for_finds_by_stable_number():
 def test_json_roundtrip_preserves_order_and_numbers():
     result = insert_deload(BASE, after_phase_number=2, length_days=7)
     assert from_json(to_json(result)) == result
+
+
+def test_from_json_handles_empty_and_none():
+    assert from_json([]) == ()
+    assert from_json(None) == ()

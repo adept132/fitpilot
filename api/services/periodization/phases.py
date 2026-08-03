@@ -30,6 +30,9 @@ def to_json(phases: Sequence[PhaseSnapshot]) -> list[dict]:
 
 
 def from_json(raw: Sequence[dict]) -> Phases:
+    # raw читается из колонки JSONB напрямую и может быть NULL (None) —
+    # в отличие от to_json, куда всегда приходит уже материализованный
+    # кортеж фаз. Асимметрия намеренная, симметрию сюда не вводить.
     return tuple(
         PhaseSnapshot(
             phase_number=int(item["phase_number"]),
@@ -59,6 +62,12 @@ def insert_deload(
     Номер новой фазы — max + 1, а не «номер соседа + 1»: номера не
     перенумеровываются (см. докстринг модуля), поэтому порядок номеров и
     порядок фаз в списке расходятся, и это нормально.
+
+    Оборонительная ветка: если фаза, идущая сразу за точкой вставки, уже
+    является разгрузкой, вставлять вторую подряд нечего — вернуть список
+    без изменений. Штатно движок не должен предлагать вставку в такой
+    ситуации вовсе (это забота слоя принятия решения), но здесь стоит
+    последний рубеж, чтобы баг там не превращался в две разгрузки подряд.
     """
     ordered = tuple(phases)
     index = next(
@@ -66,6 +75,9 @@ def insert_deload(
     )
     if index is None:
         raise ValueError(f"Фаза {after_phase_number} не найдена в блоке")
+
+    if index + 1 < len(ordered) and ordered[index + 1].effort_tier == params.DELOAD_TIER:
+        return ordered
 
     fresh_number = max(p.phase_number for p in ordered) + 1
     deload = PhaseSnapshot(
