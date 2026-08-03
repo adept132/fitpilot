@@ -1,7 +1,10 @@
 """Словарь понятий периодизации. Ни одного объекта SQLAlchemy.
 
-Все структуры неизменяемы — ядро состоит из чистых функций, и мутабельное
-состояние в них только источник ошибок (тот же принцип, что в readiness/types).
+Все структуры неизменяемы в смысле frozen=True (запрещено переприсваивание
+атрибутов). Исключение: Proposal.payload — сознательно обычный dict, потому
+что уезжает прямо в колонку JSONB и обязан остаться dict для сериализации;
+мутировать его на месте нельзя по соглашению, а не по механике (как в readiness/types,
+где словари оборачиваются в MappingProxyType).
 """
 
 from __future__ import annotations
@@ -95,4 +98,4 @@ class Proposal:
 
     kind: str
     reason_code: str
-    payload: dict[str, Any] = field(default_factory=dict)
+    payload: dict[str, Any] = field(default_factory=dict)  # обычный dict для JSONB, не мутировать

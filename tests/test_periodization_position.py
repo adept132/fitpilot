@@ -79,3 +79,11 @@ def test_stable_phase_numbers_are_respected():
     assert pos.phase_number == 3
     assert pos.effort_tier == "deload"
     assert pos.phase_ordinal == 2
+
+
+def test_date_before_start_clamps_to_first_day():
+    """Дата раньше start_date клампится к первому дню блока."""
+    pos = position(_block("easy", "medium", "deload"), date(2026, 8, 1))
+    assert pos.day_in_block == 1
+    assert pos.phase_ordinal == 1
+    assert pos.is_complete is False
