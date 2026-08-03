@@ -149,6 +149,11 @@ _SYNC_INDEXES = [
         'CREATE UNIQUE INDEX IF NOT EXISTS uq_wss_exercise_client_uuid '
         'ON workout_session_sets (workout_session_exercise_id, client_uuid) WHERE client_uuid IS NOT NULL',
     ),
+    (
+        "uq_training_blocks_user_index",
+        'CREATE UNIQUE INDEX IF NOT EXISTS uq_training_blocks_user_index '
+        'ON training_blocks (app_user_id, block_index)',
+    ),
 ]
 
 

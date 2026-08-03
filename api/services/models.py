@@ -299,6 +299,10 @@ class WorkoutSession(Base):
     app_user_mesocycle_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("app_user_mesocycles.id", ondelete="SET NULL")
     )
+    # P0-08: снимок фаз живёт в блоке, поэтому резолв effort_tier идёт через него.
+    training_block_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("training_blocks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     mesocycle_phase: Mapped[Optional[int]] = mapped_column()
     app_user_microcycle_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("app_user_microcycles.id",
                                                                                       ondelete="SET NULL"),
@@ -958,6 +962,11 @@ class UserCalendarDay(Base):
     plan_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("workout_plans.id", ondelete="SET NULL"),
                                                    nullable=True)
 
+    # P0-08: координата блока. SET NULL — удаление блока не должно уносить дни.
+    block_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("training_blocks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
     is_rest_day: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     is_blackout: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
@@ -968,3 +977,80 @@ class UserCalendarDay(Base):
     actual_workout_session_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
     plan = relationship("WorkoutPlan", lazy="noload")
+
+
+class TrainingBlock(Base):
+    """Материализованный тренировочный блок (P0-08).
+
+    phases — СНИМОК фаз мезоцикла, а не ссылка на шаблон: правка шаблона не
+    переписывает историю, а досрочная разгрузка вставляется сюда, не трогая
+    многоразовый шаблон. Порядок фаз — порядок элементов списка;
+    phase_number внутри элемента — СТАБИЛЬНЫЙ идентификатор, который никогда
+    не перенумеровывается (на него ссылается WorkoutSession.mesocycle_phase
+    уже завершённых сессий).
+    """
+    __tablename__ = "training_blocks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    block_index: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    user_mesocycle_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("app_user_mesocycles.id", ondelete="SET NULL"), nullable=True
+    )
+    # SET NULL, а не CASCADE: DELETE /mesocycles/{id} не должен уносить историю блоков.
+    mesocycle_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("mesocycles.id", ondelete="SET NULL"), nullable=True
+    )
+    phases: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+
+    user_microcycle_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("app_user_microcycles.id", ondelete="SET NULL"), nullable=True
+    )
+    microcycle_length: Mapped[int] = mapped_column(Integer, nullable=False)
+    split_blueprint_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    planned_end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    actual_end_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", server_default="active")
+    close_reason: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+
+    entry_state: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    exit_state: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PeriodizationProposal(Base):
+    """Решение движка, ожидающее подтверждения пользователя (P0-08).
+
+    Отдельная таблица, а не поле блока: структурных предложений на границе
+    бывает несколько, они обязаны переживать перезапуск и приезжать на другое
+    устройство, а состояние expired («пользователь ничего не сделал, идём по
+    плану») где-то надо хранить.
+    """
+    __tablename__ = "periodization_proposals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    block_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("training_blocks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(48), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", server_default="pending")
+    client_uuid: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    decided_action: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
