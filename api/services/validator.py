@@ -61,12 +61,13 @@ class AntiSuicideValidator:
                     )
 
             # Правило 2: Плавность прогрессии вверх (не более чем на 2 шага)
+            # После разгрузки (deload, индекс 0) допускается любой скачок вверх
             if i > 0:
                 prev_tier = effort_tiers[i - 1]
                 prev_idx = cls.EFFORT_ORDER.index(prev_tier)
                 curr_idx = cls.EFFORT_ORDER.index(current_tier)
 
-                if curr_idx - prev_idx > 2:
+                if prev_idx != 0 and curr_idx > prev_idx and curr_idx - prev_idx > 2:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=f"Слишком резкий скачок интенсивности: нельзя прыгать с {prev_tier} на {current_tier}."
