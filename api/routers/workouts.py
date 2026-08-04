@@ -447,9 +447,16 @@ async def get_exercise_autoprogression(
     # сработали. P0-06 C2: резолв фазы вынесен в репозиторий (единая точка
     # для этого read-only пути и всех пишущих), этот эндпоинт был одной из
     # двух точек дублирования join'а — теперь их не осталось.
+    # P0-08, ревью Задачи 8, находка 1: предпросмотр обязан читать тот же
+    # источник фазы, что и пишущие пути (снимок блока приоритетнее шаблона) —
+    # иначе на живом пересчёте (target_reps или ещё не сохранённое
+    # предписание) вставленная разгрузка не срежет вес, хотя на остальных
+    # трёх точках (создание сессии, добавление упражнения, завершение) она
+    # уже срабатывает.
     workout_session = session_exercise.workout_session
     phase_effort_tier = await progression_repo.resolve_phase_effort_tier(
-        db, workout_session.app_user_mesocycle_id, workout_session.mesocycle_phase
+        db, workout_session.app_user_mesocycle_id, workout_session.mesocycle_phase,
+        training_block_id=workout_session.training_block_id,
     )
 
     data = await compute_autoprogression(

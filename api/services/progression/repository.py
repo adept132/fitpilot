@@ -68,7 +68,9 @@ def _phase_effort_tier_stmt(
     ранее он был продублирован в _load_deload_map и в
     workouts.py::get_exercise_autoprogression); обе точки теперь используют
     эту функцию — напрямую (_load_deload_map, батчем) или через
-    resolve_phase_effort_tier (одна пара, все пишущие пути).
+    resolve_phase_effort_tier. Это про сам JOIN, а не про то, что все
+    потребители resolve_phase_effort_tier уже перешли на снимок блока —
+    вызывающий код обязан отдельно передать training_block_id (P0-08).
     """
     stmt = (
         select(
