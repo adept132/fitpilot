@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -21,6 +21,7 @@ from api.services.models import (
     WorkoutSessionExercise,
     WorkoutSessionSet,
 )
+from api.services.periodization import params
 from api.services.periodization import repository as periodization_repository
 from api.services.periodization.repository import (
     block_state,
@@ -222,6 +223,196 @@ async def test_ensure_recovers_when_block_appears_concurrently(db, test_user: Ap
     ).scalars().all()
     assert len(blocks) == 1, "второй блок в БД появиться не должен"
     assert blocks[0].id == block.id
+
+
+# --- P0-08, повторное ревью Задачи 7: гонка в переходе между блоками -------
+
+
+@pytest.mark.asyncio
+async def test_ensure_recovers_when_rollover_races_concurrently(db, test_user: AppUser):
+    """Находка 2: roll_over_if_complete закрывает старый блок и вставляет
+    следующий не атомарно — раньше вызов был снаружи try/except в
+    ensure_active_block, поэтому проигравший в гонке падал с необработанным
+    IntegrityError вместо 500. Сценарий тот же, что и у
+    test_ensure_recovers_when_block_appears_concurrently, но для ПЕРЕХОДА
+    между блоками, а не для создания первого блока: мобильный клиент на
+    старте дёргает контекст дня и контекст периодизации одновременно, оба
+    видят один и тот же истёкший активный блок и оба пытаются перекатить
+    его дальше — второй INSERT падает на uq_training_blocks_user_index.
+
+    Настоящую гонку не воспроизвести — имитируем её через create_block, как
+    и в тесте гонки первого блока: "сосед" вставляет и коммитит следующий
+    блок цепочки первым (с тем индексом, который наш roll_over_if_complete
+    уже решил занять), а затем настоящая попытка вставить блок с тем же
+    индексом падает на уникальном индексе.
+    """
+    await _seed_periodization(db, test_user.id)
+    block_length = 21  # 3 фазы по 7 дней (длина микроцикла) из _seed_periodization
+    old_start = TODAY - timedelta(days=block_length + 1)
+    old_block = await ensure_active_block(db, test_user.id, old_start)
+    old_block_id = old_block.id
+    old_index = old_block.block_index
+    assert TODAY > old_block.planned_end_date, "сценарий должен требовать переката"
+
+    real_create_block = periodization_repository.create_block
+    call_state = {"raced": False}
+
+    async def _fake_create_block(
+        session,
+        app_user_id,
+        start_date,
+        *,
+        block_index,
+        phases,
+        user_meso,
+        user_micro,
+        split_blueprint_id=None,
+        entry_state=None,
+    ):
+        if not call_state["raced"]:
+            call_state["raced"] = True
+            # "Сосед" вставляет и коммитит следующий блок цепочки первым —
+            # с тем же индексом, который наш переход уже решил занять.
+            await real_create_block(
+                session,
+                app_user_id,
+                start_date,
+                block_index=block_index,
+                phases=phases,
+                user_meso=user_meso,
+                user_micro=user_micro,
+                split_blueprint_id=split_blueprint_id,
+                entry_state=entry_state,
+            )
+            await session.commit()
+        # Настоящая попытка нашего перехода — обязана упасть на уникальном
+        # индексе, как в реальной гонке.
+        return await real_create_block(
+            session,
+            app_user_id,
+            start_date,
+            block_index=block_index,
+            phases=phases,
+            user_meso=user_meso,
+            user_micro=user_micro,
+            split_blueprint_id=split_blueprint_id,
+            entry_state=entry_state,
+        )
+
+    with patch(
+        "api.services.periodization.repository.create_block",
+        side_effect=_fake_create_block,
+    ):
+        block = await ensure_active_block(db, test_user.id, TODAY)
+
+    assert block is not None, "ensure_active_block не должна падать на гонке в переходе"
+    assert block.block_index == old_index + 1
+    assert block.status == "active"
+
+    blocks = (
+        await db.execute(
+            select(TrainingBlock)
+            .where(TrainingBlock.app_user_id == test_user.id)
+            .order_by(TrainingBlock.block_index)
+        )
+    ).scalars().all()
+    assert len(blocks) == 2, "лишнего (третьего) блока в БД появиться не должно"
+    assert blocks[0].id == old_block_id
+    assert blocks[0].status == "closed"
+    assert blocks[1].id == block.id
+
+
+# --- P0-08, повторное ревью Задачи 7: цепной переход через несколько блоков -
+
+
+@pytest.mark.asyncio
+async def test_chain_rollover_catches_up_to_today(db, test_user: AppUser):
+    """Находка 1: пользователь, вернувшийся после отпуска длиной в
+    несколько блоков, не должен получить "активный" блок, чей
+    planned_end_date всё ещё в прошлом. Один вызов roll_over_if_complete
+    перекатывает ровно на длину одного блока (тут — 21 день, 3 фазы по 7
+    дней из _seed_periodization); блок, закончившийся на несколько длин
+    раньше today, требует НЕСКОЛЬКИХ перекатов подряд за один вызов
+    ensure_active_block."""
+    await _seed_periodization(db, test_user.id)
+    block_length = 21
+    # Заведомо больше одной длины блока, но заметно меньше предела
+    # MAX_CHAIN_ROLLOVERS (6) — тест проверяет именно цикл, а не выход по
+    # исчерпанию попыток (см. test_chain_rollover_gives_up_after_the_cap).
+    old_start = TODAY - timedelta(days=3 * block_length + 5)
+    old_block = await ensure_active_block(db, test_user.id, old_start)
+    old_block_id = old_block.id
+    assert TODAY > old_block.planned_end_date, "сценарий должен требовать переката"
+
+    active = await ensure_active_block(db, test_user.id, TODAY)
+
+    assert active.start_date <= TODAY <= active.planned_end_date, (
+        "активный блок обязан покрыть today за один вызов ensure_active_block, "
+        "даже если разрыв растянулся на несколько длин блока"
+    )
+
+    all_blocks = (
+        await db.execute(
+            select(TrainingBlock)
+            .where(TrainingBlock.app_user_id == test_user.id)
+            .order_by(TrainingBlock.block_index)
+        )
+    ).scalars().all()
+    closed = [b for b in all_blocks if b.id != active.id]
+    assert len(closed) > 1, (
+        "разрыв в несколько длин блока обязан потребовать больше одного переката"
+    )
+    assert len(closed) < params.MAX_CHAIN_ROLLOVERS, (
+        "сценарий теста не должен упираться в предел — см. test_chain_rollover_gives_up_after_the_cap"
+    )
+    assert closed[0].id == old_block_id
+    assert all(
+        b.status == "closed" and b.close_reason == params.CLOSE_COMPLETED for b in closed
+    )
+    # Цепочка непрерывна: следующий блок начинается сразу после конца
+    # предыдущего, без дыр (то же правило, что и для одиночного переката).
+    for prev, nxt in zip(all_blocks, all_blocks[1:]):
+        assert nxt.start_date == prev.planned_end_date + timedelta(days=1)
+        assert nxt.block_index == prev.block_index + 1
+        assert nxt.entry_state == prev.exit_state
+
+
+@pytest.mark.asyncio
+async def test_chain_rollover_gives_up_after_the_cap(db, test_user: AppUser):
+    """Находка 1: перерыв длиннее params.MAX_CHAIN_ROLLOVERS блоков подряд —
+    восстанавливать цепочку до today дальше бессмысленно, прежняя программа
+    потеряла смысл. Ожидание: активный блок стартует СЕГОДНЯ (не тянет
+    цепочку дальше предела), а последний закрытый в цепочке имеет причину
+    layoff."""
+    await _seed_periodization(db, test_user.id)
+    block_length = 21
+    # Заведомо больше, чем MAX_CHAIN_ROLLOVERS длин блока — цикл обязан
+    # остановиться по пределу, а не найти блок, покрывающий today.
+    old_start = TODAY - timedelta(days=(params.MAX_CHAIN_ROLLOVERS + 2) * block_length)
+    await ensure_active_block(db, test_user.id, old_start)
+
+    active = await ensure_active_block(db, test_user.id, TODAY)
+
+    assert active.status == "active"
+    assert active.start_date == TODAY, (
+        "после исчерпания MAX_CHAIN_ROLLOVERS перекатов новый блок обязан "
+        "начаться сегодня, а не продолжать цепочку дальше"
+    )
+
+    all_blocks = (
+        await db.execute(
+            select(TrainingBlock)
+            .where(TrainingBlock.app_user_id == test_user.id)
+            .order_by(TrainingBlock.block_index)
+        )
+    ).scalars().all()
+    closed = [b for b in all_blocks if b.id != active.id]
+    assert len(closed) == params.MAX_CHAIN_ROLLOVERS + 1, (
+        "MAX_CHAIN_ROLLOVERS обычных перекатов + один финальный layoff-закрытие"
+    )
+    assert all(b.close_reason == params.CLOSE_COMPLETED for b in closed[:-1])
+    assert closed[-1].close_reason == params.CLOSE_LAYOFF
+    assert active.entry_state == closed[-1].exit_state
 
 
 # --- Ревью Задачи 6: build_state_snapshot ------------------------------------

@@ -261,7 +261,17 @@ class SchedulingEngine:
         # блок — старый или новый, без разницы.
         from api.services.periodization.repository import ensure_active_block
 
-        block = await ensure_active_block(session, app_user_id, start_date)
+        # P0-08, повторное ревью Задачи 7, Находка 3: "пора ли закрывать
+        # текущий блок" обязано решаться по РЕАЛЬНОМУ сегодня, а не по
+        # клиентскому start_date запуска сплита. start_date не валидируется
+        # и может быть в будущем (пользователь планирует запуск наперёд) —
+        # если передать её сюда как today, ещё живой текущий блок закрылся
+        # бы досрочно и задним числом: exit_state посчитался бы по неполным
+        # данным, а новый блок получил бы start_date раньше настоящего
+        # сегодня. Диапазон генерации дней ниже (from_date=start_date,
+        # until_date=block.planned_end_date) по-прежнему определяется
+        # клиентским start_date — меняется только вход в решение о переходе.
+        block = await ensure_active_block(session, app_user_id, date.today())
         if block is not None:
             await SchedulingEngine.generate_block_days(
                 session, app_user_id, block,

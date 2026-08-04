@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, timedelta
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import delete, select
@@ -358,4 +359,49 @@ async def test_horizon_stays_filled_across_the_block_boundary(db, test_user: App
     assert days_after_boundary, (
         "календарь обязан продолжиться за старую границу блока — "
         "иначе пользователь, зашедший после конца блока, видит пустой календарь"
+    )
+
+
+# --- P0-08, повторное ревью Задачи 7 ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_launch_with_future_start_date_does_not_close_current_block_early(
+    db, test_user: AppUser
+):
+    """Находка 3: launch_and_unroll_plan передавала в ensure_active_block
+    клиентский start_date запуска сплита в роли "сегодня". start_date не
+    валидируется и может быть в будущем (пользователь планирует запуск
+    наперёд) — если решение о переходе опирается на неё, ещё живой текущий
+    блок закрылся бы задним числом, хотя РЕАЛЬНОЕ сегодня ещё внутри него.
+    Фикс: ensure_active_block внутри launch_and_unroll_plan вызывается с
+    date.today(), а не со start_date."""
+    await _seed(db, test_user.id)
+    block = await ensure_active_block(db, test_user.id, TODAY)
+    current_block_id = block.id
+    # За пределами текущего блока — если бы решение о переходе опиралось на
+    # start_date, блок закрылся бы прямо сейчас.
+    future_start = block.planned_end_date + timedelta(days=5)
+    assert future_start > block.planned_end_date
+
+    class _FrozenDate(date):
+        @classmethod
+        def today(cls):
+            return TODAY
+
+    with patch("api.services.scheduling_engine.date", _FrozenDate):
+        await SchedulingEngine.launch_and_unroll_plan(
+            db,
+            test_user.id,
+            block.split_blueprint_id,
+            start_date=future_start,
+            blackout_weekdays=[],
+        )
+
+    current = (
+        await db.execute(select(TrainingBlock).where(TrainingBlock.id == current_block_id))
+    ).scalar_one()
+    assert current.status == "active", (
+        "блок не должен закрываться из-за БУДУЩЕГО клиентского start_date — "
+        "решение о переходе обязано опираться на настоящее today, а не на start_date"
     )

@@ -138,6 +138,11 @@ async def roll_over_if_complete(
     прошедший блок и предлагает структурные правки — но не то, быть ли
     следующему блоку вообще.
 
+    Перекатывает РОВНО НА ОДИН ШАГ. Цепочку из нескольких просроченных блоков
+    подряд (человек вернулся после отпуска длиной в несколько блоков) в цикл
+    собирает вызывающая сторона — см. ensure_active_block и
+    params.MAX_CHAIN_ROLLOVERS.
+
     Коммитит сессию (как и ensure_active_block, см. предупреждение там) —
     вызывающая сторона не должна накопить в этой сессии собственные
     незакоммиченные изменения раньше этого вызова.
@@ -150,51 +155,131 @@ async def roll_over_if_complete(
 
     # Снимок состояния на выход берём по упражнениям, тренированным ВНУТРИ
     # этого блока — так он честно отражает прогрессию именно за этот блок.
-    # Если блок прошёл целиком без единой тренировки (например, периодизацию
-    # настроили и не занимались), используем тот же fallback, что и при
-    # создании самого первого блока: недавние упражнения в окне
-    # SNAPSHOT_WINDOW_DAYS — пустой снимок был бы менее честным, чем снимок
-    # по актуальным движениям.
+    # P0-08, повторное ревью Задачи 7, Находка 1: если блок прошёл целиком
+    # без единой тренировки (типичный случай для промежуточных блоков
+    # цепочки — их никто не тренировал, потому что человек был в отпуске),
+    # снимать нечего: состояние не изменилось с момента входа в блок, а
+    # build_state_snapshot делает отдельную загрузку истории на каждое
+    # упражнение — на пустом блоке это лишние запросы на ровном месте.
+    # Поэтому просто переносим entry_state закрываемого блока как есть,
+    # вместо того чтобы (как раньше) искать fallback по недавним
+    # упражнениям — тот fallback был честен для одиночного перехода, но
+    # разоряется на цепочке из нескольких пустых блоков подряд.
     exercise_ids = await block_exercise_ids(session, app_user_id, block)
-    if not exercise_ids:
-        exercise_ids = await recent_exercise_ids(
-            session,
-            app_user_id,
-            since=today - timedelta(days=params.SNAPSHOT_WINDOW_DAYS),
-        )
-    exit_state = await build_state_snapshot(session, app_user_id, exercise_ids)
+    if exercise_ids:
+        exit_state = await build_state_snapshot(session, app_user_id, exercise_ids)
+    else:
+        exit_state = block.entry_state
 
     block.status = "closed"
     block.close_reason = params.CLOSE_COMPLETED
     block.actual_end_date = block.planned_end_date
     block.exit_state = exit_state
 
-    phases = phase_ops.from_json(block.phases)
-    total_days = sum(p.length_days for p in phases)
     # СТРОГО planned_end_date + 1, а не today: иначе при заходе в приложение
     # спустя несколько дней после конца блока в календаре образовалась бы
     # дыра между старой границей и стартом нового блока. Долгий перерыв —
-    # отдельный случай со своим правилом (Задача 14, LAYOFF_DAYS_AFTER_BLOCK_END).
+    # отдельный случай со своим правилом (params.MAX_CHAIN_ROLLOVERS выше).
     next_start = block.planned_end_date + timedelta(days=1)
-    next_block = TrainingBlock(
-        app_user_id=app_user_id,
+    # P0-08, повторное ревью Задачи 7, Находка 4: арифметику planned_end_date
+    # (и защиту от пустых фаз) не повторяем — переиспользуем create_block,
+    # передав ей фазы закрываемого блока, а ссылки на мезо-/микроцикл и
+    # сплит, которые create_block иначе взяла бы из ТЕКУЩИХ активных
+    # настроек пользователя, переопределяем полями закрываемого блока СРАЗУ
+    # после вызова: активные настройки на момент переката могли уже уйти
+    # вперёд, а следующий блок цепочки обязан остаться на том же шаблоне,
+    # что и закрытый.
+    next_block = await create_block(
+        session,
+        app_user_id,
+        next_start,
         block_index=block.block_index + 1,
-        user_mesocycle_id=block.user_mesocycle_id,
-        mesocycle_id=block.mesocycle_id,
-        phases=phase_ops.to_json(phases),
-        user_microcycle_id=block.user_microcycle_id,
-        microcycle_length=block.microcycle_length,
+        phases=phase_ops.from_json(block.phases),
+        user_meso=None,
+        user_micro=None,
         split_blueprint_id=block.split_blueprint_id,
-        start_date=next_start,
-        planned_end_date=next_start + timedelta(days=total_days - 1),
-        status="active",
         entry_state=exit_state,
     )
-    session.add(next_block)
+    next_block.user_mesocycle_id = block.user_mesocycle_id
+    next_block.mesocycle_id = block.mesocycle_id
+    next_block.user_microcycle_id = block.user_microcycle_id
+    next_block.microcycle_length = block.microcycle_length
     await session.commit()
     # Возвращаем ЗАКРЫТЫЙ блок — он понадобится Задаче 9, чтобы по нему
     # создать карточку итогов.
     return block
+
+
+async def _catch_up_active_block(
+    session: AsyncSession, app_user_id: int, today: date
+) -> None:
+    """Перекатывает активный блок в цикле, пока он не покроет today, либо
+    пока не исчерпан params.MAX_CHAIN_ROLLOVERS (P0-08, повторное ревью
+    Задачи 7, Находка 1).
+
+    Каждая итерация — ровно один шаг roll_over_if_complete: он сам
+    останавливается (возвращает None), как только активного блока либо нет,
+    либо он уже покрывает today. Если после MAX_CHAIN_ROLLOVERS шагов блок
+    всё ещё не дотянул до today — прежняя программа, скорее всего, потеряла
+    смысл (перерыв длиннее, чем несколько блоков подряд), и восстанавливать
+    цепочку дальше бессмысленно: закрываем блок с причиной "layoff" и
+    начинаем новый с сегодня, как и для самого первого блока пользователя.
+    """
+    rollovers = 0
+    while await roll_over_if_complete(session, app_user_id, today) is not None:
+        rollovers += 1
+        if rollovers < params.MAX_CHAIN_ROLLOVERS:
+            continue
+        current = await get_active_block(session, app_user_id)
+        if current is not None and today > current.planned_end_date:
+            await _close_for_layoff(session, app_user_id, current, today)
+        break
+
+
+async def _close_for_layoff(
+    session: AsyncSession, app_user_id: int, block: TrainingBlock, today: date
+) -> TrainingBlock:
+    """Закрывает блок, который params.MAX_CHAIN_ROLLOVERS перекатов того же
+    шаблона так и не дотянули до today, и открывает новый со start_date =
+    today (P0-08, повторное ревью Задачи 7, Находка 1).
+
+    Снимок на выход — по тому же правилу, что и в roll_over_if_complete: раз
+    блок дошёл до предела перекатов, тренировок в нём заведомо не было, брать
+    состояние по recent_exercise_ids бессмысленно — переносим entry_state как
+    есть.
+    """
+    exercise_ids = await block_exercise_ids(session, app_user_id, block)
+    exit_state = (
+        await build_state_snapshot(session, app_user_id, exercise_ids)
+        if exercise_ids
+        else block.entry_state
+    )
+
+    block.status = "closed"
+    block.close_reason = params.CLOSE_LAYOFF
+    block.actual_end_date = block.planned_end_date
+    block.exit_state = exit_state
+
+    # Как и в roll_over_if_complete (Находка 4) — переиспользуем create_block
+    # вместо повторения арифметики planned_end_date, ссылки на шаблон
+    # переопределяем полями закрываемого блока после вызова.
+    next_block = await create_block(
+        session,
+        app_user_id,
+        today,
+        block_index=block.block_index + 1,
+        phases=phase_ops.from_json(block.phases),
+        user_meso=None,
+        user_micro=None,
+        split_blueprint_id=block.split_blueprint_id,
+        entry_state=exit_state,
+    )
+    next_block.user_mesocycle_id = block.user_mesocycle_id
+    next_block.mesocycle_id = block.mesocycle_id
+    next_block.user_microcycle_id = block.user_microcycle_id
+    next_block.microcycle_length = block.microcycle_length
+    await session.commit()
+    return next_block
 
 
 async def ensure_active_block(
@@ -220,7 +305,33 @@ async def ensure_active_block(
     # координаты (в первую очередь ensure_horizon) продолжали бы достраивать
     # календарь только до этой мёртвой границы. См. докстринг
     # roll_over_if_complete — почему переход именно автоматический.
-    await roll_over_if_complete(session, app_user_id, today)
+    #
+    # P0-08, повторное ревью Задачи 7, Находка 1: один перекат закрывает
+    # разрыв ровно на длину одного блока. Человек, вернувшийся после отпуска
+    # длиной в несколько блоков, при разовом перекате получил бы "активный"
+    # блок, чей planned_end_date всё ещё в прошлом, — дефект пустого
+    # календаря воспроизвёлся бы снова, просто на более редком сценарии.
+    # _catch_up_active_block перекатывает в цикле, пока активный блок не
+    # покроет today, либо пока не исчерпан params.MAX_CHAIN_ROLLOVERS.
+    #
+    # P0-08, повторное ревью Задачи 7, Находка 2: переход (как и создание
+    # первого блока в ветке ниже) не атомарен — закрытие старого блока и
+    # вставка следующего происходят раздельными операциями. Два конкурентных
+    # запроса, пересекающих границу блока (мобильный клиент на старте дёргает
+    # контекст дня и контекст периодизации одновременно), могут столкнуться
+    # на той же гонке, что и ветка создания первого блока: проигравший
+    # получает IntegrityError на uq_training_blocks_user_index. Обрабатываем
+    # по тому же контракту.
+    try:
+        await _catch_up_active_block(session, app_user_id, today)
+    except IntegrityError:
+        await session.rollback()
+        existing = await get_active_block(session, app_user_id)
+        if existing is None:
+            # Блока по-прежнему нет — IntegrityError был не про эту гонку,
+            # а про что-то другое. Глотать причину в этом случае нельзя.
+            raise
+        return existing
 
     existing = await get_active_block(session, app_user_id)
     if existing is not None:
