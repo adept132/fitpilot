@@ -119,6 +119,84 @@ async def create_block(
     return block
 
 
+async def roll_over_if_complete(
+    session: AsyncSession, app_user_id: int, today: date
+) -> Optional[TrainingBlock]:
+    """Закрывает активный блок, чей planned_end_date уже прошёл, и тут же
+    открывает следующий по ТОМУ ЖЕ шаблону (те же фазы, тот же сплит, тот же
+    мезо/микроцикл — только снимок состояния переносится вперёд).
+
+    ПОЧЕМУ переход автоматический, а не предложение пользователю (P0-08,
+    ревью Задачи 7, Находка 1): ensure_active_block раньше безусловно
+    возвращала уже истёкший блок, а SchedulingEngine.ensure_horizon достраивала
+    календарь только ДО его planned_end_date — как только сегодняшняя дата
+    проходила эту границу, достраивалось ноль дней, и пользователь открывал
+    приложение с пустым календарём. Модель "предлагаем, а не решаем" при этом
+    не нарушается: следующий блок — тот же самый шаблон, что и закрытый, то
+    есть само решение об этом шаблоне пользователь уже утвердил раньше, когда
+    настраивал периодизацию. Карточка итогов (Задача 9) по-прежнему разбирает
+    прошедший блок и предлагает структурные правки — но не то, быть ли
+    следующему блоку вообще.
+
+    Коммитит сессию (как и ensure_active_block, см. предупреждение там) —
+    вызывающая сторона не должна накопить в этой сессии собственные
+    незакоммиченные изменения раньше этого вызова.
+    """
+    block = await get_active_block(session, app_user_id)
+    if block is None:
+        return None
+    if today <= block.planned_end_date:
+        return None
+
+    # Снимок состояния на выход берём по упражнениям, тренированным ВНУТРИ
+    # этого блока — так он честно отражает прогрессию именно за этот блок.
+    # Если блок прошёл целиком без единой тренировки (например, периодизацию
+    # настроили и не занимались), используем тот же fallback, что и при
+    # создании самого первого блока: недавние упражнения в окне
+    # SNAPSHOT_WINDOW_DAYS — пустой снимок был бы менее честным, чем снимок
+    # по актуальным движениям.
+    exercise_ids = await block_exercise_ids(session, app_user_id, block)
+    if not exercise_ids:
+        exercise_ids = await recent_exercise_ids(
+            session,
+            app_user_id,
+            since=today - timedelta(days=params.SNAPSHOT_WINDOW_DAYS),
+        )
+    exit_state = await build_state_snapshot(session, app_user_id, exercise_ids)
+
+    block.status = "closed"
+    block.close_reason = params.CLOSE_COMPLETED
+    block.actual_end_date = block.planned_end_date
+    block.exit_state = exit_state
+
+    phases = phase_ops.from_json(block.phases)
+    total_days = sum(p.length_days for p in phases)
+    # СТРОГО planned_end_date + 1, а не today: иначе при заходе в приложение
+    # спустя несколько дней после конца блока в календаре образовалась бы
+    # дыра между старой границей и стартом нового блока. Долгий перерыв —
+    # отдельный случай со своим правилом (Задача 14, LAYOFF_DAYS_AFTER_BLOCK_END).
+    next_start = block.planned_end_date + timedelta(days=1)
+    next_block = TrainingBlock(
+        app_user_id=app_user_id,
+        block_index=block.block_index + 1,
+        user_mesocycle_id=block.user_mesocycle_id,
+        mesocycle_id=block.mesocycle_id,
+        phases=phase_ops.to_json(phases),
+        user_microcycle_id=block.user_microcycle_id,
+        microcycle_length=block.microcycle_length,
+        split_blueprint_id=block.split_blueprint_id,
+        start_date=next_start,
+        planned_end_date=next_start + timedelta(days=total_days - 1),
+        status="active",
+        entry_state=exit_state,
+    )
+    session.add(next_block)
+    await session.commit()
+    # Возвращаем ЗАКРЫТЫЙ блок — он понадобится Задаче 9, чтобы по нему
+    # создать карточку итогов.
+    return block
+
+
 async def ensure_active_block(
     session: AsyncSession, app_user_id: int, today: date
 ) -> Optional[TrainingBlock]:
@@ -136,6 +214,14 @@ async def ensure_active_block(
     изменения в этой сессии — иначе они уедут в БД вместе с блоком, задним
     числом и незапланированно.
     """
+    # P0-08, ревью Задачи 7, Находка 1: сначала закрываем истёкший блок и
+    # открываем следующий по тому же шаблону — иначе get_active_block ниже
+    # нашёл бы блок, чей planned_end_date уже в прошлом, и все потребители
+    # координаты (в первую очередь ensure_horizon) продолжали бы достраивать
+    # календарь только до этой мёртвой границы. См. докстринг
+    # roll_over_if_complete — почему переход именно автоматический.
+    await roll_over_if_complete(session, app_user_id, today)
+
     existing = await get_active_block(session, app_user_id)
     if existing is not None:
         return existing
