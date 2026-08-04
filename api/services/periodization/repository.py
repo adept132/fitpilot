@@ -19,6 +19,7 @@ from api.services.models import (
     AppUserMicrocycle,
     Mesocycle,
     TrainingBlock,
+    UserCalendarDay,
     UserSplit,
     WorkoutSession,
     WorkoutSessionExercise,
@@ -576,6 +577,39 @@ async def build_state_snapshot(
     return snapshot
 
 
+async def count_workouts_to_deload(
+    session: AsyncSession, app_user_id: int, today: date, days_to_deload: Optional[int]
+) -> Optional[int]:
+    """Тренировок до старта ближайшей разгрузки: не-выходных и не-заблокированных
+    дней календаря (UserCalendarDay, is_rest_day=False, is_blackout=False) с
+    today до дня начала разгрузки.
+
+    Вынесена из collect_decision_input (P0-08, Задача 11, поправка 2 брифа) —
+    HTTP-контракт (api/routers/periodization.py) обязан отдавать то же самое
+    число, что видит решатель как предохранитель (params.PLANNED_DELOAD_NEAR_WORKOUTS),
+    поэтому оба потребителя зовут ОДНУ функцию, а не держат две копии одного и
+    того же запроса, которые могут разъехаться при будущей правке. None, если
+    разгрузки впереди нет (days_to_deload is None — берём его из
+    BlockPosition.days_to_deload, см. position.py).
+    """
+    if days_to_deload is None:
+        return None
+    deload_start = today + timedelta(days=days_to_deload)
+    return len(
+        (
+            await session.execute(
+                select(UserCalendarDay.id).where(
+                    UserCalendarDay.app_user_id == app_user_id,
+                    UserCalendarDay.target_date >= today,
+                    UserCalendarDay.target_date < deload_start,
+                    UserCalendarDay.is_rest_day.is_(False),
+                    UserCalendarDay.is_blackout.is_(False),
+                )
+            )
+        ).scalars().all()
+    )
+
+
 async def collect_decision_input(
     session: AsyncSession, app_user_id: int, block: TrainingBlock, today: date
 ):
@@ -590,7 +624,7 @@ async def collect_decision_input(
     from datetime import datetime, time, timezone
 
     from api.services.fatigue.service import compute_readiness
-    from api.services.models import PeriodizationProposal, UserCalendarDay, UserObservation
+    from api.services.models import PeriodizationProposal, UserObservation
     from api.services.periodization.position import position
     from api.services.periodization.types import (
         DecisionInput,
@@ -684,22 +718,9 @@ async def collect_decision_input(
             levels.append(verdict.level)
 
     # --- Тренировок до плановой разгрузки.
-    workouts_to_deload = None
-    if pos.days_to_deload is not None:
-        deload_start = today + timedelta(days=pos.days_to_deload)
-        workouts_to_deload = len(
-            (
-                await session.execute(
-                    select(UserCalendarDay.id).where(
-                        UserCalendarDay.app_user_id == app_user_id,
-                        UserCalendarDay.target_date >= today,
-                        UserCalendarDay.target_date < deload_start,
-                        UserCalendarDay.is_rest_day.is_(False),
-                        UserCalendarDay.is_blackout.is_(False),
-                    )
-                )
-            ).scalars().all()
-        )
+    workouts_to_deload = await count_workouts_to_deload(
+        session, app_user_id, today, pos.days_to_deload
+    )
 
     used = (
         await session.execute(
