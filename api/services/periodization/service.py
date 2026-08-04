@@ -228,6 +228,39 @@ async def safe_refresh_proposals(
 # --- Применение решений (P0-08, Задача 10) -----------------------------------
 
 
+# P0-08, Задача 10, ревью, Critical 1+2: действия, которые правят ЖИВОЙ снимок
+# блока (phases/planned_end_date) и/или заводят следующий блок. Предложение
+# может провисеть pending дольше, чем блок остаётся активным: автопереход
+# (repository.roll_over_if_complete) закрывает истёкший блок и открывает
+# следующий НЕЗАВИСИМО от того, ответил ли пользователь на карточку — apply_decision
+# смотрел только на proposal.status и никогда не проверял состояние блока.
+#
+# Если применить insert_deload/postpone к уже ЗАКРЫТОМУ блоку, _regenerate_future
+# распишет дни календаря на даты, уже покрытые днями НОВОГО активного блока —
+# на выходе два UserCalendarDay на одну дату, и GET /calendar/day падает с
+# MultipleResultsFound (Critical 1). Если применить close_block к уже
+# закрытому блоку, close_and_advance попытается создать следующий блок с
+# индексом, который уже занял блок автоперехода, и получит необработанный
+# IntegrityError от uq_training_blocks_user_index — 500 вместо контрактного
+# ответа о конфликте (Critical 2).
+#
+# start_next_block, структурные действия (OPTION_SHIFT_REPS/REPLACE/KEEP) и
+# decline сюда СОЗНАТЕЛЬНО не входят и проверяться не должны — у них другая
+# природа предложения, а не побочный эффект той же гонки:
+# - карточка итогов блока (kind=block_boundary, действие start_next_block)
+#   ПО ПОСТРОЕНИЮ материализуется по уже ЗАКРЫТОМУ блоку — это нормальный
+#   дизайн Задачи 9 (см. refresh_proposals: _materialize(..., closed_block, ...)),
+#   а не проблема. Добавь сюда start_next_block — и КАЖДОЕ применение
+#   карточки итогов начало бы ошибочно считаться "устаревшим", хотя блок
+#   закрыт ровно тем автопереходом, который эту карточку и породил.
+# - структурные действия (Задача 12) тоже отвечают на карточку по закрытому
+#   блоку — структурная правка меняет упражнение/схему, а не снимок фаз
+#   блока, поэтому дублирования дней календаря или коллизии индекса блока
+#   здесь в принципе не возникает.
+# - decline не меняет блок ни при каком его статусе — проверять нечего.
+_BLOCK_MUTATING_ACTIONS = frozenset({"insert_deload", "close_block", "postpone"})
+
+
 async def _wipe_future_calendar(
     session: AsyncSession, app_user_id: int, block: TrainingBlock, first_future: date
 ) -> None:
@@ -340,6 +373,13 @@ async def apply_decision(
     client_uuid возвращает результат первого решения (status=already_applied),
     чужое решение по уже решённому предложению отвечает конфликтом
     (status=conflict), а не тихо перезаписывает его.
+
+    P0-08, Задача 10, ревью, Critical 1+2: тем же конфликтом (status=conflict,
+    reason=block_closed) отвечаем и на устаревшее ЕЩЁ pending предложение,
+    если действие меняет блок (_BLOCK_MUTATING_ACTIONS), а сам блок уже успел
+    закрыться автопереходом, пока пользователь не отвечал на карточку. Такое
+    предложение при этом переводим в params.STATUS_EXPIRED — см. докстринг
+    _BLOCK_MUTATING_ACTIONS выше за подробности.
     """
     moment = today or date.today()
 
@@ -376,15 +416,57 @@ async def apply_decision(
     if block is None:
         return {"status": "not_found"}
 
+    # P0-08, Задача 10, ревью, Critical 1+2 — см. докстринг _BLOCK_MUTATING_ACTIONS
+    # выше за полное объяснение. proposal.status == pending сам по себе ничего
+    # не говорит о свежести предложения: блок, на который оно ссылается, мог
+    # закрыться автопереходом уже ПОСЛЕ материализации карточки. Действие,
+    # меняющее блок, применённое к закрытому блоку, — это и есть Critical 1/2;
+    # проверяем состояние блока ЗДЕСЬ, до вызова _perform, а не полагаемся на
+    # то, что _perform как-нибудь сама разберётся (она не разбирается).
+    if action in _BLOCK_MUTATING_ACTIONS and block.status != "active":
+        # Карточка устарела — показывать её больше незачем, но и оставлять
+        # pending нельзя: следующий же повтор запроса попал бы сюда же.
+        proposal.status = params.STATUS_EXPIRED
+        await session.commit()
+        return {
+            "status": "conflict",
+            "proposal_id": proposal.id,
+            "block_id": block.id,
+            "reason": "block_closed",
+        }
+
+    # P0-08, Задача 10, ревью, Critical 3: поля решения (status/decided_action/
+    # client_uuid/decided_at) проставляются ЗДЕСЬ, ДО вызова _perform — это
+    # порядок несущей конструкции, а не стиля, и переставлять его обратно
+    # нельзя. _perform для insert_deload/close_block/postpone в конце концов
+    # доходит до SchedulingEngine.generate_block_days, а та КОММИТИТ СЕССИЮ
+    # САМА (см. её докстринг и последнюю строку тела) — до того, как
+    # выполнение вернётся сюда и дойдёт до session.commit() ниже. Если бы
+    # решение проставлялось ПОСЛЕ _perform (как было раньше), между этими
+    # двумя коммитами появлялось окно: правка фаз блока и перегенерированный
+    # календарь уже зафиксированы в БД, а proposal.status всё ещё "pending".
+    # Прервись процесс в этом окне (обрыв соединения, таймаут, рестарт пода) —
+    # повтор запроса (например ретрай мобильного клиента) прошёл бы проверку
+    # "status == pending" заново и выполнил бы то же действие ВТОРОЙ раз. Для
+    # postpone это особенно разрушительно: phases.postpone_deload не защищена
+    # от повторного применения и при втором проходе продлит ту же самую фазу
+    # перед разгрузкой ещё раз — разгрузка уедет вдвое дальше плана. Проставляя
+    # решение ДО _perform, мы добиваемся, что оба факта — "предложение решено"
+    # и "блок изменён" — либо оба попадают в ОДИН И ТОТ ЖЕ commit() внутри
+    # _perform (когда он есть), либо ни один не попадает, если процесс
+    # прервался раньше. Расщепления на два отдельных коммита больше нет.
     if action == "decline":
         proposal.status = params.STATUS_DECLINED
     else:
         proposal.status = params.STATUS_ACCEPTED
-        await _perform(session, app_user_id, block, proposal, action, moment)
 
     proposal.decided_action = action
     proposal.client_uuid = client_uuid
     proposal.decided_at = datetime.now(timezone.utc)
+
+    if action != "decline":
+        await _perform(session, app_user_id, block, proposal, action, moment)
+
     await session.commit()
     return {"status": "applied", "proposal_id": proposal.id, "block_id": block.id}
 
