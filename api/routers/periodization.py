@@ -25,13 +25,12 @@ from api.services.models import (
     TrainingBlock,
 )
 from api.services.periodization import params
-from api.services.periodization.position import position
-from api.services.periodization.repository import (
-    block_state,
-    count_workouts_to_deload,
-    get_active_block,
+from api.services.periodization.repository import get_active_block
+from api.services.periodization.service import (
+    apply_decision,
+    block_coordinate,
+    safe_refresh_proposals,
 )
-from api.services.periodization.service import apply_decision, safe_refresh_proposals
 from api.services.scheduling_engine import SchedulingEngine
 
 router = APIRouter(prefix="/periodization", tags=["Periodization"])
@@ -76,12 +75,6 @@ async def get_periodization_context(
     if block is None:
         return PeriodizationContextRead(block=None, proposals=[])
 
-    state = block_state(block)
-    pos = position(state, today)
-    current = next(
-        (p for p in state.phases if p.phase_number == pos.phase_number), state.phases[-1]
-    )
-
     pending = (
         await db.execute(
             select(PeriodizationProposal).where(
@@ -94,26 +87,14 @@ async def get_periodization_context(
     # Поправка 2 брифа Задачи 11: workouts_to_deload — настоящий подсчёт по
     # repository.count_workouts_to_deload (та же функция, что зовёт
     # repository.collect_decision_input для решателя), а не заглушка None.
-    workouts_to_deload = await count_workouts_to_deload(
-        db, current_user.id, today, pos.days_to_deload
+    # P0-08, Задача 13: сборка координаты вынесена в service.block_coordinate,
+    # чтобы не дублировать её со сборкой в build_context workout-центра.
+    coordinate = await block_coordinate(
+        db, current_user.id, block, today, include_workouts_to_deload=True
     )
 
     return PeriodizationContextRead(
-        block=BlockCoordinateRead(
-            block_id=block.id,
-            block_index=block.block_index,
-            phase_number=pos.phase_number,
-            phase_name=current.name,
-            effort_tier=pos.effort_tier,
-            phase_ordinal=pos.phase_ordinal,
-            phases_total=pos.phases_total,
-            day_in_block=pos.day_in_block,
-            days_to_deload=pos.days_to_deload,
-            workouts_to_deload=workouts_to_deload,
-            is_complete=pos.is_complete,
-            start_date=block.start_date,
-            planned_end_date=block.planned_end_date,
-        ),
+        block=coordinate,
         proposals=[_proposal_out(row) for row in pending],
     )
 

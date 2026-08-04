@@ -10,6 +10,7 @@ from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.schemas.periodization import BlockCoordinateRead
 from api.services.models import (
     Exercise,
     PeriodizationProposal,
@@ -25,12 +26,63 @@ from api.services.periodization.repository import (
     block_state,
     close_and_advance,
     collect_decision_input,
+    count_workouts_to_deload,
     ensure_active_block,
     roll_over_if_complete,
 )
 from api.services.progression import params as progression_params
 
 logger = logging.getLogger(__name__)
+
+
+async def block_coordinate(
+    session: AsyncSession,
+    app_user_id: int,
+    block: TrainingBlock,
+    today: date,
+    *,
+    include_workouts_to_deload: bool = False,
+) -> BlockCoordinateRead:
+    """Координата блока на дату — единая сборка BlockCoordinateRead (P0-08,
+    Задача 13).
+
+    Раньше эта сборка была списана дважды: в api/routers/periodization.py
+    (get_periodization_context) и в брифе Задачи 13 предлагалась третья копия
+    прямо в build_context workout-центра. Вынесена сюда, в склейку
+    периодизации, а не в repository.py — repository.py сознательно не знает
+    про HTTP-схемы (её докстринг: "Ядро остаётся чистым"), а BlockCoordinateRead
+    это уже DTO контракта, а не доменный объект.
+
+    workouts_to_deload считается отдельным запросом (repository.count_workouts_to_deload)
+    и включается по флагу: HTTP-контракту периодизации (Задача 11) он нужен
+    как настоящее число, контексту workout-центра — нет (см. поле =None в
+    брифе Задачи 13), лишний запрос на каждое открытие Home того не стоит.
+    """
+    state = block_state(block)
+    pos = position(state, today)
+    current = next(
+        (p for p in state.phases if p.phase_number == pos.phase_number), state.phases[-1]
+    )
+    workouts_to_deload = None
+    if include_workouts_to_deload:
+        workouts_to_deload = await count_workouts_to_deload(
+            session, app_user_id, today, pos.days_to_deload
+        )
+    return BlockCoordinateRead(
+        block_id=block.id,
+        block_index=block.block_index,
+        phase_number=pos.phase_number,
+        phase_name=current.name,
+        effort_tier=pos.effort_tier,
+        phase_ordinal=pos.phase_ordinal,
+        phases_total=pos.phases_total,
+        day_in_block=pos.day_in_block,
+        days_to_deload=pos.days_to_deload,
+        workouts_to_deload=workouts_to_deload,
+        is_complete=pos.is_complete,
+        start_date=block.start_date,
+        planned_end_date=block.planned_end_date,
+    )
 
 
 def _dedup_key(kind: str, reason_code: str, payload: dict) -> tuple:

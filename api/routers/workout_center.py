@@ -230,6 +230,21 @@ async def build_context(
     # --- АКТИВНАЯ ТРЕНИРОВКА ---
     active_workout = await get_active_workout(session, app_user.id)
 
+    # P0-08, Задача 13: координата блока едет вместе с контекстом, чтобы
+    # клиент не делал второй запрос ради одной строки на экране. Кнопка
+    # переключения фазы (ниже) двигает start_date именно этого блока, а не
+    # AppUserMesocycle.current_phase — второй источник правды рядом с
+    # календарём (см. докстринг set_active_mesocycle_phase).
+    from api.services.periodization.repository import get_active_block
+    from api.services.periodization.service import block_coordinate as _block_coordinate
+
+    active_block_out = None
+    active_block = await get_active_block(session, app_user.id)
+    if active_block is not None:
+        active_block_out = await _block_coordinate(
+            session, app_user.id, active_block, date.today()
+        )
+
     # ВОЗВРАЩАЕМ ИТОГОВЫЙ КОНТЕКСТ
     return WorkoutCenterContextRead(
         selected_split=selected_split,
@@ -261,6 +276,7 @@ async def build_context(
             if active_workout
             else None
         ),
+        active_block=active_block_out,
     )
 
 
@@ -684,6 +700,18 @@ async def finish_workout(
 
     duration_seconds = int((workout.finished_at - workout.started_at).total_seconds())
 
+    # P0-08, Задача 13, Шаг 6 брифа: свежая сессия меняет и усталость, и
+    # картину плато — пересчитываем предложения сразу, чтобы карточка
+    # появилась к следующему открытию Home. safe_*, а не прямой вызов:
+    # завершение тренировки — самый дорогой путь для отказа, и падение
+    # решателя не должно стоить пользователю залогированной сессии (функция
+    # обёрнута в SAVEPOINT, см. её докстринг — падение решателя откатывает
+    # только его собственную работу, а не уже закоммиченное завершение
+    # тренировки выше).
+    from api.services.periodization.service import safe_refresh_proposals
+
+    await safe_refresh_proposals(db, current_app_user.id)
+
     return FinishWorkoutResponse(
         workout_id=workout.id,
         source=workout.source,
@@ -767,25 +795,61 @@ async def set_active_mesocycle_phase(
     session: AsyncSession = Depends(get_db),
     app_user: AppUser = Depends(get_current_app_user)
 ):
-    active_meso_stmt = (
-        select(AppUserMesocycle)
-        .options(joinedload(AppUserMesocycle.mesocycle))
-        .where(
-            AppUserMesocycle.app_user_id == app_user.id,
-            AppUserMesocycle.is_active == True
-        )
-    )
-    result = await session.execute(active_meso_stmt)
-    active_meso = result.scalar_one_or_none()
+    """Ручной переезд на другую фазу активного БЛОКА (P0-08, Задача 13).
 
-    if not active_meso:
-        raise HTTPException(status_code=400, detail="Нет активного мезоцикла")
+    Раньше писался AppUserMesocycle.current_phase — второй источник правды
+    рядом с календарём (снимком фаз блока). С появлением блока их стало бы
+    три, и они гарантированно разъехались бы. Теперь двигается start_date
+    блока так, чтобы сегодня стало первым днём выбранной фазы, а будущее
+    перегенерируется. Поле current_phase остаётся ради обратной совместимости
+    старых сессий (см. WorkoutSession.mesocycle_phase и
+    calculate_exercise_recommendation в ветке без календаря), но источником
+    правды уже не является.
 
-    # Теперь это отработает без ошибок, так как mesocycle уже загружен в память
-    if payload.phase < 1 or payload.phase > active_meso.mesocycle.phases_in_cycle:
-        raise HTTPException(status_code=400, detail="Неверный номер недели")
+    Поправка 3 брифа Задачи 13: offset_days обязан считать длину ТОЛЬКО фаз
+    ПЕРЕД целевой (цикл ниже прерывается до прибавления её собственной
+    длины) — если бы в offset_days попала ещё и сама целевая фаза, start_date
+    уехал бы на один шаг дальше в прошлое, чем нужно, а planned_end_date
+    (start_date + сумма ВСЕХ длин блока - 1) мог бы оказаться РАНЬШЕ
+    сегодняшнего дня. Тогда первый же вызов ensure_active_block (из
+    /workouts/start или построения календаря) увидел бы today > planned_end_date
+    и немедленно закрыл бы блок автопереходом — пользователь нажал «перейти
+    на фазу N», а получил новый блок вместо перемещения по текущему. С
+    offset_days, считающим строго ДО целевой фазы, planned_end_date всегда
+    покрывает today: сумма длин ВСЕХ фаз минус offset_days (то есть длина
+    целевой фазы и всех фаз после неё) не может быть меньше длины самой
+    целевой фазы, а значит planned_end_date = today + (эта сумма - 1) >= today.
+    Тест test_phase_switch_keeps_block_alive_for_ensure_active_block в
+    tests/integration/test_periodization_phase_switch.py проверяет это явно.
+    """
+    from datetime import date as date_cls, timedelta
 
-    active_meso.current_phase = payload.phase
+    from api.services.periodization.phases import from_json
+    from api.services.periodization.repository import get_active_block
+    from api.services.periodization.service import _regenerate_future
+
+    today = date_cls.today()
+    block = await get_active_block(session, app_user.id)
+    if block is None:
+        raise HTTPException(status_code=404, detail="Активный блок не найден")
+
+    snapshot = from_json(block.phases)
+    offset_days = 0
+    target = None
+    for phase in snapshot:
+        if phase.phase_number == payload.phase:
+            target = phase
+            break
+        offset_days += phase.length_days
+
+    if target is None:
+        raise HTTPException(status_code=400, detail="Такой фазы нет в текущем блоке")
+
+    block.start_date = today - timedelta(days=offset_days)
+    total = sum(p.length_days for p in snapshot)
+    block.planned_end_date = block.start_date + timedelta(days=total - 1)
+    await session.flush()
+    await _regenerate_future(session, app_user.id, block, today)
     await session.commit()
 
     return await build_context(session, app_user)
