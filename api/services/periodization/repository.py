@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -28,6 +28,29 @@ from api.services.periodization.types import BlockState, PhaseSnapshot
 from api.services.progression.repository import load_history
 from api.services.progression.rounding import step_kg
 from api.services.progression.state import rebuild_state
+
+
+async def _current_chronic_level(
+    session: AsyncSession, app_user_id: int, moment: date
+) -> Optional[float]:
+    """Хронический уровень нагрузки на момент создания/закрытия блока.
+
+    Кладётся в entry_state/exit_state под служебным ключом "_chronic_level"
+    (P0-08, Задача 9, поправка 4 брифа): перенос плановой разгрузки
+    (decide._postpone) сравнивает ТЕКУЩИЙ chronic_level с базовым значением
+    на старте блока, а до этой поправки записывать базовое значение было
+    попросту некому — build_state_snapshot пишет только словари по
+    упражнениям, ключи которых всегда строковые id (никогда не начинаются с
+    подчёркивания). Подчёркивание в имени ключа — единственное, что отличает
+    служебное поле от ключа-упражнения при последующем чтении entry_state.
+    """
+    from datetime import datetime, time, timezone
+
+    from api.services.fatigue.service import compute_readiness
+
+    moment_dt = datetime.combine(moment, time(12, 0), tzinfo=timezone.utc)
+    report = await compute_readiness(session, app_user_id, now=moment_dt)
+    return report.progression.chronic_level
 
 
 async def get_active_block(
@@ -171,6 +194,17 @@ async def roll_over_if_complete(
     else:
         exit_state = block.entry_state
 
+    # P0-08, Задача 9, поправка 4: перезаписываем _chronic_level ТЕКУЩИМ
+    # значением (а не переносим то, что было в entry_state закрываемого
+    # блока) — это то же значение, которое станет entry_state[_chronic_level]
+    # следующего блока НИЖЕ (тот же словарь передаётся как есть), поэтому
+    # инвариант nxt.entry_state == prev.exit_state (см.
+    # test_chain_rollover_catches_up_to_today) не нарушается.
+    exit_state = {
+        **(exit_state or {}),
+        "_chronic_level": await _current_chronic_level(session, app_user_id, today),
+    }
+
     block.status = "closed"
     block.close_reason = params.CLOSE_COMPLETED
     block.actual_end_date = block.planned_end_date
@@ -254,6 +288,12 @@ async def _close_for_layoff(
         if exercise_ids
         else block.entry_state
     )
+
+    # P0-08, Задача 9, поправка 4 — то же самое, что и в roll_over_if_complete.
+    exit_state = {
+        **(exit_state or {}),
+        "_chronic_level": await _current_chronic_level(session, app_user_id, today),
+    }
 
     block.status = "closed"
     block.close_reason = params.CLOSE_LAYOFF
@@ -389,6 +429,15 @@ async def ensure_active_block(
         app_user_id,
         since=today - timedelta(days=params.SNAPSHOT_WINDOW_DAYS),
     )
+    # P0-08, Задача 9, поправка 4: первый блок пользователя тоже обязан
+    # получить _chronic_level в entry_state — иначе перенос плановой
+    # разгрузки (decide._postpone) на самом первом блоке не сработает
+    # никогда, ровно как и на автопереходах, где та же поправка внесена в
+    # roll_over_if_complete/_close_for_layoff.
+    entry_state = {
+        **(await build_state_snapshot(session, app_user_id, exercise_ids)),
+        "_chronic_level": await _current_chronic_level(session, app_user_id, today),
+    }
     try:
         block = await create_block(
             session,
@@ -399,7 +448,7 @@ async def ensure_active_block(
             user_meso=user_meso,
             user_micro=user_micro,
             split_blueprint_id=active_split.blueprint_id if active_split else None,
-            entry_state=await build_state_snapshot(session, app_user_id, exercise_ids),
+            entry_state=entry_state,
         )
     except IntegrityError:
         # Гонка: схема "проверить — потом создать" не атомарна. Мобильный
@@ -495,3 +544,158 @@ async def build_state_snapshot(
             "completed_sessions": state.completed_sessions,
         }
     return snapshot
+
+
+async def collect_decision_input(
+    session: AsyncSession, app_user_id: int, block: TrainingBlock, today: date
+):
+    """Все входы решателя одним вызовом (P0-08, Задача 9).
+
+    Вызывается и по активному блоку (обычный путь), и по только что
+    закрытому (карточка итогов, см. service.refresh_proposals и поправку 1
+    брифа) — координата блока целиком определяет, какая ветка decide()
+    сработает: BlockState закрытого блока даёт position(...).is_complete=True,
+    потому что today уже позже его planned_end_date.
+    """
+    from datetime import datetime, time, timedelta as _timedelta, timezone
+
+    from api.services.fatigue.service import compute_readiness
+    from api.services.models import PeriodizationProposal, UserCalendarDay, UserObservation
+    from api.services.periodization.position import position
+    from api.services.periodization.types import (
+        DecisionInput,
+        FatigueSignal,
+        PlateauSignal,
+        ReadinessSignal,
+    )
+    from api.services.readiness.repository import load_signals
+    from api.services.readiness.verdict import build_verdict
+
+    state = block_state(block)
+    pos = position(state, today)
+
+    # --- Усталость. Считаем ЗАДОМ НАПЕРЁД и выходим на первом не-fatigued
+    # дне: у большинства пользователей это ровно один запрос к compute_readiness
+    # (тяжёлому — он тянет все подходы за окно), а полная серия из
+    # FATIGUED_DAYS_FOR_DELOAD вызовов нужна лишь тем, кто реально в яме
+    # (все проверенные дни подряд оказались fatigued).
+    fatigued_days = 0
+    sharp_rise = False
+    band_known = False
+    chronic_level = None
+    for offset in range(params.FATIGUED_DAYS_FOR_DELOAD):
+        moment = datetime.combine(today, time(12, 0), tzinfo=timezone.utc) - _timedelta(days=offset)
+        report = await compute_readiness(session, app_user_id, now=moment)
+        if offset == 0:
+            sharp_rise = report.progression.flag == "sharp_rise"
+            chronic_level = report.progression.chronic_level
+            band_known = report.systemic.band != "unknown"
+        if report.systemic.band != "fatigued":
+            break
+        fatigued_days += 1
+
+    baseline = None
+    if block.entry_state:
+        baseline = block.entry_state.get("_chronic_level")
+
+    # --- Плато по упражнениям блока.
+    exercise_ids = await block_exercise_ids(session, app_user_id, block)
+    with_history = 0
+    stalled = 0
+    # P0-08, ревью Задачи 5, Находка: PlateauSignal.stalled_after_deload не
+    # имеет инварианта уникальности на уровне типа — дубликат exercise_id дал
+    # бы два одинаковых структурных предложения на одно и то же упражнение
+    # (_boundary_proposals в decide.py создаёт по одному Proposal на КАЖДЫЙ
+    # элемент этого кортежа, без собственной дедупликации). exercise_ids уже
+    # приходит из block_exercise_ids с .distinct() в SQL, так что дубликатов
+    # структурно быть не должно — но продюсер этого поля именно эта функция,
+    # поэтому дедупликация зафиксирована здесь явно, а не оставлена на
+    # честное слово вызывающей стороны запроса.
+    seen_exercise_ids: set[int] = set()
+    stalled_after_deload: list[int] = []
+    for exercise_id in exercise_ids:
+        history = await load_history(session, app_user_id, exercise_id)
+        st = rebuild_state(history, step_kg((), "kg", None))
+        if st.completed_sessions < 6:
+            continue
+        with_history += 1
+        if not st.stalled:
+            continue
+        stalled += 1
+        # Критерий структурного предложения: разгрузка уже была и не помогла.
+        if any(s.is_deload for s in history.sessions) and exercise_id not in seen_exercise_ids:
+            seen_exercise_ids.add(exercise_id)
+            stalled_after_deload.append(exercise_id)
+
+    # --- Последние вердикты чек-ина.
+    # Не SELECT DISTINCT + ORDER BY observed_at: Postgres запрещает
+    # сортировку по колонке, не входящей в список DISTINCT ("SELECT DISTINCT
+    # ON expressions must match initial ORDER BY expressions" —
+    # InvalidColumnReferenceError). Один client_uuid обычно даёт несколько
+    # строк (sleep, stress, soreness, pain — каждая своей строкой), поэтому
+    # группируем по client_uuid и сортируем по САМОЙ ПОЗДНЕЙ отметке внутри
+    # группы.
+    uuids = (
+        await session.execute(
+            select(UserObservation.client_uuid)
+            .where(
+                UserObservation.app_user_id == app_user_id,
+                UserObservation.client_uuid.isnot(None),
+            )
+            .group_by(UserObservation.client_uuid)
+            .order_by(func.max(UserObservation.observed_at).desc())
+            .limit(params.READINESS_LIMIT_WINDOW)
+        )
+    ).scalars().all()
+    levels: list[str] = []
+    for client_uuid in uuids:
+        verdict = build_verdict(await load_signals(session, app_user_id, client_uuid))
+        if verdict is not None:
+            levels.append(verdict.level)
+
+    # --- Тренировок до плановой разгрузки.
+    workouts_to_deload = None
+    if pos.days_to_deload is not None:
+        deload_start = today + _timedelta(days=pos.days_to_deload)
+        workouts_to_deload = len(
+            (
+                await session.execute(
+                    select(UserCalendarDay.id).where(
+                        UserCalendarDay.app_user_id == app_user_id,
+                        UserCalendarDay.target_date >= today,
+                        UserCalendarDay.target_date < deload_start,
+                        UserCalendarDay.is_rest_day.is_(False),
+                        UserCalendarDay.is_blackout.is_(False),
+                    )
+                )
+            ).scalars().all()
+        )
+
+    used = (
+        await session.execute(
+            select(PeriodizationProposal.id).where(
+                PeriodizationProposal.block_id == block.id,
+                PeriodizationProposal.kind == params.KIND_EARLY_DELOAD,
+                PeriodizationProposal.status == params.STATUS_ACCEPTED,
+            ).limit(1)
+        )
+    ).scalars().first()
+
+    return DecisionInput(
+        position=pos,
+        fatigue=FatigueSignal(
+            fatigued_days=fatigued_days,
+            sharp_rise=sharp_rise,
+            band_known=band_known,
+            chronic_level=chronic_level,
+            chronic_at_block_start=baseline,
+        ),
+        plateau=PlateauSignal(
+            exercises_with_history=with_history,
+            stalled=stalled,
+            stalled_after_deload=tuple(stalled_after_deload),
+        ),
+        readiness=ReadinessSignal(recent_levels=tuple(levels)),
+        early_deload_used=used is not None,
+        workouts_to_planned_deload=workouts_to_deload,
+    )
