@@ -10,6 +10,7 @@ from datetime import date, timedelta
 from typing import Optional
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -91,6 +92,12 @@ async def create_block(
     split_blueprint_id=None,
     entry_state: Optional[dict] = None,
 ) -> TrainingBlock:
+    if not phases:
+        # Пустые фазы дают planned_end_date раньше start_date (total_days=0,
+        # минус один день ниже) — публичная функция не должна тихо создавать
+        # такой блок, даже если сегодня единственный вызывающий (ensure_active_block)
+        # уже отсекает пустой снимок раньше.
+        raise ValueError("Блок без фаз создать нельзя")
     total_days = sum(p.length_days for p in phases)
     block = TrainingBlock(
         app_user_id=app_user_id,
@@ -121,6 +128,13 @@ async def ensure_active_block(
     вывести нельзя (формулы генератора и превью расходятся). Поэтому первый
     блок существующего пользователя начинается сегодня — разовый эффект
     перехода, зафиксированный в спеке §8.
+
+    ВНИМАНИЕ: функция коммитит текущую транзакцию сессии (см. session.commit()
+    ниже — как и SchedulingEngine.launch_and_unroll_plan, ensure_horizon, эта
+    функция коммитит внутри себя, не только флашит). Вызывать её нужно ДО
+    того, как вызывающий код начал накапливать собственные незакоммиченные
+    изменения в этой сессии — иначе они уедут в БД вместе с блоком, задним
+    числом и незапланированно.
     """
     existing = await get_active_block(session, app_user_id)
     if existing is not None:
@@ -169,18 +183,44 @@ async def ensure_active_block(
         )
     ).scalars().first()
 
-    exercise_ids = await recent_exercise_ids(session, app_user_id)
-    block = await create_block(
+    # P0-08, ревью: снимок на входе в блок собирается по недавним
+    # упражнениям, а не по всей истории — на каждое упражнение приходится
+    # отдельная загрузка истории, а смысл снимка зафиксировать состояние
+    # актуальных движений, а не тех, что человек делал год назад.
+    exercise_ids = await recent_exercise_ids(
         session,
         app_user_id,
-        today,
-        block_index=(last_index or 0) + 1,
-        phases=snapshot,
-        user_meso=user_meso,
-        user_micro=user_micro,
-        split_blueprint_id=active_split.blueprint_id if active_split else None,
-        entry_state=await build_state_snapshot(session, app_user_id, exercise_ids),
+        since=today - timedelta(days=params.SNAPSHOT_WINDOW_DAYS),
     )
+    try:
+        block = await create_block(
+            session,
+            app_user_id,
+            today,
+            block_index=(last_index or 0) + 1,
+            phases=snapshot,
+            user_meso=user_meso,
+            user_micro=user_micro,
+            split_blueprint_id=active_split.blueprint_id if active_split else None,
+            entry_state=await build_state_snapshot(session, app_user_id, exercise_ids),
+        )
+    except IntegrityError:
+        # Гонка: схема "проверить — потом создать" не атомарна. Мобильный
+        # клиент на старте дёргает контекст дня и контекст периодизации
+        # одновременно — оба запроса могут увидеть "блока нет", оба посчитать
+        # один и тот же block_index, и второй INSERT падает на уникальном
+        # индексе uq_training_blocks_user_index. Это не баг индекса — это его
+        # работа, гарантия целостности. Но ensure_* обязана ВЕРНУТЬ блок, а
+        # не упасть, когда его только что создал соседний запрос: откатываем
+        # свою неудачную вставку и забираем то, что вставил конкурент.
+        await session.rollback()
+        block = await get_active_block(session, app_user_id)
+        if block is None:
+            # Блока по-прежнему нет — IntegrityError был не про эту гонку
+            # (иначе get_active_block нашёл бы конкурентский блок), а про
+            # что-то другое. Глотать причину в этом случае нельзя.
+            raise
+        return block
     await session.commit()
     return block
 
@@ -239,6 +279,14 @@ async def build_state_snapshot(
         history = await load_history(session, app_user_id, exercise_id)
         if not history.sessions:
             continue
+        # Заглушка шага округления: step_kg((), "kg", None) всегда даёт 2.5 кг,
+        # не глядя на реальное оборудование упражнения и настройки
+        # пользователя. Безвредно СЕГОДНЯ — единственное поле ProgressionState,
+        # зависящее от шага, это consecutive_misses, а оно в снимок ниже не
+        # попадает (см. dict). Если consecutive_misses когда-нибудь добавят в
+        # snapshot — придётся резолвить настоящий шаг по оборудованию
+        # exercise_id (как это делает build_context/refresh_state), а не
+        # хардкодить его здесь.
         state = rebuild_state(history, step_kg((), "kg", None))
         snapshot[str(exercise_id)] = {
             "working_e1rm": state.working_e1rm,
