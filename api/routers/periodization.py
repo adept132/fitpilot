@@ -32,6 +32,7 @@ from api.services.periodization.repository import (
     get_active_block,
 )
 from api.services.periodization.service import apply_decision, safe_refresh_proposals
+from api.services.scheduling_engine import SchedulingEngine
 
 router = APIRouter(prefix="/periodization", tags=["Periodization"])
 
@@ -58,6 +59,18 @@ async def get_periodization_context(
     proposals: []}, а не 404/500."""
     today = local_date or date.today()
     await safe_refresh_proposals(db, current_user.id, today)
+
+    # Ревью, Находка 2: workouts_to_deload ниже считается по УЖЕ
+    # СУЩЕСТВУЮЩИМ строкам UserCalendarDay — а достраивает календарь на
+    # будущее только SchedulingEngine.ensure_horizon, которую до сих пор звал
+    # только роутер календаря (api/routers/calendar.py). Если мобильный клиент
+    # дёрнет этот эндпоинт раньше, чем /calendar/day (или горизонт короче, чем
+    # расстояние до разгрузки), подсчёт ниже увидел бы пустой/недостроенный
+    # хвост календаря и занизил бы число — в пределе до нуля, хотя разгрузка
+    # реально впереди. Зовём ту же самую достройку, что и календарь, ДО
+    # подсчёта — счётчик обязан опираться на достроенный горизонт, а не на
+    # то, что случайно успел сгенерировать другой эндпоинт раньше.
+    await SchedulingEngine.ensure_horizon(db, current_user.id, today)
 
     block = await get_active_block(db, current_user.id)
     if block is None:
@@ -152,7 +165,27 @@ async def get_block_summary(
 
     entry = block.entry_state or {}
     exit_state = block.exit_state or {}
-    ids = sorted({int(k) for k in list(entry.keys()) + list(exit_state.keys()) if not k.startswith("_")})
+
+    def _as_exercise_id(key: str) -> int | None:
+        # Ревью, Находка 3: раньше служебные ключи снимка (напр. "_chronic_level")
+        # отсекались по префиксу подчёркивания — фильтр держался на негласном
+        # соглашении, что ВСЕ остальные ключи снимка это строковые id упражнений.
+        # Пытаемся распарсить ключ напрямую и молча пропускаем то, что не
+        # получилось: снимок — данные, накопленные за месяцы существования блока,
+        # и один неожиданный/будущий служебный ключ не должен ронять 500-й
+        # экран итогов — лучше недосчитать одно упражнение, чем весь эндпоинт.
+        try:
+            return int(key)
+        except (TypeError, ValueError):
+            return None
+
+    ids = sorted(
+        {
+            exercise_id
+            for k in list(entry.keys()) + list(exit_state.keys())
+            if (exercise_id := _as_exercise_id(k)) is not None
+        }
+    )
 
     names: dict[int, str] = {}
     if ids:

@@ -136,6 +136,89 @@ async def test_summary_of_a_foreign_block_is_404(client, db, test_user: AppUser)
     assert response.status_code == 404
 
 
+async def _make_second_user(db, marker: str) -> AppUser:
+    """Второй реальный пользователь, созданный вручную (как в
+    test_readiness_repository.test_save_signals_idempotency_scoped_per_user,
+    около строки 227) — нужен, чтобы проверить именно межпользовательскую
+    изоляцию, а не просто "несуществующий id"."""
+    second_user = AppUser(
+        firebase_uid=f"test-second-{marker}",
+        email=f"test-second-{marker}@example.com",
+        display_name="Second Test User",
+    )
+    db.add(second_user)
+    await db.commit()
+    await db.refresh(second_user)
+    return second_user
+
+
+async def _cleanup_second_user(db, second_user_id: int) -> None:
+    from sqlalchemy import delete
+
+    # TrainingBlock/PeriodizationProposal/Mesocycle/AppUserMesocycle/
+    # AppUserMicrocycle все висят на app_users.id с ON DELETE CASCADE —
+    # удаления самого AppUser достаточно, чтобы унести всё созданное _seed().
+    await db.execute(delete(AppUser).where(AppUser.id == second_user_id))
+    await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_summary_of_another_users_block_is_404(client, db, test_user: AppUser):
+    """Ревью, Находка 1: test_summary_of_a_foreign_block_is_404 запрашивает
+    несуществующий id=999999 — такой тест прошёл бы, даже убери фильтр по
+    app_user_id из запроса вовсе (он просто не найдётся ни для кого). Этот
+    тест — прямая защита межпользовательской изоляции: блок РЕАЛЬНО
+    существует, просто принадлежит ДРУГОМУ пользователю."""
+    marker = uuid.uuid4().hex[:12]
+    second_user = await _make_second_user(db, marker)
+    try:
+        foreign_block = await _seed(db, second_user.id, date.today())
+
+        response = await client.get(f"/periodization/blocks/{foreign_block.id}/summary")
+
+        assert response.status_code == 404
+    finally:
+        await _cleanup_second_user(db, second_user.id)
+
+
+@pytest.mark.asyncio
+async def test_decision_on_another_users_proposal_is_404(client, db, test_user: AppUser):
+    """Симметричный случай для эндпоинта решения: чужое предложение
+    недоступно. Проверяем не только код ответа, но и то, что запрос
+    ДЕЙСТВИТЕЛЬНО ничего не сделал — предложение осталось pending, а не
+    было по-тихому решено запросом от чужого имени."""
+    marker = uuid.uuid4().hex[:12]
+    second_user = await _make_second_user(db, marker)
+    try:
+        foreign_block = await _seed(db, second_user.id, date.today())
+        foreign_proposal = PeriodizationProposal(
+            app_user_id=second_user.id, block_id=foreign_block.id,
+            kind=params.KIND_EARLY_DELOAD, reason_code=params.REASON_FATIGUE_HIGH,
+            payload={"after_phase_number": 1}, status=params.STATUS_PENDING,
+        )
+        db.add(foreign_proposal)
+        await db.commit()
+
+        response = await client.post(
+            f"/periodization/proposals/{foreign_proposal.id}/decision",
+            json={"action": "insert_deload", "client_uuid": uuid.uuid4().hex},
+        )
+
+        assert response.status_code == 404
+
+        refreshed = (
+            await db.execute(
+                select(PeriodizationProposal).where(PeriodizationProposal.id == foreign_proposal.id)
+            )
+        ).scalar_one()
+        assert refreshed.status == params.STATUS_PENDING, (
+            "запрос от чужого имени не должен был применить решение — "
+            "предложение обязано остаться нетронутым"
+        )
+    finally:
+        await _cleanup_second_user(db, second_user.id)
+
+
 # --- Поправки к брифу Задачи 11 ------------------------------------------
 
 
@@ -292,3 +375,64 @@ async def test_summary_is_reachable_for_a_closed_block(client, db, test_user: Ap
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "closed"
+
+
+@pytest.mark.asyncio
+async def test_context_extends_a_short_calendar_before_counting(client, db, test_user: AppUser):
+    """Ревью, Находка 2: workouts_to_deload считается по УЖЕ существующим
+    UserCalendarDay, а достраивает календарь только
+    SchedulingEngine.ensure_horizon — раньше её звал ТОЛЬКО роутер календаря.
+    Если горизонт короче расстояния до разгрузки, счётчик занижал бы число.
+
+    Здесь календарь намеренно сгенерирован лишь на три дня вперёд, а разгрузка
+    начинается через семь. Без вызова ensure_horizon внутри эндпоинта счётчик
+    вернул бы 3 вместо 7.
+
+    Заметьте: полностью ПУСТОЙ календарь здесь не проверяется, и это не
+    упущение. ensure_horizon по построению только ПРОДЛЕВАЕТ существующее
+    расписание (при пустом календаре она выходит сразу — достраивать нечего),
+    а первичное разворачивание делает запуск сплита. Пустой календарь при
+    настроенной периодизации означает, что сплит ещё не запускали, и ноль
+    тренировок до разгрузки там честный ответ."""
+    today = date.today()
+    block = await _seed_with_split(db, test_user.id, today)
+    created = await SchedulingEngine.generate_block_days(
+        db, test_user.id, block, from_date=today, until_date=today + timedelta(days=2)
+    )
+    assert created == 3, "предпосылка теста: календарь короче, чем расстояние до разгрузки"
+    await db.commit()
+
+    response = await client.get("/periodization/context")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["block"]["days_to_deload"] == 7
+    assert body["block"]["workouts_to_deload"] == 7, (
+        "эндпоинт обязан сам достроить горизонт перед подсчётом: иначе "
+        "пользователь увидит 3 тренировки до разгрузки вместо семи"
+    )
+
+
+@pytest.mark.asyncio
+async def test_context_reports_zero_workouts_during_deload(client, db, test_user: AppUser):
+    """Ревью, Находка 4: если текущая фаза блока — сама разгрузка,
+    days_to_deload равен 0 (она уже идёт), и workouts_to_deload обязан быть
+    РОВНО 0 — не null (это означало бы "разгрузки впереди нет" — неверно,
+    она идёт прямо сейчас) и не отрицательным числом."""
+    today = date.today()
+    # Первая фаза "medium" длиной 7 дней уже прошла — блок стартовал 7 дней
+    # назад, поэтому today приходится на 8-й день блока, первый день фазы
+    # "deload" (см. _seed: фазы по 7 дней каждая, medium затем deload).
+    start = today - timedelta(days=7)
+    await _seed(db, test_user.id, start)
+
+    response = await client.get("/periodization/context")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["block"]["effort_tier"] == "deload", "предпосылка теста: сейчас идёт разгрузка"
+    assert body["block"]["days_to_deload"] == 0
+    assert body["block"]["workouts_to_deload"] == 0, (
+        "разгрузка уже идёт — тренировок ДО её начала осталось 0, а не null "
+        "и не отрицательное число"
+    )
