@@ -352,17 +352,41 @@ async def _generate_future_calendar(
 
 
 async def _regenerate_future(
-    session: AsyncSession, app_user_id: int, block: TrainingBlock, today: date
+    session: AsyncSession, app_user_id: int, block: TrainingBlock, today: date,
+    *, include_today: bool = False,
 ) -> None:
-    """Снести и пересобрать дни ЭТОГО ЖЕ блока строго ПОСЛЕ сегодняшнего.
+    """Снести и пересобрать дни ЭТОГО ЖЕ блока строго ПОСЛЕ сегодняшнего
+    (либо, если include_today=True, начиная с сегодняшнего включительно).
 
     Годится для insert_deload/postpone — блок продолжается тем же самым,
     меняется только его будущее. Для закрытия блока (action="close_block")
     это НЕ подходит: там дни старого блока нужно снести, а сгенерировать —
     уже для НОВОГО блока (см. _close_block ниже и её докстринг про
     столкновение дат).
+
+    P0-08, Задача 13, ревью, Critical 2: include_today — специальный случай
+    ИСКЛЮЧИТЕЛЬНО для переключателя фазы (api/routers/workout_center.py,
+    set_active_mesocycle_phase). Переключатель прямо обещает пользователю
+    «сегодня становится первым днём выбранной фазы»: обычная перегенерация
+    (только ПОСЛЕ сегодня) трогает дни строго после today, и если день на
+    сегодня уже материализован (обычный случай для блока, идущего не первый
+    день), без include_today он навсегда остался бы со старой фазой —
+    /calendar/day/{сегодня} и контекст workout-центра показывали бы разные
+    фазы в один и тот же момент, а тренировка, начатая с календаря, унесла бы
+    старую фазу дальше.
+
+    Это НЕ нарушает инвариант «прошлое неприкосновенно» (см.
+    _wipe_future_calendar): неприкосновенны дни ДО сегодняшнего, а
+    сегодняшний день переписывается по прямой команде пользователя, который
+    именно этого и попросил. Перезапись ничего не теряет: UserCalendarDay
+    сейчас не хранит факт (status всегда "planned", ссылки на завершённую
+    сессию нет) — когда P0-09 научит календарь помнить факт, это место
+    придётся пересмотреть, как и сам _wipe_future_calendar.
+
+    insert_deload/postpone (ниже в _perform) НЕ передают include_today —
+    для них поведение остаётся прежним: перегенерация только будущего.
     """
-    first_future = today + timedelta(days=1)
+    first_future = today if include_today else today + timedelta(days=1)
     await _wipe_future_calendar(session, app_user_id, block, first_future)
     await _generate_future_calendar(session, app_user_id, block, first_future)
 

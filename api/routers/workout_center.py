@@ -245,6 +245,18 @@ async def build_context(
             session, app_user.id, active_block, date.today()
         )
 
+    # P0-08, Задача 13, ревью, Critical 1: AppUserMesocycle.current_phase
+    # больше не источник правды после переключения фазы (переключатель
+    # двигает start_date блока и не пишет это поле, см. докстринг
+    # set_active_mesocycle_phase). Если активный блок есть, неделя и имя фазы
+    # обязаны идти из его координаты (снимок фаз блока), а не из
+    # current_phase — иначе один и тот же ответ отдавал бы новую фазу в
+    # active_block.phase_number и замёрзшую старую в этих двух полях. Без
+    # блока (периодизация не настроена) поведение остаётся прежним.
+    if active_block_out is not None:
+        selected_periodization_week = active_block_out.phase_number
+        phase_label = active_block_out.phase_name
+
     # ВОЗВРАЩАЕМ ИТОГОВЫЙ КОНТЕКСТ
     return WorkoutCenterContextRead(
         selected_split=selected_split,
@@ -450,6 +462,24 @@ async def start_workout(
 
         active_block = await ensure_active_block(session, app_user.id, date.today())
         training_block_id = active_block.id if active_block else None
+
+        # P0-08, Задача 13, ревью, Critical 1: если блок есть, фаза свободной
+        # тренировки обязана идти из его координаты, а не из
+        # AppUserMesocycle.current_phase — иначе после переключения фазы
+        # training_block_id указывал бы на блок с одной координатой, а
+        # mesocycle_phase нёс бы старую фазу. Дальше это рассогласование
+        # кормит резолв уровня усилия (resolve_phase_effort_tier) и движок
+        # прогрессии. Без блока (периодизация не настроена) поведение
+        # остаётся прежним — current_phase из current_phase.
+        if active_block is not None:
+            from api.services.periodization.service import (
+                block_coordinate as _block_coordinate,
+            )
+
+            coordinate = await _block_coordinate(
+                session, app_user.id, active_block, date.today()
+            )
+            current_phase = coordinate.phase_number
 
     # === РАСЧЕТ ЦЕЛЕВОГО ОБЪЕМА (SNAPSHOT) ===
     calculated_targets = None
@@ -848,8 +878,26 @@ async def set_active_mesocycle_phase(
     block.start_date = today - timedelta(days=offset_days)
     total = sum(p.length_days for p in snapshot)
     block.planned_end_date = block.start_date + timedelta(days=total - 1)
+
+    # P0-08, Задача 13, ревью, Critical 1: зеркалим current_phase в
+    # AppUserMesocycle следом за координатой блока. Поле оставлено ради
+    # сессий, созданных до P0-08 (см. докстринг выше), источником правды
+    # больше не является — но и расходиться с блоком не должно: это дёшево
+    # и страхует любых читателей current_phase, которых мы могли не найти.
+    active_meso_stmt = select(AppUserMesocycle).where(
+        AppUserMesocycle.app_user_id == app_user.id,
+        AppUserMesocycle.is_active == True,
+    )
+    active_meso = (await session.execute(active_meso_stmt)).scalar_one_or_none()
+    if active_meso is not None:
+        active_meso.current_phase = payload.phase
+
     await session.flush()
-    await _regenerate_future(session, app_user.id, block, today)
+    # P0-08, Задача 13, ревью, Critical 2: include_today=True — см. докстринг
+    # _regenerate_future. Только этот путь (прямая команда пользователя
+    # «перейти на фазу N») имеет право переписать сегодняшний день календаря;
+    # insert_deload/postpone/close_block по-прежнему трогают только будущее.
+    await _regenerate_future(session, app_user.id, block, today, include_today=True)
     await session.commit()
 
     return await build_context(session, app_user)
