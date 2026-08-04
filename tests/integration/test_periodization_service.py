@@ -8,6 +8,13 @@ P0-08, Задача 9. Три поправки к брифу проверяют�
 - Стоимость усталостного сигнала: ранний выход из цикла compute_readiness
   должен реально работать (не более одного вызова, когда первый же день не
   fatigued; ровно FATIGUED_DAYS_FOR_DELOAD вызовов, когда все дни fatigued).
+
+Ревью Задачи 9 добавило ещё две находки со своими тестами:
+- Находка 1: дедупликация early_deload/postpone_deload — по kind, БЕЗ
+  reason_code, иначе смена повода между пересчётами плодит вторую карточку.
+- Находка 3: safe_refresh_proposals откатывает работу через SAVEPOINT, а не
+  session.rollback() целиком — чужие незакоммиченные изменения в той же
+  сессии обязаны пережить упавший пересчёт периодизации.
 """
 from __future__ import annotations
 
@@ -254,4 +261,125 @@ async def test_fatigue_loop_runs_full_window_when_always_fatigued(
 
     assert calls["n"] == params.FATIGUED_DAYS_FOR_DELOAD, (
         "все дни в яме — цикл обязан дойти до конца окна, не больше и не меньше"
+    )
+
+
+# --- Ревью Задачи 9, Находка 1: одна pending-карточка early_deload на блок ----
+
+
+@pytest.mark.asyncio
+async def test_refresh_does_not_add_a_second_early_deload_with_another_reason(
+    db, test_user: AppUser, monkeypatch
+):
+    """Пока пользователь не ответил на карточку досрочной разгрузки, повод
+    между двумя пересчётами может смениться (сегодня высокая усталость, через
+    неделю она прошла, зато набралось плато) — вторая карточка с другим
+    поводом не должна появиться рядом с неотвеченной первой.
+
+    decide() подменяется напрямую (а не собирается реальными физиологическими
+    условиями через collect_decision_input) — так тест не зависит от того,
+    каким именно триггером решатель добрался до early_deload, и проверяет
+    ровно дедупликацию в _materialize, а не decide().
+    """
+    await _seed(db, test_user.id)
+    from api.services.periodization.repository import ensure_active_block
+    from api.services.periodization.types import Proposal
+
+    moment = date(2026, 7, 10)  # внутри блока (2026-07-01..2026-07-14) — не закрыт
+    block = await ensure_active_block(db, test_user.id, date(2026, 7, 1))
+    assert moment <= block.planned_end_date, "тест держится на активном, не закрытом блоке"
+
+    existing = PeriodizationProposal(
+        app_user_id=test_user.id,
+        block_id=block.id,
+        kind=params.KIND_EARLY_DELOAD,
+        reason_code=params.REASON_FATIGUE_HIGH,
+        payload={"fatigued_days": 5, "after_phase_number": 1},
+        status=params.STATUS_PENDING,
+    )
+    db.add(existing)
+    await db.commit()
+
+    monkeypatch.setattr(
+        "api.services.periodization.service.decide",
+        lambda inp: [
+            Proposal(
+                kind=params.KIND_EARLY_DELOAD,
+                reason_code=params.REASON_BLOCK_PLATEAU,
+                payload={"stalled": 2, "of": 3, "after_phase_number": 1},
+            )
+        ],
+    )
+
+    await refresh_proposals(db, test_user.id, moment)
+
+    pending = (
+        await db.execute(
+            select(PeriodizationProposal).where(
+                PeriodizationProposal.block_id == block.id,
+                PeriodizationProposal.kind == params.KIND_EARLY_DELOAD,
+                PeriodizationProposal.status == params.STATUS_PENDING,
+            )
+        )
+    ).scalars().all()
+    assert len(pending) == 1, (
+        "смена повода между пересчётами не должна плодить вторую карточку "
+        "early_deload рядом с неотвеченной первой"
+    )
+    assert pending[0].reason_code == params.REASON_FATIGUE_HIGH, (
+        "неотвеченная карточка должна остаться нетронутой, а не замениться "
+        "новым поводом"
+    )
+
+
+# --- Ревью Задачи 9, Находка 3: safe_refresh_proposals не топит чужую работу -
+
+
+@pytest.mark.asyncio
+async def test_safe_refresh_keeps_caller_changes_on_failure(db, test_user: AppUser):
+    """Голый session.rollback() в except откатывает ВСЮ транзакцию сессии, а
+    не только то, что добавила периодизация — если вызывающий эндпоинт успел
+    накопить в той же сессии собственные незакоммиченные изменения ДО вызова
+    safe_refresh_proposals, упавший пересчёт периодизации утащил бы их за
+    собой. SAVEPOINT (session.begin_nested()) обязан ограничить откат ровно
+    работой периодизации."""
+    from unittest.mock import patch
+
+    from api.services.models import UserObservation
+    from api.services.periodization.repository import ensure_active_block
+    from api.services.periodization.service import safe_refresh_proposals
+
+    await _seed(db, test_user.id)
+    moment = date(2026, 7, 10)  # внутри блока — ни roll_over, ни ensure_active_block
+    block = await ensure_active_block(db, test_user.id, date(2026, 7, 1))  # не коммитят по новой
+    assert moment <= block.planned_end_date
+
+    # Работа вызывающей стороны, накопленная в ЭТОЙ ЖЕ сессии ДО вызова
+    # safe_refresh_proposals и ещё не закоммиченная — ровно сценарий Задач 11/13.
+    observation = UserObservation(
+        app_user_id=test_user.id,
+        kind="morning_readiness",
+        value=1.0,
+    )
+    db.add(observation)
+
+    with patch(
+        "api.services.periodization.service.collect_decision_input",
+        side_effect=RuntimeError("boom"),
+    ):
+        result = await safe_refresh_proposals(db, test_user.id, moment)
+
+    assert result == [], "упавший пересчёт обязан деградировать в пустой список"
+
+    # Коммитит вызывающая сторона (эндпоинт) — как и в реальном сценарии.
+    await db.commit()
+
+    stored = (
+        await db.execute(
+            select(UserObservation).where(UserObservation.app_user_id == test_user.id)
+        )
+    ).scalars().all()
+    assert len(stored) == 1, (
+        "запись вызывающей стороны обязана пережить упавший пересчёт "
+        "периодизации и закоммититься вместе с остальной работой эндпоинта"
     )

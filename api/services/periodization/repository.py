@@ -25,6 +25,7 @@ from api.services.models import (
 )
 from api.services.periodization import params, phases as phase_ops
 from api.services.periodization.types import BlockState, PhaseSnapshot
+from api.services.progression.params import PLATEAU_MIN_SESSIONS
 from api.services.progression.repository import load_history
 from api.services.progression.rounding import step_kg
 from api.services.progression.state import rebuild_state
@@ -557,7 +558,7 @@ async def collect_decision_input(
     сработает: BlockState закрытого блока даёт position(...).is_complete=True,
     потому что today уже позже его planned_end_date.
     """
-    from datetime import datetime, time, timedelta as _timedelta, timezone
+    from datetime import datetime, time, timezone
 
     from api.services.fatigue.service import compute_readiness
     from api.services.models import PeriodizationProposal, UserCalendarDay, UserObservation
@@ -584,7 +585,7 @@ async def collect_decision_input(
     band_known = False
     chronic_level = None
     for offset in range(params.FATIGUED_DAYS_FOR_DELOAD):
-        moment = datetime.combine(today, time(12, 0), tzinfo=timezone.utc) - _timedelta(days=offset)
+        moment = datetime.combine(today, time(12, 0), tzinfo=timezone.utc) - timedelta(days=offset)
         report = await compute_readiness(session, app_user_id, now=moment)
         if offset == 0:
             sharp_rise = report.progression.flag == "sharp_rise"
@@ -616,7 +617,7 @@ async def collect_decision_input(
     for exercise_id in exercise_ids:
         history = await load_history(session, app_user_id, exercise_id)
         st = rebuild_state(history, step_kg((), "kg", None))
-        if st.completed_sessions < 6:
+        if st.completed_sessions < PLATEAU_MIN_SESSIONS:
             continue
         with_history += 1
         if not st.stalled:
@@ -656,7 +657,7 @@ async def collect_decision_input(
     # --- Тренировок до плановой разгрузки.
     workouts_to_deload = None
     if pos.days_to_deload is not None:
-        deload_start = today + _timedelta(days=pos.days_to_deload)
+        deload_start = today + timedelta(days=pos.days_to_deload)
         workouts_to_deload = len(
             (
                 await session.execute(

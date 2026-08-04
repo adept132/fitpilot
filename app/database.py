@@ -154,6 +154,29 @@ _SYNC_INDEXES = [
         'CREATE UNIQUE INDEX IF NOT EXISTS uq_training_blocks_user_index '
         'ON training_blocks (app_user_id, block_index)',
     ),
+    (
+        # P0-08, Задача 9, ревью, Находка 2: _materialize (periodization/service.py)
+        # читает pending-предложения и вставляет новые нетранзакционно —
+        # два конкурентных пересчёта (мобильный клиент на старте дёргает
+        # контекст дня и контекст периодизации одновременно) оба проходят
+        # чтение до чужого коммита и оба вставляют одинаковую строку. Индекс
+        # ловит эту гонку на уровне БД — конкурент падает на IntegrityError,
+        # которую _materialize обрабатывает как "предложение уже создано
+        # соседним запросом".
+        #
+        # Ключ индекса совпадает по смыслу с ключом дедупликации из Находки 1:
+        # COALESCE(payload->>'exercise_id', '') различает structural-предложения
+        # по упражнению (иначе индекс запретил бы второе структурное
+        # предложение по ДРУГОМУ упражнению того же блока), а для
+        # early_deload/postpone_deload/block_boundary payload обычно не несёт
+        # exercise_id — COALESCE даёт им общий '', и по (block_id, kind, '')
+        # может существовать не более одной pending-строки, ровно как и
+        # требует дедупликация по одному kind без reason_code.
+        "uq_periodization_proposals_pending",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_periodization_proposals_pending "
+        "ON periodization_proposals (block_id, kind, COALESCE((payload->>'exercise_id'), '')) "
+        "WHERE status = 'pending'",
+    ),
 ]
 
 
