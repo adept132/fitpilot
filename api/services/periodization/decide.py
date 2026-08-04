@@ -152,10 +152,9 @@ def _boundary_proposals(inp: DecisionInput) -> list[Proposal]:
                 reason_code=params.REASON_STALLED_AFTER_DELOAD,
                 payload={
                     "exercise_id": exercise_id,
-                    # Порядок значим: первый вариант подсвечен по умолчанию.
-                    # Сдвиг диапазона обратим и сохраняет историю, замена — нет.
-                    "options": ["shift_reps", "replace", "keep"],
-                    "default_option": "shift_reps",
+                    # Порядок значим — см. params.STRUCTURAL_OPTIONS.
+                    "options": params.STRUCTURAL_OPTIONS,
+                    "default_option": params.DEFAULT_STRUCTURAL_OPTION,
                 },
             )
         )

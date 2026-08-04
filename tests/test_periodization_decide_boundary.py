@@ -46,6 +46,9 @@ def test_structural_proposal_per_stalled_exercise():
 
 
 def test_structural_proposal_offers_three_ways_out():
+    # Строковые литералы здесь намеренны: тест должен пинать наружный контракт
+    # дословно. Если тест переходит на константы, переименование значения пройдёт
+    # молча, и клиент сломается раньше, чем сломается тест.
     inp = DecisionInput(
         position=_complete_pos(),
         plateau=PlateauSignal(exercises_with_history=4, stalled=1, stalled_after_deload=(7,)),

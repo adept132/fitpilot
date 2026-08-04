@@ -12,6 +12,17 @@ KIND_POSTPONE_DELOAD = "postpone_deload"
 KIND_BLOCK_BOUNDARY = "block_boundary"
 KIND_STRUCTURAL = "structural"
 
+# --- Варианты структурной правки ---
+# Порядок значим: первый вариант подсвечен в интерфейсе по умолчанию.
+# Сдвиг диапазона обратим и сохраняет историю упражнения, замена уводит
+# упражнение в бутстрап (история читается по exercise_id), поэтому по
+# умолчанию предлагается менее разрушительное.
+OPTION_SHIFT_REPS = "shift_reps"
+OPTION_REPLACE = "replace"
+OPTION_KEEP = "keep"
+STRUCTURAL_OPTIONS = [OPTION_SHIFT_REPS, OPTION_REPLACE, OPTION_KEEP]
+DEFAULT_STRUCTURAL_OPTION = OPTION_SHIFT_REPS
+
 # --- Статусы ---
 STATUS_PENDING = "pending"
 STATUS_ACCEPTED = "accepted"
