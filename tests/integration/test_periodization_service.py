@@ -39,6 +39,16 @@ from api.services.periodization.service import refresh_proposals
 
 TODAY = date(2026, 8, 3)
 
+# P0-08, Задача 14: TODAY выше даёт блоку (2026-07-01..2026-07-14) 20 дней
+# просрочки без единой тренировки — с появлением close_stale_block это уже
+# ЗАПАДАЕТ под params.LAYOFF_DAYS_AFTER_BLOCK_END (14 дней) и закрывается
+# как layoff ДО того, как roll_over_if_complete успевает произвести карточку
+# итогов (см. refresh_proposals: close_stale_block вызывается первой). Тесты
+# ниже, проверяющие ИМЕННО карточку итогов обычного автоперехода, обязаны
+# держаться в окне "уже просрочен, но меньше 14 дней без тренировок" — иначе
+# они проверяли бы не автопереход, а другой (тоже правильный) путь закрытия.
+MODERATE_OVERDUE = date(2026, 7, 16)
+
 
 async def _seed(db, user_id: int) -> None:
     meso = Mesocycle(author_id=user_id, name="Т", code=f"t_{uuid.uuid4().hex[:8]}", phases_in_cycle=2)
@@ -66,11 +76,14 @@ async def test_cold_start_produces_no_proposals(db, test_user: AppUser):
 @pytest.mark.asyncio
 async def test_completed_block_materializes_boundary_proposal(db, test_user: AppUser):
     await _seed(db, test_user.id)
-    # Блок из двух недельных фаз, начатый месяц назад, — уже завершён.
+    # Блок из двух недельных фаз, начатый 2026-07-01, — уже завершён
+    # (planned_end_date 2026-07-14), но просрочен меньше чем на
+    # params.LAYOFF_DAYS_AFTER_BLOCK_END (см. MODERATE_OVERDUE выше) — это
+    # обычный автопереход, а не layoff Задачи 14.
     from api.services.periodization.repository import ensure_active_block
 
     block = await ensure_active_block(db, test_user.id, date(2026, 7, 1))
-    result = await refresh_proposals(db, test_user.id, TODAY)
+    result = await refresh_proposals(db, test_user.id, MODERATE_OVERDUE)
 
     assert [p.kind for p in result] == [params.KIND_BLOCK_BOUNDARY]
     stored = (
@@ -88,8 +101,8 @@ async def test_refresh_does_not_duplicate_pending_proposals(db, test_user: AppUs
     from api.services.periodization.repository import ensure_active_block
 
     block = await ensure_active_block(db, test_user.id, date(2026, 7, 1))
-    await refresh_proposals(db, test_user.id, TODAY)
-    await refresh_proposals(db, test_user.id, TODAY)
+    await refresh_proposals(db, test_user.id, MODERATE_OVERDUE)
+    await refresh_proposals(db, test_user.id, MODERATE_OVERDUE)
 
     stored = (
         await db.execute(
@@ -125,7 +138,7 @@ async def test_boundary_proposal_belongs_to_the_closed_block_not_the_new_active_
     from api.services.periodization.repository import ensure_active_block
 
     old_block = await ensure_active_block(db, test_user.id, date(2026, 7, 1))
-    result = await refresh_proposals(db, test_user.id, TODAY)
+    result = await refresh_proposals(db, test_user.id, MODERATE_OVERDUE)
 
     boundary = [p for p in result if p.kind == params.KIND_BLOCK_BOUNDARY]
     assert len(boundary) == 1

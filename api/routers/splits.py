@@ -18,6 +18,7 @@ from api.services.models import (
 from api.schemas.splits import SplitBlueprintOut, DayBlueprintOut, ActivateSplitRequest, CreateCustomSplitRequest, \
     UpdateCustomSplitRequest, CreateCustomDayRequest, UpdateCustomDayRequest, SchedulePreviewRequest, \
     SchedulePreviewResponse, ScheduleLaunchRequest
+from api.services.periodization.service import close_block_for_split_change
 from api.services.scheduling_engine import SchedulingEngine
 from app.database import get_session
 
@@ -371,6 +372,17 @@ async def launch_split(
         UserCalendarDay.target_date >= request.start_date
     )
     await session.execute(delete_stmt)
+
+    # P0-08, Задача 14: сплит сменился — координата активного блока (день
+    # недели, структура сплита) больше не соответствует реальности. Блок
+    # закрывается ЗДЕСЬ, МЕЖДУ удалением будущих дней и разворачиванием
+    # расписания ниже (шаг 7): ensure_active_block внутри
+    # launch_and_unroll_plan обязана увидеть уже НОВЫЙ блок, стартующий с
+    # даты нового сплита, а не старый, у которого координата уже уехала.
+    # Нет активного блока (периодизация не настроена) — функция ничего не
+    # делает, старый путь работает как раньше.
+    await close_block_for_split_change(session, current_user.id, request.start_date)
+
     await session.commit()
 
     # 6. ПРОВЕРЯЕМ ОПЦИОНАЛЬНЫЙ МЕЗОЦИКЛ

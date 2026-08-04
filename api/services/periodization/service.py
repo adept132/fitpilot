@@ -17,6 +17,7 @@ from api.services.models import (
     TrainingBlock,
     UserCalendarDay,
     UserExerciseRepOverride,
+    WorkoutSession,
 )
 from api.services.periodization import params
 from api.services.periodization import phases as phase_ops
@@ -28,6 +29,7 @@ from api.services.periodization.repository import (
     collect_decision_input,
     count_workouts_to_deload,
     ensure_active_block,
+    get_active_block,
     roll_over_if_complete,
 )
 from api.services.progression import params as progression_params
@@ -183,6 +185,136 @@ async def _materialize(
     return created
 
 
+async def close_stale_block(
+    session: AsyncSession, app_user_id: int, today: Optional[date] = None
+) -> Optional[TrainingBlock]:
+    """Закрыть блок, который кончился давно и не получил ни одной сессии
+    (P0-08, Задача 14).
+
+    Молча продлевать блок на месяц простоя нельзя: это сломало бы и итоги
+    (в них попал бы пустой месяц), и триггеры (усталость за простой обнулится,
+    и движок сочтёт человека свежим). Порог params.LAYOFF_DAYS_AFTER_BLOCK_END
+    даёт пользователю время увидеть итоги и решить самому — сразу после конца
+    блока мы ничего не закрываем (см. test_block_just_past_its_end_is_not_closed_yet).
+
+    Поправка 2 брифа Задачи 14 — как это соотносится с автопереходом
+    (repository.roll_over_if_complete/_catch_up_active_block): та цепочка
+    ТОЖЕ умеет закрыть блок как layoff, но только после
+    params.MAX_CHAIN_ROLLOVERS шагов переката ТОГО ЖЕ шаблона подряд — то
+    есть после (MAX_CHAIN_ROLLOVERS × длина блока) дней простоя, которые
+    успевают заодно материализовать несколько пустых промежуточных блоков.
+    Этот порог (14 дней) на порядок короче любой реалистичной длины блока
+    (обычно несколько недель на фазу), поэтому close_stale_block должна
+    успеть сработать раньше, чем цепочка автоперехода вообще наберёт ход —
+    но только если её вызвать ДО roll_over_if_complete/ensure_active_block
+    в одном заходе (см. refresh_proposals ниже: close_stale_block стоит
+    ПЕРВОЙ). Если бы порядок был обратным, roll_over_if_complete успел бы
+    перекатить блок вперёд на следующий же день после planned_end_date, и
+    к моменту вызова close_stale_block блок уже не был бы overdue — порог
+    14 дней по этому пути никогда бы не сработал.
+
+    Пути, которые вызывают ensure_active_block НАПРЯМУЮ, минуя
+    refresh_proposals (SchedulingEngine.ensure_horizon/launch_and_unroll_plan,
+    вызванные не из контекста периодизации), close_stale_block не проходят —
+    для них цепочка автоперехода внутри ensure_active_block остаётся
+    единственным и достаточным предохранителем от бесконечного простоя.
+
+    Закрытие переиспользует repository.close_and_advance (та же функция,
+    что и во ВСЕХ путях закрытия блока — roll_over_if_complete,
+    _close_for_layoff, service._close_block) — второй копии арифметики
+    planned_end_date/переноса снимка здесь нет. next_start_date=moment (а
+    не moment+1, как в service._close_block, рассчитанном на ДОСРОЧНОЕ
+    закрытие ещё живого блока) — ровно тот же контракт, что и у
+    repository._close_for_layoff: блок и так простаивал, начинать заново
+    нужно сегодня, а не откладывать ещё на день.
+    """
+    moment = today or date.today()
+    block = await get_active_block(session, app_user_id)
+    if block is None:
+        return None
+
+    overdue = (moment - block.planned_end_date).days
+    if overdue < params.LAYOFF_DAYS_AFTER_BLOCK_END:
+        return None
+
+    recent = (
+        await session.execute(
+            select(WorkoutSession.id).where(
+                WorkoutSession.app_user_id == app_user_id,
+                WorkoutSession.status == "finished",
+                WorkoutSession.finished_at >= block.planned_end_date,
+            ).limit(1)
+        )
+    ).scalars().first()
+    if recent is not None:
+        return None
+
+    closed = block
+    await close_and_advance(
+        session,
+        app_user_id,
+        block,
+        close_reason=params.CLOSE_LAYOFF,
+        actual_end_date=block.planned_end_date,
+        next_start_date=moment,
+        today=moment,
+    )
+    await session.commit()
+    return closed
+
+
+async def close_block_for_split_change(
+    session: AsyncSession,
+    app_user_id: int,
+    next_start_date: date,
+    *,
+    today: Optional[date] = None,
+) -> Optional[TrainingBlock]:
+    """Смена сплита обнуляет координату блока: день недели и структура
+    расписания уехали, старая координата (день внутри фазы, day_in_block)
+    больше ничего не значит (P0-08, Задача 14).
+
+    Нет активного блока (периодизация не настроена) — закрывать нечего,
+    функция ничего не делает; старый путь запуска сплита работает как раньше
+    (см. test_split_change_without_periodization_still_works).
+
+    Поправка 4 брифа: следующий блок обязан стартовать с ДАТЫ НОВОГО СПЛИТА
+    (next_start_date — это request.start_date вызывающей стороны,
+    api/routers/splits.py) — пользователь может запланировать запуск
+    сплита наперёд, и next_start_date в этом случае в будущем. Но решение
+    "закрывать ли" и снимок состояния на закрытие (chronic_level в
+    exit_state, actual_end_date) обязаны опираться на РЕАЛЬНОЕ сегодня, а
+    не на будущую дату: compute_readiness внутри close_and_advance ищет
+    данные ПО РЕАЛЬНОЙ истории, а истории на дату, которая ещё не
+    наступила, разумеется, нет. Та же развилка (today реальный ≠ дата,
+    которую видит расписание) уже решена в
+    SchedulingEngine.launch_and_unroll_plan — см. её докстринг у вызова
+    ensure_active_block(session, app_user_id, date.today()).
+
+    Не коммитит сессию: вызывается из api/routers/splits.py МЕЖДУ удалением
+    будущих дней календаря и запуском SchedulingEngine.launch_and_unroll_plan
+    (поправка 3 брифа) — оба действия обязаны попасть в ОДИН commit
+    вызывающей стороны, чтобы при сбое между ними откатились оба, а не
+    только одно из двух.
+    """
+    moment = today or date.today()
+    block = await get_active_block(session, app_user_id)
+    if block is None:
+        return None
+
+    closed = block
+    await close_and_advance(
+        session,
+        app_user_id,
+        block,
+        close_reason=params.CLOSE_SPLIT_CHANGED,
+        actual_end_date=moment,
+        next_start_date=next_start_date,
+        today=moment,
+    )
+    return closed
+
+
 async def refresh_proposals(
     session: AsyncSession, app_user_id: int, today: Optional[date] = None
 ) -> list[PeriodizationProposal]:
@@ -222,8 +354,21 @@ async def refresh_proposals(
     Это осознанное поведение, а не упущение: промежуточные блоки пусты
     (тренировок в них не было — человек был в отпуске), а карточка "вот ваши
     итоги" по блоку без единой тренировки была бы чистым шумом.
+
+    P0-08, Задача 14: close_stale_block вызывается ПЕРВОЙ, ДО
+    roll_over_if_complete — она тоже закрывает блок как layoff, но по
+    гораздо более раннему порогу (params.LAYOFF_DAYS_AFTER_BLOCK_END,
+    считаные дни, а не число блоков подряд). Если бы порядок был обратным,
+    roll_over_if_complete успела бы перекатить просроченный блок вперёд
+    раньше, чем close_stale_block увидела бы его overdue — см. её докстринг
+    за подробный разбор. По той же причине, что и закрытые внутри
+    ensure_active_block промежуточные блоки чуть выше, блок, закрытый
+    close_stale_block, карточкой итогов НЕ покрывается — тренировок в нём
+    не было, подводить нечего.
     """
     moment = today or date.today()
+
+    await close_stale_block(session, app_user_id, moment)
 
     closed_block = await roll_over_if_complete(session, app_user_id, moment)
 
