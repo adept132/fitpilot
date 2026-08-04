@@ -24,6 +24,7 @@ from api.services.periodization import phases as phase_ops
 from api.services.periodization.decide import decide
 from api.services.periodization.position import position
 from api.services.periodization.repository import (
+    block_exercise_ids,
     block_state,
     close_and_advance,
     collect_decision_input,
@@ -227,6 +228,11 @@ async def close_stale_block(
     закрытие ещё живого блока) — ровно тот же контракт, что и у
     repository._close_for_layoff: блок и так простаивал, начинать заново
     нужно сегодня, а не откладывать ещё на день.
+
+    ВНИМАНИЕ: функция коммитит текущую транзакцию сессии (см. session.commit()
+    ниже) — как и repository.ensure_active_block/roll_over_if_complete, см.
+    предупреждение в их докстрингах. Вызывать её нужно ДО того, как вызывающий
+    код начал накапливать собственные незакоммиченные изменения в этой сессии.
     """
     moment = today or date.today()
     block = await get_active_block(session, app_user_id)
@@ -290,6 +296,22 @@ async def close_block_for_split_change(
     которую видит расписание) уже решена в
     SchedulingEngine.launch_and_unroll_plan — см. её докстринг у вызова
     ensure_active_block(session, app_user_id, date.today()).
+
+    P0-08, Задача 14, ревью, Находка 2 (задокументировано, НЕ баг): симметрично
+    случаю из поправки 4 выше, next_start_date может оказаться и в ПРОШЛОМ —
+    пользователь указал start_date задним числом. Следующий блок ниже
+    создаётся именно с этой прошлой датой, а значит окажется просроченным
+    СРАЗУ ЖЕ. ensure_active_block, которую тут же вызовет
+    launch_and_unroll_plan (см. ссылку на её докстринг выше), увидит этот
+    свежесозданный блок как активный и немедленно погонит его цепным
+    автопереходом (_catch_up_active_block) вперёд, пока он не догонит
+    сегодняшний день, — по пути материализуя один или несколько пустых
+    промежуточных блоков (тренировок в них по определению не было, блок
+    прожил только что). Это честное следствие устройства блока с фиксированной
+    длиной: блок, начавшийся два месяца назад и длящийся четыре недели, и
+    правда уже закончился. Данные при этом не теряются — просто расходуется
+    несколько пустых записей block_index, ровно как и при любом другом долгом
+    перерыве. См. test_split_change_with_past_start_date_catches_up_to_today.
 
     Не коммитит сессию: вызывается из api/routers/splits.py МЕЖДУ удалением
     будущих дней календаря и запуском SchedulingEngine.launch_and_unroll_plan
@@ -361,14 +383,27 @@ async def refresh_proposals(
     считаные дни, а не число блоков подряд). Если бы порядок был обратным,
     roll_over_if_complete успела бы перекатить просроченный блок вперёд
     раньше, чем close_stale_block увидела бы его overdue — см. её докстринг
-    за подробный разбор. По той же причине, что и закрытые внутри
-    ensure_active_block промежуточные блоки чуть выше, блок, закрытый
-    close_stale_block, карточкой итогов НЕ покрывается — тренировок в нём
-    не было, подводить нечего.
+    за подробный разбор.
+
+    P0-08, Задача 14, ревью, Critical 1: блок, закрытый close_stale_block,
+    ОБЯЗАН получить карточку итогов на общих основаниях — ровно как и блок,
+    закрытый обычным автопереходом чуть ниже. Прежняя версия этого докстринга
+    утверждала обратное ("тренировок в нём не было, подводить нечего"), но
+    это неверно: проверка внутри close_stale_block смотрит только на сессии
+    ПОСЛЕ planned_end_date блока (простаивал ли пользователь достаточно
+    долго), а не на сессии ВНУТРИ блока. Блок вполне мог быть отработан
+    целиком и просто не пойман автопереходом, потому что пользователь не
+    открывал приложение ни разу за params.LAYOFF_DAYS_AFTER_BLOCK_END дней
+    после его конца — до этой правки такой блок закрывался, а карточка
+    итогов молча пропадала.
+    Единственное законное исключение — блок, в котором ДЕЙСТВИТЕЛЬНО не было
+    ни одной завершённой тренировки (block_exercise_ids пуст): подводить
+    нечего, это то же самое правило, по которому промежуточные пустые блоки
+    цепного автоперехода (см. абзац про Находку 6 выше) карточки не получают.
     """
     moment = today or date.today()
 
-    await close_stale_block(session, app_user_id, moment)
+    stale_closed_block = await close_stale_block(session, app_user_id, moment)
 
     closed_block = await roll_over_if_complete(session, app_user_id, moment)
 
@@ -377,6 +412,12 @@ async def refresh_proposals(
         return []
 
     created: list[PeriodizationProposal] = []
+
+    if stale_closed_block is not None:
+        if await block_exercise_ids(session, app_user_id, stale_closed_block):
+            created.extend(
+                await _materialize(session, app_user_id, stale_closed_block, moment)
+            )
 
     if closed_block is not None:
         created.extend(await _materialize(session, app_user_id, closed_block, moment))
