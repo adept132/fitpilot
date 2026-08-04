@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.services.models import (
+    Exercise,
     PeriodizationProposal,
     TrainingBlock,
     UserCalendarDay,
@@ -577,8 +578,28 @@ async def _shift_reps(
         )
     ).scalars().first()
 
-    base_min = current.rep_min if current else 8
-    base_max = current.rep_max if current else 12
+    if current is not None:
+        base_min, base_max = current.rep_min, current.rep_max
+    else:
+        # Находка 2/3 ревью Задачи 12: базой первого сдвига обязан быть
+        # РЕАЛЬНЫЙ диапазон упражнения, а не литералы 8/12 (Находка 3 —
+        # магическое число в логике, запрещённое правилами проекта). У
+        # тяжёлой базы (fatigue_tier=1) запасной диапазон — 6-8: сдвиг от
+        # литералов 8/12 дал бы 5-9, и верхняя граница ВЫРОСЛА БЫ — прямо
+        # противоположно смыслу действия "стало тяжело, сузим диапазон".
+        # TIER_REP_FALLBACK[2] — тот же запасной диапазон второго тира, что
+        # resolvers.py подставляет по умолчанию, когда активного микроцикла
+        # нет; здесь он служит той же цели на случай, если exercise_id не
+        # нашёлся в справочнике упражнений (не должно случаться, но не
+        # повод уронить применение решения).
+        fatigue_tier = (
+            await session.execute(
+                select(Exercise.fatigue_tier).where(Exercise.id == exercise_id)
+            )
+        ).scalar_one_or_none()
+        base_min, base_max = progression_params.TIER_REP_FALLBACK.get(
+            fatigue_tier, progression_params.TIER_REP_FALLBACK[2]
+        )
     step = progression_params.REP_SHIFT_STEP
     new_min = max(progression_params.REP_SHIFT_MIN, base_min - step)
     new_max = max(new_min + 1, base_max - step)

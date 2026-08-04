@@ -93,6 +93,52 @@ async def test_shift_reps_writes_a_personal_override(db, test_user: AppUser):
 
 
 @pytest.mark.asyncio
+async def test_shift_uses_the_exercise_tier_range_as_base(db, test_user: AppUser):
+    """Находка 2/3 ревью Задачи 12: без прежнего override базой сдвига
+    обязан быть запасной диапазон fatigue_tier ЭТОГО упражнения, а не
+    литералы 8/12. Упражнение первого тира (запасной диапазон 6-8, тяжёлая
+    база): сдвиг литералами 8/12 дал бы 5-9 — верхняя граница ВЫРОСЛА бы,
+    хотя пользователь просил обратное ("стало тяжело, сузим диапазон").
+    Правильный результат — ОБЕ границы ниже исходного тирового диапазона."""
+    block = await _seed(db, test_user.id)
+    ex = await _make_exercise(db, test_user.id)
+    ex.fatigue_tier = 1
+    db.add(ex)
+    await db.commit()
+
+    proposal = PeriodizationProposal(
+        app_user_id=test_user.id, block_id=block.id, kind=params.KIND_STRUCTURAL,
+        reason_code=params.REASON_STALLED_AFTER_DELOAD,
+        payload={"exercise_id": ex.id, "options": ["shift_reps", "replace", "keep"]},
+        status=params.STATUS_PENDING,
+    )
+    db.add(proposal)
+    await db.commit()
+
+    result = await apply_decision(
+        db, test_user.id, proposal.id, "shift_reps",
+        client_uuid=uuid.uuid4().hex,
+    )
+    assert result["status"] == "applied"
+
+    override = (
+        await db.execute(
+            select(UserExerciseRepOverride).where(
+                UserExerciseRepOverride.app_user_id == test_user.id,
+                UserExerciseRepOverride.exercise_id == ex.id,
+            )
+        )
+    ).scalars().first()
+    assert override is not None
+    tier_min, tier_max = progression_params.TIER_REP_FALLBACK[1]
+    assert override.rep_min < tier_min, "нижняя граница должна опуститься, а не вырасти"
+    assert override.rep_max < tier_max, "верхняя граница должна опуститься, а не вырасти"
+
+    await db.delete(override)
+    await db.commit()
+
+
+@pytest.mark.asyncio
 async def test_keep_writes_nothing(db, test_user: AppUser):
     block = await _seed(db, test_user.id)
     proposal = PeriodizationProposal(
@@ -271,6 +317,51 @@ async def test_recommendation_plan_override_wins_over_user_override(db, test_use
         rec = recs[0]
         assert (rec["recommended_rep_min"], rec["recommended_rep_max"]) == (6, 8)
         assert rec["rep_range_source"] == progression_params.REP_SOURCE_PLAN
+    finally:
+        await db.delete(override)
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_recommendation_plan_branch_applies_user_override_when_plan_has_no_reps(
+    db, test_user: AppUser
+):
+    """Находка 4 ревью Задачи 12: test_recommendation_plan_override_wins_over_user_override
+    проходит, даже если вызов персонального override целиком убрать из ветки
+    плана — override_reps плана затирает результат безусловно и не даёт этому
+    тесту заметить пропажу. Этот тест стережёт именно вызов: у позиции плана
+    НЕТ собственного override_reps, поэтому единственный источник итогового
+    диапазона внутри ветки плана — персональное правило. Без вызова
+    _apply_user_override в ветке плана здесь остался бы диапазон матрицы
+    (fatigue_tier=2 -> 8-12), а не override (20-25)."""
+    await _seed(db, test_user.id)
+    ex = await _make_exercise(db, test_user.id)
+    ex.fatigue_tier = 2
+
+    plan = WorkoutPlan(
+        app_user_id=test_user.id, name="Тестовый план без override_reps",
+        day_tag="push", micro_tag="medium", meso_tag="medium",
+    )
+    db.add(plan)
+    await db.flush()
+
+    plan_ex = WorkoutPlanExercise(
+        plan_id=plan.id, exercise_id=ex.id, order_index=0, target_sets=3,
+    )
+    db.add(plan_ex)
+
+    override = UserExerciseRepOverride(
+        app_user_id=test_user.id, exercise_id=ex.id, rep_min=20, rep_max=25,
+    )
+    db.add(override)
+    await db.commit()
+
+    try:
+        recs = await calculate_exercise_recommendations(db, test_user.id, plan_id=plan.id)
+        assert len(recs) == 1
+        rec = recs[0]
+        assert (rec["recommended_rep_min"], rec["recommended_rep_max"]) == (20, 25)
+        assert rec["rep_range_source"] == progression_params.REP_SOURCE_USER
     finally:
         await db.delete(override)
         await db.commit()
