@@ -143,6 +143,86 @@ async def create_block(
     return block
 
 
+async def close_and_advance(
+    session: AsyncSession,
+    app_user_id: int,
+    block: TrainingBlock,
+    *,
+    close_reason: str,
+    actual_end_date: date,
+    next_start_date: date,
+    today: date,
+) -> TrainingBlock:
+    """Закрыть блок и тут же открыть следующий по ТОМУ ЖЕ шаблону, перенеся
+    состояние вперёд.
+
+    Общая часть трёх путей закрытия блока: автоматического переката
+    (roll_over_if_complete), закрытия по превышению цепочки перекатов
+    (_close_for_layoff) и решения пользователя закрыть блок досрочной
+    разгрузкой (service.apply_decision, action="close_block", P0-08,
+    Задача 10). Раньше первые два пути дублировали эту логику друг у друга;
+    бриф Задачи 10 предлагал завести ТРЕТЬЮ копию прямо в service.py —
+    поправка 2 брифа велит вместо этого переиспользовать существующее.
+    Выделяем сюда общую часть, а не множим копии: арифметика
+    planned_end_date (внутри create_block) и перенос снимка состояния —
+    ровно то, что "разъезжается", если писать раздельно.
+
+    Не коммитит сессию — у вызывающих сторон разные контракты по коммиту:
+    roll_over_if_complete и _close_for_layoff коммитят сами сразу после
+    вызова (как и раньше), а apply_decision коммитит один раз в самом конце,
+    после того как ещё и перегенерирует календарь следующего блока.
+    """
+    # Снимок состояния на выход берём по упражнениям, тренированным ВНУТРИ
+    # закрываемого блока — так он честно отражает прогрессию именно за этот
+    # блок. Если блок закрылся без единой тренировки внутри него, снимать
+    # нечего — состояние не изменилось с момента входа в блок, переносим
+    # entry_state закрываемого блока как есть (см. roll_over_if_complete,
+    # откуда это правило унаследовано).
+    exercise_ids = await block_exercise_ids(session, app_user_id, block)
+    if exercise_ids:
+        exit_state = await build_state_snapshot(session, app_user_id, exercise_ids)
+    else:
+        exit_state = block.entry_state
+
+    # P0-08, Задача 9, поправка 4: перезаписываем _chronic_level ТЕКУЩИМ
+    # значением — тем же самым, которое станет entry_state[_chronic_level]
+    # следующего блока ниже (тот же словарь передаётся как есть), поэтому
+    # инвариант nxt.entry_state == prev.exit_state не нарушается.
+    exit_state = {
+        **(exit_state or {}),
+        "_chronic_level": await _current_chronic_level(session, app_user_id, today),
+    }
+
+    block.status = "closed"
+    block.close_reason = close_reason
+    block.actual_end_date = actual_end_date
+    block.exit_state = exit_state
+
+    # Арифметику planned_end_date (и защиту от пустых фаз) не повторяем —
+    # переиспользуем create_block, передав ей фазы закрываемого блока, а
+    # ссылки на мезо-/микроцикл и сплит, которые create_block иначе взяла бы
+    # из ТЕКУЩИХ активных настроек пользователя, переопределяем полями
+    # закрываемого блока сразу после вызова: активные настройки на момент
+    # закрытия могли уже уйти вперёд, а следующий блок обязан остаться на
+    # том же шаблоне, что и закрытый.
+    next_block = await create_block(
+        session,
+        app_user_id,
+        next_start_date,
+        block_index=block.block_index + 1,
+        phases=phase_ops.from_json(block.phases),
+        user_meso=None,
+        user_micro=None,
+        split_blueprint_id=block.split_blueprint_id,
+        entry_state=exit_state,
+    )
+    next_block.user_mesocycle_id = block.user_mesocycle_id
+    next_block.mesocycle_id = block.mesocycle_id
+    next_block.user_microcycle_id = block.user_microcycle_id
+    next_block.microcycle_length = block.microcycle_length
+    return next_block
+
+
 async def roll_over_if_complete(
     session: AsyncSession, app_user_id: int, today: date
 ) -> Optional[TrainingBlock]:
@@ -177,68 +257,24 @@ async def roll_over_if_complete(
     if today <= block.planned_end_date:
         return None
 
-    # Снимок состояния на выход берём по упражнениям, тренированным ВНУТРИ
-    # этого блока — так он честно отражает прогрессию именно за этот блок.
-    # P0-08, повторное ревью Задачи 7, Находка 1: если блок прошёл целиком
-    # без единой тренировки (типичный случай для промежуточных блоков
-    # цепочки — их никто не тренировал, потому что человек был в отпуске),
-    # снимать нечего: состояние не изменилось с момента входа в блок, а
-    # build_state_snapshot делает отдельную загрузку истории на каждое
-    # упражнение — на пустом блоке это лишние запросы на ровном месте.
-    # Поэтому просто переносим entry_state закрываемого блока как есть,
-    # вместо того чтобы (как раньше) искать fallback по недавним
-    # упражнениям — тот fallback был честен для одиночного перехода, но
-    # разоряется на цепочке из нескольких пустых блоков подряд.
-    exercise_ids = await block_exercise_ids(session, app_user_id, block)
-    if exercise_ids:
-        exit_state = await build_state_snapshot(session, app_user_id, exercise_ids)
-    else:
-        exit_state = block.entry_state
-
-    # P0-08, Задача 9, поправка 4: перезаписываем _chronic_level ТЕКУЩИМ
-    # значением (а не переносим то, что было в entry_state закрываемого
-    # блока) — это то же значение, которое станет entry_state[_chronic_level]
-    # следующего блока НИЖЕ (тот же словарь передаётся как есть), поэтому
-    # инвариант nxt.entry_state == prev.exit_state (см.
-    # test_chain_rollover_catches_up_to_today) не нарушается.
-    exit_state = {
-        **(exit_state or {}),
-        "_chronic_level": await _current_chronic_level(session, app_user_id, today),
-    }
-
-    block.status = "closed"
-    block.close_reason = params.CLOSE_COMPLETED
-    block.actual_end_date = block.planned_end_date
-    block.exit_state = exit_state
-
-    # СТРОГО planned_end_date + 1, а не today: иначе при заходе в приложение
-    # спустя несколько дней после конца блока в календаре образовалась бы
-    # дыра между старой границей и стартом нового блока. Долгий перерыв —
-    # отдельный случай со своим правилом (params.MAX_CHAIN_ROLLOVERS выше).
-    next_start = block.planned_end_date + timedelta(days=1)
-    # P0-08, повторное ревью Задачи 7, Находка 4: арифметику planned_end_date
-    # (и защиту от пустых фаз) не повторяем — переиспользуем create_block,
-    # передав ей фазы закрываемого блока, а ссылки на мезо-/микроцикл и
-    # сплит, которые create_block иначе взяла бы из ТЕКУЩИХ активных
-    # настроек пользователя, переопределяем полями закрываемого блока СРАЗУ
-    # после вызова: активные настройки на момент переката могли уже уйти
-    # вперёд, а следующий блок цепочки обязан остаться на том же шаблоне,
-    # что и закрытый.
-    next_block = await create_block(
+    # P0-08, Задача 10: тело закрытия+переноса состояния вынесено в
+    # close_and_advance — та же логика нужна и _close_for_layoff ниже, и
+    # пользовательскому решению "закрыть блок досрочной разгрузкой"
+    # (service.apply_decision, action="close_block"). СТРОГО
+    # planned_end_date + 1, а не today, для next_start_date: иначе при
+    # заходе в приложение спустя несколько дней после конца блока в
+    # календаре образовалась бы дыра между старой границей и стартом нового
+    # блока. Долгий перерыв — отдельный случай со своим правилом
+    # (params.MAX_CHAIN_ROLLOVERS выше).
+    await close_and_advance(
         session,
         app_user_id,
-        next_start,
-        block_index=block.block_index + 1,
-        phases=phase_ops.from_json(block.phases),
-        user_meso=None,
-        user_micro=None,
-        split_blueprint_id=block.split_blueprint_id,
-        entry_state=exit_state,
+        block,
+        close_reason=params.CLOSE_COMPLETED,
+        actual_end_date=block.planned_end_date,
+        next_start_date=block.planned_end_date + timedelta(days=1),
+        today=today,
     )
-    next_block.user_mesocycle_id = block.user_mesocycle_id
-    next_block.mesocycle_id = block.mesocycle_id
-    next_block.user_microcycle_id = block.user_microcycle_id
-    next_block.microcycle_length = block.microcycle_length
     await session.commit()
     # Возвращаем ЗАКРЫТЫЙ блок — он понадобится Задаче 9, чтобы по нему
     # создать карточку итогов.
@@ -281,44 +317,18 @@ async def _close_for_layoff(
     Снимок на выход — по тому же правилу, что и в roll_over_if_complete: раз
     блок дошёл до предела перекатов, тренировок в нём заведомо не было, брать
     состояние по recent_exercise_ids бессмысленно — переносим entry_state как
-    есть.
+    есть. Тело закрытия+переноса — общее с roll_over_if_complete, см.
+    close_and_advance (P0-08, Задача 10).
     """
-    exercise_ids = await block_exercise_ids(session, app_user_id, block)
-    exit_state = (
-        await build_state_snapshot(session, app_user_id, exercise_ids)
-        if exercise_ids
-        else block.entry_state
-    )
-
-    # P0-08, Задача 9, поправка 4 — то же самое, что и в roll_over_if_complete.
-    exit_state = {
-        **(exit_state or {}),
-        "_chronic_level": await _current_chronic_level(session, app_user_id, today),
-    }
-
-    block.status = "closed"
-    block.close_reason = params.CLOSE_LAYOFF
-    block.actual_end_date = block.planned_end_date
-    block.exit_state = exit_state
-
-    # Как и в roll_over_if_complete (Находка 4) — переиспользуем create_block
-    # вместо повторения арифметики planned_end_date, ссылки на шаблон
-    # переопределяем полями закрываемого блока после вызова.
-    next_block = await create_block(
+    next_block = await close_and_advance(
         session,
         app_user_id,
-        today,
-        block_index=block.block_index + 1,
-        phases=phase_ops.from_json(block.phases),
-        user_meso=None,
-        user_micro=None,
-        split_blueprint_id=block.split_blueprint_id,
-        entry_state=exit_state,
+        block,
+        close_reason=params.CLOSE_LAYOFF,
+        actual_end_date=block.planned_end_date,
+        next_start_date=today,
+        today=today,
     )
-    next_block.user_mesocycle_id = block.user_mesocycle_id
-    next_block.mesocycle_id = block.mesocycle_id
-    next_block.user_microcycle_id = block.user_microcycle_id
-    next_block.microcycle_length = block.microcycle_length
     await session.commit()
     return next_block
 
