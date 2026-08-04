@@ -1027,6 +1027,33 @@ class TrainingBlock(Base):
     )
 
 
+class UserExerciseRepOverride(Base):
+    """Персональный диапазон повторов на упражнение (P0-08, структурная правка).
+
+    Приоритет источника: plan_override > user_override > microcycle > fallback.
+    Выше микроцикла, потому что это осознанный ответ пользователя на плато
+    конкретного упражнения; ниже плана, потому что план задаётся под конкретный
+    день и остаётся последним словом.
+
+    Уникальность пары (app_user_id, exercise_id) держится индексом
+    uq_user_exercise_rep_overrides_user_exercise (app/database.py, _SYNC_INDEXES) —
+    init_db не создаёт ограничения на ALTER-колонки, поэтому индекс заведён
+    отдельно, тем же способом, что и uq_periodization_proposals_pending.
+    """
+    __tablename__ = "user_exercise_rep_overrides"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    exercise_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    rep_min: Mapped[int] = mapped_column(Integer, nullable=False)
+    rep_max: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class PeriodizationProposal(Base):
     """Решение движка, ожидающее подтверждения пользователя (P0-08).
 

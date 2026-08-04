@@ -52,8 +52,18 @@ PERCENT_TABLE: dict[str, list[tuple[float, int, str]]] = {
 TIER_REP_FALLBACK: dict[int, tuple[int, int]] = {1: (6, 8), 2: (8, 12), 3: (12, 15)}
 
 REP_SOURCE_PLAN = "plan_override"
+REP_SOURCE_USER = "user_override"
 REP_SOURCE_MICROCYCLE = "microcycle"
 REP_SOURCE_FALLBACK = "tier_fallback"
+
+# --- P0-08: структурная правка «сдвиг диапазона повторов» ---
+# На сколько повторов сдвигается диапазон при структурной правке «зайти в
+# другом режиме». Три — это переход из 8–12 в 5–9: режим меняется заметно,
+# но упражнение остаётся тем же движением.
+REP_SHIFT_STEP = 3
+# Ниже трёх повторов диапазон перестаёт быть гипертрофийным и становится
+# силовым синглом — за эту границу автоматика не заходит.
+REP_SHIFT_MIN = 3
 
 # --- Схемы (идентификаторы) ---
 SCHEME_E1RM_FACTOR = "e1rm_factor"

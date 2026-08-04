@@ -177,6 +177,23 @@ _SYNC_INDEXES = [
         "ON periodization_proposals (block_id, kind, COALESCE((payload->>'exercise_id'), '')) "
         "WHERE status = 'pending'",
     ),
+    (
+        # P0-08, Задача 12: структурная правка «сдвиг диапазона повторов»
+        # (periodization/service.py, действие shift_reps) сначала читает
+        # существующий override, потом решает вставить новую строку или
+        # обновить найденную. Без уникальности пары (app_user_id, exercise_id)
+        # два конкурентных apply_decision по РАЗНЫМ pending-предложениям на
+        # одно и то же упражнение (гонка того же рода, что и у
+        # uq_periodization_proposals_pending выше) оба увидят "override ещё
+        # нет" и оба вставят СВОЮ строку — на выходе два override на одну
+        # пару пользователь+упражнение, и какой из них увидит движок
+        # рекомендаций (_load_rep_overrides), зависит от порядка чтения.
+        # Индекс ловит это на уровне БД; service.py обрабатывает конфликт как
+        # "конкурент уже применил сдвиг" (см. её докстринг у shift_reps).
+        "uq_user_exercise_rep_overrides_user_exercise",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_user_exercise_rep_overrides_user_exercise "
+        "ON user_exercise_rep_overrides (app_user_id, exercise_id)",
+    ),
 ]
 
 

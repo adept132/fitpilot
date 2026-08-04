@@ -10,7 +10,12 @@ from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.services.models import PeriodizationProposal, TrainingBlock, UserCalendarDay
+from api.services.models import (
+    PeriodizationProposal,
+    TrainingBlock,
+    UserCalendarDay,
+    UserExerciseRepOverride,
+)
 from api.services.periodization import params
 from api.services.periodization import phases as phase_ops
 from api.services.periodization.decide import decide
@@ -22,6 +27,7 @@ from api.services.periodization.repository import (
     ensure_active_block,
     roll_over_if_complete,
 )
+from api.services.progression import params as progression_params
 
 logger = logging.getLogger(__name__)
 
@@ -518,8 +524,81 @@ async def _perform(
         await session.flush()
         await _regenerate_future(session, app_user_id, block, today)
 
-    elif action in (params.OPTION_SHIFT_REPS, params.OPTION_REPLACE, params.OPTION_KEEP):
-        # Структурные действия обрабатываются в Задаче 12; здесь фиксируем
-        # только решение (proposal.status/decided_action выше), чтобы
-        # предложение не висело pending вечно.
+    elif action == params.OPTION_SHIFT_REPS:
+        await _shift_reps(session, app_user_id, proposal)
+
+    elif action in (params.OPTION_REPLACE, params.OPTION_KEEP):
+        # replace уводит пользователя в существующий флоу умной замены на
+        # клиенте — здесь фиксируется только само решение. keep не делает
+        # ничего по определению.
         return
+
+
+async def _shift_reps(
+    session: AsyncSession, app_user_id: int, proposal: PeriodizationProposal
+) -> None:
+    """Действие «сдвиг диапазона повторов» (Задача 12): заводит или ужимает
+    персональный override для упражнения, вставшего даже после разгрузки.
+
+    Идемпотентность ПОВТОРА ОДНОГО И ТОГО ЖЕ решения (двойной тап, повтор из
+    офлайн-очереди) обеспечивает не эта функция, а вызывающий её
+    apply_decision: решение (proposal.status/client_uuid) коммитится в ОДНОЙ
+    транзакции с этой записью (см. комментарий у Critical 3 выше), поэтому
+    либо оба факта попадают в БД вместе, либо ни один. Повторный вызов с тем
+    же proposal_id находит status != pending и возвращает already_applied/
+    conflict, не доходя до _perform повторно.
+
+    ДВА РАЗНЫХ pending-предложения по одному и тому же упражнению (упражнение
+    встало во ВТОРОЙ раз, уже после первого сдвига) — легитимный случай, и
+    диапазон сдвигается ЕЩЁ РАЗ: это не дубликат, а второе самостоятельное
+    решение пользователя. Не уехать в отрицательные/бессмысленные повторы при
+    этом не даёт REP_SHIFT_MIN — второй (и любой следующий) сдвиг сходится к
+    полу и там останавливается, а не убывает бесконечно.
+
+    Конкурентное ПЕРВОЕ создание override для одного и того же упражнения с
+    ДВУХ разных pending-предложений (гонка, а не последовательность) ловит
+    уникальный индекс uq_user_exercise_rep_overrides_user_exercise
+    (app/database.py) через SAVEPOINT — так же, как _materialize ловит гонку
+    вставки предложений: проигравший транзакцию считает, что сдвиг уже
+    применён конкурентом, и своего сдвига не делает (иначе на одну пару
+    пользователь+упражнение легло бы две строки, и какую из них видит
+    _load_rep_overrides — вопрос порядка чтения).
+    """
+    exercise_id = proposal.payload.get("exercise_id")
+    if exercise_id is None:
+        return
+
+    current = (
+        await session.execute(
+            select(UserExerciseRepOverride).where(
+                UserExerciseRepOverride.app_user_id == app_user_id,
+                UserExerciseRepOverride.exercise_id == exercise_id,
+            )
+        )
+    ).scalars().first()
+
+    base_min = current.rep_min if current else 8
+    base_max = current.rep_max if current else 12
+    step = progression_params.REP_SHIFT_STEP
+    new_min = max(progression_params.REP_SHIFT_MIN, base_min - step)
+    new_max = max(new_min + 1, base_max - step)
+
+    if current is not None:
+        current.rep_min = new_min
+        current.rep_max = new_max
+        return
+
+    try:
+        async with session.begin_nested():
+            session.add(
+                UserExerciseRepOverride(
+                    app_user_id=app_user_id, exercise_id=exercise_id,
+                    rep_min=new_min, rep_max=new_max,
+                )
+            )
+            await session.flush()
+    except IntegrityError:
+        # Конкурентное предложение по тому же упражнению уже создало override
+        # первым — см. докстринг выше. Свой сдвиг не делаем, чтобы не
+        # получить вторую строку на ту же пару пользователь+упражнение.
+        pass
