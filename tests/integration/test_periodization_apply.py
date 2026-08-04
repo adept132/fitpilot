@@ -26,10 +26,16 @@ BLOCK_START = date(2026, 8, 3)
 
 
 async def _seed(db, user_id: int):
+    # ВНИМАНИЕ: третья фаза — "hard", а НЕ "deload". phase_ops.insert_deload
+    # (Задача 9) отказывается вставлять разгрузку прямо перед уже
+    # существующей разгрузкой (см. её защитную ветку и
+    # tests/test_periodization_phases.py::test_insert_deload_before_existing_deload_changes_nothing)
+    # — с шаблоном easy/medium/deload вставка после phase_number=2 была бы
+    # молчаливым no-op, а не правкой снимка, которую эти тесты проверяют.
     meso = Mesocycle(author_id=user_id, name="Т", code=f"t_{uuid.uuid4().hex[:8]}", phases_in_cycle=3)
     db.add(meso)
     await db.flush()
-    for number, tier in enumerate(["easy", "medium", "deload"], start=1):
+    for number, tier in enumerate(["easy", "medium", "hard"], start=1):
         db.add(MesocyclePhase(mesocycle_id=meso.id, phase_number=number, name=tier, effort_tier=tier))
     db.add(AppUserMesocycle(
         app_user_id=user_id, mesocycle_id=meso.id, is_active=True,
@@ -64,7 +70,7 @@ async def test_insert_deload_edits_the_snapshot(db, test_user: AppUser):
     assert result["status"] == "applied"
     await db.refresh(block)
     tiers = [p["effort_tier"] for p in block.phases]
-    assert tiers == ["easy", "medium", "deload", "deload"]
+    assert tiers == ["easy", "medium", "deload", "hard"], "разгрузка вставлена сразу после фазы 2"
     assert block.status == "active", "блок продолжается — это выбор «доработать по плану»"
 
 
@@ -181,7 +187,7 @@ async def test_decision_is_idempotent_by_client_uuid(db, test_user: AppUser):
     assert first["status"] == "applied"
     assert second["status"] == "already_applied"
     await db.refresh(block)
-    assert [p["effort_tier"] for p in block.phases].count("deload") == 2, "повтор не вставляет вторую разгрузку"
+    assert [p["effort_tier"] for p in block.phases].count("deload") == 1, "повтор не вставляет вторую разгрузку"
 
 
 @pytest.mark.asyncio
@@ -203,12 +209,27 @@ async def test_regeneration_leaves_the_past_alone(db, test_user: AppUser):
         day_tag="прошлое", meso_tag="easy", micro_tag="hard",
         is_rest_day=False, is_blackout=False, status="planned",
     )
+    # Граница — СТРОГО после сегодня: день, датированный самим TODAY, тоже
+    # не должен переписываться. Без этого дня тест не отличил бы "строго
+    # после" от "начиная с сегодня" — оба варианта одинаково не трогают день
+    # 8/10, который раньше TODAY при любом определении границы (проверено
+    # мутационным прогоном: без этой строки тест ложно проходил и при
+    # сдвинутой границе).
+    today_row = UserCalendarDay(
+        app_user_id=test_user.id, target_date=TODAY, block_id=block.id,
+        day_tag="сегодня", meso_tag="easy", micro_tag="hard",
+        is_rest_day=False, is_blackout=False, status="planned",
+    )
     db.add(old)
+    db.add(today_row)
     await db.commit()
 
     proposal = await _proposal(db, test_user.id, block.id, params.KIND_EARLY_DELOAD)
     await apply_decision(db, test_user.id, proposal.id, "insert_deload", today=TODAY)
 
     await db.refresh(old)
+    await db.refresh(today_row)
     assert old.meso_tag == "easy", "день до сегодняшнего не переписывается"
     assert old.day_tag == "прошлое"
+    assert today_row.meso_tag == "easy", "сегодняшний день тоже не переписывается — граница строго после"
+    assert today_row.day_tag == "сегодня"

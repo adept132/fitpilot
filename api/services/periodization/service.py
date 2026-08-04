@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.services.models import PeriodizationProposal, TrainingBlock
+from api.services.models import PeriodizationProposal, TrainingBlock, UserCalendarDay
 from api.services.periodization import params
+from api.services.periodization import phases as phase_ops
 from api.services.periodization.decide import decide
+from api.services.periodization.position import position
 from api.services.periodization.repository import (
+    block_state,
+    close_and_advance,
     collect_decision_input,
     ensure_active_block,
     roll_over_if_complete,
@@ -219,3 +223,221 @@ async def safe_refresh_proposals(
     except Exception:  # noqa: BLE001
         logger.exception("periodization: пересчёт предложений упал")
         return []
+
+
+# --- Применение решений (P0-08, Задача 10) -----------------------------------
+
+
+async def _wipe_future_calendar(
+    session: AsyncSession, app_user_id: int, block: TrainingBlock, first_future: date
+) -> None:
+    """Снести дни календаря БЛОКА строго с first_future и дальше.
+
+    Прошлое неприкосновенно: сегодня это безопасно только потому, что
+    UserCalendarDay не хранит факт (status всегда planned, ссылки на
+    завершённую сессию нет). Когда P0-09 добавит учёт факта, это правило
+    придётся ужесточить.
+    """
+    await session.execute(
+        sa_delete(UserCalendarDay).where(
+            UserCalendarDay.app_user_id == app_user_id,
+            UserCalendarDay.block_id == block.id,
+            UserCalendarDay.target_date >= first_future,
+        )
+    )
+    await session.flush()
+
+
+async def _generate_future_calendar(
+    session: AsyncSession, app_user_id: int, block: TrainingBlock, first_future: date
+) -> None:
+    from api.services.scheduling_engine import SchedulingEngine
+
+    await SchedulingEngine.generate_block_days(
+        session, app_user_id, block,
+        from_date=first_future, until_date=block.planned_end_date,
+    )
+
+
+async def _regenerate_future(
+    session: AsyncSession, app_user_id: int, block: TrainingBlock, today: date
+) -> None:
+    """Снести и пересобрать дни ЭТОГО ЖЕ блока строго ПОСЛЕ сегодняшнего.
+
+    Годится для insert_deload/postpone — блок продолжается тем же самым,
+    меняется только его будущее. Для закрытия блока (action="close_block")
+    это НЕ подходит: там дни старого блока нужно снести, а сгенерировать —
+    уже для НОВОГО блока (см. _close_block ниже и её докстринг про
+    столкновение дат).
+    """
+    first_future = today + timedelta(days=1)
+    await _wipe_future_calendar(session, app_user_id, block, first_future)
+    await _generate_future_calendar(session, app_user_id, block, first_future)
+
+
+def _recompute_planned_end(block: TrainingBlock) -> None:
+    """Пересчитать planned_end_date СУЩЕСТВУЮЩЕГО блока после правки его
+    снимка фаз (insert_deload/postpone).
+
+    Не то же самое, что арифметика create_block (поправка 2 брифа Задачи
+    10, про которую нельзя заводить вторую копию): create_block считает
+    planned_end_date у НОВОГО блока по кортежу PhaseSnapshot ДО записи в
+    колонку; здесь блок уже существует, его phases уже переписаны в JSON
+    (phase_ops.to_json), и пересчитывается конец уже сидящего в сессии
+    объекта. Разные входы, разный момент — переиспользовать create_block
+    для этого нельзя, а формула в две строки не стоит собственной функции
+    в repository.py.
+    """
+    total = sum(int(p["length_days"]) for p in block.phases)
+    block.planned_end_date = block.start_date + timedelta(days=total - 1)
+
+
+async def _close_block(
+    session: AsyncSession, app_user_id: int, block: TrainingBlock, reason: str, today: date
+) -> TrainingBlock:
+    """Закрыть блок ДОСРОЧНОЙ разгрузкой и открыть следующий с тем же
+    состоянием.
+
+    Поправка 2 брифа Задачи 10: закрытие+перенос состояния уже сделаны в
+    repository.close_and_advance (общая часть с roll_over_if_complete и
+    _close_for_layoff) — здесь НЕ пишем вторую копию этой логики, только
+    вызываем её и довешиваем то, что специфично именно для пользовательского
+    решения: досрочное закрытие происходит РАНЬШЕ planned_end_date блока, а
+    значит календарь мог быть уже сгенерирован наперёд вплоть до старой
+    границы. Если не снести эти дни СТАРОГО блока, они останутся в базе и
+    столкнутся по датам с днями, которые сейчас сгенерируем для НОВОГО —
+    GET /calendar/day делает select(...).scalar_one_or_none() по
+    (app_user_id, target_date) и падает с MultipleResultsFound на дубликате.
+    """
+    first_future = today + timedelta(days=1)
+    await _wipe_future_calendar(session, app_user_id, block, first_future)
+
+    nxt = await close_and_advance(
+        session,
+        app_user_id,
+        block,
+        close_reason=reason,
+        actual_end_date=today,
+        next_start_date=first_future,
+        today=today,
+    )
+    await session.flush()
+    await _generate_future_calendar(session, app_user_id, nxt, first_future)
+    return nxt
+
+
+async def apply_decision(
+    session: AsyncSession,
+    app_user_id: int,
+    proposal_id: int,
+    action: str,
+    client_uuid: Optional[str] = None,
+    today: Optional[date] = None,
+) -> dict:
+    """Применить решение пользователя по предложению периодизации.
+
+    Контракт совпадает с принятым в P0-03 для синхронизации: повтор с тем же
+    client_uuid возвращает результат первого решения (status=already_applied),
+    чужое решение по уже решённому предложению отвечает конфликтом
+    (status=conflict), а не тихо перезаписывает его.
+    """
+    moment = today or date.today()
+
+    proposal = (
+        await session.execute(
+            select(PeriodizationProposal).where(
+                PeriodizationProposal.id == proposal_id,
+                PeriodizationProposal.app_user_id == app_user_id,
+            )
+        )
+    ).scalars().first()
+    if proposal is None:
+        return {"status": "not_found"}
+
+    if proposal.status != params.STATUS_PENDING:
+        if client_uuid and proposal.client_uuid == client_uuid:
+            return {
+                "status": "already_applied",
+                "proposal_id": proposal.id,
+                "block_id": proposal.block_id,
+            }
+        return {
+            "status": "conflict",
+            "proposal_id": proposal.id,
+            "current_status": proposal.status,
+            "decided_action": proposal.decided_action,
+        }
+
+    block = (
+        await session.execute(
+            select(TrainingBlock).where(TrainingBlock.id == proposal.block_id)
+        )
+    ).scalars().first()
+    if block is None:
+        return {"status": "not_found"}
+
+    if action == "decline":
+        proposal.status = params.STATUS_DECLINED
+    else:
+        proposal.status = params.STATUS_ACCEPTED
+        await _perform(session, app_user_id, block, proposal, action, moment)
+
+    proposal.decided_action = action
+    proposal.client_uuid = client_uuid
+    proposal.decided_at = datetime.now(timezone.utc)
+    await session.commit()
+    return {"status": "applied", "proposal_id": proposal.id, "block_id": block.id}
+
+
+async def _perform(
+    session: AsyncSession,
+    app_user_id: int,
+    block: TrainingBlock,
+    proposal: PeriodizationProposal,
+    action: str,
+    today: date,
+) -> None:
+    """Что физически делает каждое действие."""
+    if action == "insert_deload":
+        after = proposal.payload.get("after_phase_number") or position(
+            block_state(block), today
+        ).phase_number
+        updated = phase_ops.insert_deload(
+            phase_ops.from_json(block.phases),
+            after_phase_number=after,
+            length_days=block.microcycle_length,
+        )
+        block.phases = phase_ops.to_json(updated)
+        _recompute_planned_end(block)
+        await session.flush()
+        await _regenerate_future(session, app_user_id, block, today)
+
+    elif action == "close_block":
+        await _close_block(session, app_user_id, block, params.CLOSE_EARLY_DELOAD, today)
+
+    elif action == "start_next_block":
+        # P0-08, Задача 10, поправка 1 брифа: переход между блоками теперь
+        # АВТОМАТИЧЕСКИЙ (repository.roll_over_if_complete, Задача 7) — блок
+        # уже закрыт, а следующий уже открыт к тому моменту, когда
+        # пользователь вообще видит карточку итогов (kind=block_boundary).
+        # Раньше (до Задачи 7) start_next_block сам закрывал блок и открывал
+        # следующий; теперь это действие ничего не меняет в блоках — оно
+        # только фиксирует, что пользователь увидел карточку с итогами и
+        # ответил на неё. proposal.status/decided_action/decided_at уже
+        # выставлены в apply_decision выше — здесь физически делать нечего.
+        return
+
+    elif action == "postpone":
+        updated = phase_ops.postpone_deload(
+            phase_ops.from_json(block.phases), extra_days=block.microcycle_length
+        )
+        block.phases = phase_ops.to_json(updated)
+        _recompute_planned_end(block)
+        await session.flush()
+        await _regenerate_future(session, app_user_id, block, today)
+
+    elif action in (params.OPTION_SHIFT_REPS, params.OPTION_REPLACE, params.OPTION_KEEP):
+        # Структурные действия обрабатываются в Задаче 12; здесь фиксируем
+        # только решение (proposal.status/decided_action выше), чтобы
+        # предложение не висело pending вечно.
+        return
