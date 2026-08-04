@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
@@ -393,6 +393,7 @@ async def start_workout(
     current_phase = None
     micro_id = None
     current_day_index = None
+    training_block_id = None
 
     # 1. Если это тренировка из Календаря, берем ИДЕАЛЬНЫЕ данные от движка
     if payload.calendar_day_id:
@@ -409,6 +410,8 @@ async def start_workout(
             # Можно сразу перевести день календаря в статус "completed" или "in_progress"
             # cal_day.status = "in_progress"
 
+            training_block_id = cal_day.block_id
+
     # 2. Если это полностью свободная тренировка, берем глобальные активные циклы
     if not meso_id and not micro_id:
         active_meso = (await session.execute(
@@ -423,6 +426,14 @@ async def start_workout(
                                             AppUserMicrocycle.is_active == True)
         )).scalar_one_or_none()
         micro_id = active_micro.id if active_micro else None
+
+        # Свободная тренировка вне календаря всё равно принадлежит блоку:
+        # иначе её предписания резолвили бы фазу по шаблону и разошлись бы
+        # с вставленной разгрузкой.
+        from api.services.periodization.repository import ensure_active_block
+
+        active_block = await ensure_active_block(session, app_user.id, date.today())
+        training_block_id = active_block.id if active_block else None
 
     # === РАСЧЕТ ЦЕЛЕВОГО ОБЪЕМА (SNAPSHOT) ===
     calculated_targets = None
@@ -451,6 +462,7 @@ async def start_workout(
         app_user_mesocycle_id=meso_id,
         mesocycle_phase=current_phase,
         app_user_microcycle_id=micro_id,
+        training_block_id=training_block_id,
         volume_targets=calculated_targets,
         notes=None,
     )
@@ -489,7 +501,8 @@ async def start_workout(
         # а не на каждое упражнение (иначе N лишних запросов join'а поверх
         # уже существующего N+1 build_context по load_history, P0-06 C2).
         phase_effort_tier = await progression_repo.resolve_phase_effort_tier(
-            session, workout.app_user_mesocycle_id, workout.mesocycle_phase
+            session, workout.app_user_mesocycle_id, workout.mesocycle_phase,
+            training_block_id=workout.training_block_id,
         )
 
         # Пачкой подгружаем упражнения плана — build_context нужен объект
@@ -607,7 +620,8 @@ async def finish_workout(
     # свой запрос join'а, что усугубило бы уже существующий N+1 build_context
     # (по load_history на упражнение).
     phase_effort_tier = await progression_repo.resolve_phase_effort_tier(
-        db, workout.app_user_mesocycle_id, workout.mesocycle_phase
+        db, workout.app_user_mesocycle_id, workout.mesocycle_phase,
+        training_block_id=workout.training_block_id,
     )
 
     for se in workout.exercises:

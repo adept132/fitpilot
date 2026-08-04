@@ -242,7 +242,8 @@ async def add_exercise_to_workout(
     # Фаза мезоцикла нужна схеме percent_1rm и правилу deload_phase (P0-06 C2) —
     # без неё они мёртвый код на этом пишущем пути, как и было до фикса.
     phase_effort_tier = await progression_repo.resolve_phase_effort_tier(
-        db, workout.app_user_mesocycle_id, workout.mesocycle_phase
+        db, workout.app_user_mesocycle_id, workout.mesocycle_phase,
+        training_block_id=workout.training_block_id,
     )
 
     readiness_verdict = await readiness_repo.verdict_for_checkin(
