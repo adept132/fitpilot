@@ -129,11 +129,35 @@ def _postpone(inp: DecisionInput) -> Optional[Proposal]:
 
 
 def _boundary_proposals(inp: DecisionInput) -> list[Proposal]:
-    """Заглушка границы блока — наполняется в Task 5."""
-    return [
+    """Итоги блока и по одному структурному предложению на вставшее упражнение.
+
+    Критерий структурного предложения — упражнение осталось stalled ПОСЛЕ
+    фазы разгрузки: разгрузка и есть встроенная проверка гипотезы «дело в
+    усталости», и раз она провалена, менять структуру осмысленно. Без этой
+    проверки предложение было бы случайным, а цена ошибки высокая — замена
+    уводит упражнение в бутстрап, потому что история читается по exercise_id.
+    """
+    proposals = [
         Proposal(
             kind=params.KIND_BLOCK_BOUNDARY,
             reason_code=params.REASON_BLOCK_COMPLETED,
             payload={},
         )
     ]
+
+    for exercise_id in inp.plateau.stalled_after_deload:
+        proposals.append(
+            Proposal(
+                kind=params.KIND_STRUCTURAL,
+                reason_code=params.REASON_STALLED_AFTER_DELOAD,
+                payload={
+                    "exercise_id": exercise_id,
+                    # Порядок значим: первый вариант подсвечен по умолчанию.
+                    # Сдвиг диапазона обратим и сохраняет историю, замена — нет.
+                    "options": ["shift_reps", "replace", "keep"],
+                    "default_option": "shift_reps",
+                },
+            )
+        )
+
+    return proposals
