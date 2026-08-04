@@ -181,6 +181,12 @@ class SchedulingEngine:
                     total_workout_days_passed += 1
             else:
                 is_rest_day = is_rest_in_split
+                # P0-08 ревью Задачи 7, Находка 4 (Minor): счётчик продвигается
+                # для ЛЮБОГО не-блэкаутного дня, включая день отдыха внутри
+                # сплита — так же, как ниже в launch_and_unroll_plan. Старая
+                # карусельная ветка ensure_horizon продвигает счётчик только
+                # для НЕ-отдыха; расхождение унаследовано из старого кода (не
+                # этой задачей) и сознательно не трогается здесь.
                 total_workout_days_passed += 1
 
             if current_date >= from_date:
@@ -238,6 +244,31 @@ class SchedulingEngine:
         blueprint = split_res.scalar_one_or_none()
         if not blueprint or not blueprint.slots:
             raise ValueError("Сплит пуст или не найден")
+
+        # P0-08 ревью Задачи 7, Находка 2: если периодизация настроена,
+        # единственный источник фазы для календаря — снимок активного блока
+        # (как и в ensure_horizon/generate_block_days), а не живой шаблон
+        # мезоцикла, который читает старый цикл ниже. Без этой ветки
+        # POST /splits/.../launch пересобирал бы до 90 дней календаря старым
+        # путём и не проставлял бы block_id вовсе — ровно та рассинхронизация
+        # между launch и ensure_horizon, ради устранения которой затевалась
+        # вся задача. Если блока нет (периодизация не настроена) — ниже
+        # работает прежний код без изменений.
+        #
+        # Порядок вызовов, который сложится в Задаче 14 (закрытие блока при
+        # смене сплита ПЕРЕД вызовом этой функции), здесь ничего не меняет:
+        # ensure_active_block просто увидит уже актуальный на момент вызова
+        # блок — старый или новый, без разницы.
+        from api.services.periodization.repository import ensure_active_block
+
+        block = await ensure_active_block(session, app_user_id, start_date)
+        if block is not None:
+            await SchedulingEngine.generate_block_days(
+                session, app_user_id, block,
+                from_date=start_date,
+                until_date=block.planned_end_date,
+            )
+            return
 
         slots_queue = sorted(blueprint.slots, key=lambda s: s.day_order)
         split_length = len(slots_queue)
