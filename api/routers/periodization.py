@@ -39,6 +39,7 @@ router = APIRouter(prefix="/periodization", tags=["Periodization"])
 def _proposal_out(row: PeriodizationProposal) -> ProposalRead:
     return ProposalRead(
         id=row.id,
+        block_id=row.block_id,
         kind=row.kind,
         reason_code=row.reason_code,
         reason_text=params.REASON_TEXTS.get(row.reason_code, ""),
@@ -75,10 +76,22 @@ async def get_periodization_context(
     if block is None:
         return PeriodizationContextRead(block=None, proposals=[])
 
+    # Разрыв (Critical): фильтр по block_id активного блока был неверным.
+    # Карточка итогов (block_boundary) и структурные предложения по вставшим
+    # упражнениям (structural) материализуются service.refresh_proposals ПО
+    # БЛОКУ, КОТОРЫЙ ТОЛЬКО ЧТО ЗАКРЫЛ автопереход, — это осознанное решение
+    # Задачи 9 (см. её докстринг), иначе итогов пройденного блока не увидел
+    # бы никто. К моменту запроса активный блок — уже СЛЕДУЮЩИЙ, другой. Фильтр
+    # `block_id == block.id` эти предложения не находил НИКОГДА: весь путь
+    # "увидеть разбор блока и поправить вставшие упражнения" был мёртв, хотя
+    # refresh_proposals их честно создавал. Предложения принадлежат
+    # ПОЛЬЗОВАТЕЛЮ, а не конкретному блоку — фильтруем по app_user_id и
+    # статусу, отдаём все висящие независимо от того, к какому блоку они
+    # привязаны; клиент отличает их друг от друга по полю block_id в ответе.
     pending = (
         await db.execute(
             select(PeriodizationProposal).where(
-                PeriodizationProposal.block_id == block.id,
+                PeriodizationProposal.app_user_id == current_user.id,
                 PeriodizationProposal.status == params.STATUS_PENDING,
             ).order_by(PeriodizationProposal.id)
         )

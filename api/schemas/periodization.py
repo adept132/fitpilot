@@ -26,6 +26,7 @@ class BlockCoordinateRead(BaseModel):
 
 class ProposalRead(BaseModel):
     id: int
+    block_id: int
     kind: str
     reason_code: str
     reason_text: str

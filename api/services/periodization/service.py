@@ -452,22 +452,67 @@ async def safe_refresh_proposals(
     сессии, — это уходит в ОБЪЕМЛЮЩУЮ транзакцию, а не в SAVEPOINT, и потому
     переживает откат SAVEPOINT. Дальше возможны два случая:
     - исключение прилетело БЕЗ промежуточного session.commit() внутри —
-      выход из `async with` откатывает ровно SAVEPOINT, не трогая ничего, что
-      было флашено до входа в блок;
+      откатываем ровно SAVEPOINT, не трогая ничего, что было флашено до
+      входа в блок;
     - исключение прилетело ПОСЛЕ того, как refresh_proposals успела сама
       закоммитить (roll_over_if_complete/ensure_active_block умеют коммитить
       сессию целиком, см. их докстринги) — тогда откатывать уже нечего, то,
       что успело закоммититься, так и остаётся закоммиченным, ровно как и
       было бы без этой правки. В обоих случаях успешный путь по-прежнему
-      коммитит как раньше — SAVEPOINT просто снимается при выходе без
-      исключения.
+      коммитит как раньше.
+
+    Найдено при работе над разрывом висящих предложений (P0-08, фикс): у
+    `session.commit()` в SQLAlchemy НЕТ понятия "закоммитить только текущий
+    SAVEPOINT" — согласно её собственной документации ("The outermost
+    database transaction is committed unconditionally, automatically
+    releasing any SAVEPOINTs in effect"), ЛЮБОЙ session.commit() внутри
+    close_stale_block/roll_over_if_complete/ensure_active_block всегда
+    коммитит КОРНЕВУЮ транзакцию целиком, безусловно освобождая наш SAVEPOINT
+    — независимо от того, что мы формально ещё "внутри" `async with
+    session.begin_nested()`. Раньше здесь стоял именно `async with
+    session.begin_nested(): return await refresh_proposals(...)` — и это
+    БИЛОСЬ ровно в сценарии, ради которого функция и была написана: как
+    только refresh_proposals успевала хоть раз закоммитить (а она делает это
+    почти при каждом реальном автопереходе — закрытом блоке), СЛЕДУЮЩИЙ ЖЕ
+    `session.execute()` внутри неё (например повторный get_active_block из
+    ensure_active_block/_catch_up_active_block, вызываемого сразу вслед за
+    roll_over_if_complete) падал с
+    `InvalidRequestError: Can't operate on closed transaction inside context
+    manager` — потому что `async with` регистрирует себя как "владельца"
+    транзакционного контекста при входе (`__aenter__`) и требует, чтобы ЭТА
+    ЖЕ транзакция была ещё жива при каждой следующей команде сессии, а её уже
+    нет — commit() её закрыл. Этот except ловил исключение молча (ровно как и
+    задумано — "сломанная надстройка не должна ронять основной путь"), поэтому
+    баг был незаметен: карточка итогов блока (block_boundary) и структурные
+    предложения НИКОГДА не материализовались через настоящий вызов
+    /periodization/context при реальном автопереходе — _materialize для
+    закрытого блока просто не успевал выполниться, roll_over_if_complete
+    падал на первом же обращении к сессии ВНУТРИ ensure_active_block. Все
+    существующие тесты на KIND_BLOCK_BOUNDARY звали refresh_proposals()
+    НАПРЯМУЮ, минуя safe_refresh_proposals и её SAVEPOINT, поэтому не ловили
+    этого.
+
+    Чиним, НЕ используя `async with`: `await session.begin_nested()` (без
+    контекст-менеджера) тоже открывает настоящий SAVEPOINT, но не
+    регистрирует себя во внутреннем `_trans_context_manager` — эту
+    регистрацию делает только `__aenter__` (см. `StartableContext.start(...,
+    is_ctxmanager=True)` в sqlalchemy.ext.asyncio). Управляем commit/rollback
+    вручную и ТОЛЬКО если SAVEPOINT ещё жив (`nested.is_active`) — если
+    refresh_proposals уже успела закоммитить корневую транзакцию сама,
+    SAVEPOINT к этому моменту уже освобождён, и трогать его снова нельзя.
     """
+    nested = await session.begin_nested()
     try:
-        async with session.begin_nested():
-            return await refresh_proposals(session, app_user_id, today)
+        result = await refresh_proposals(session, app_user_id, today)
     except Exception:  # noqa: BLE001
         logger.exception("periodization: пересчёт предложений упал")
+        if nested.is_active:
+            await nested.rollback()
         return []
+    else:
+        if nested.is_active:
+            await nested.commit()
+        return result
 
 
 # --- Применение решений (P0-08, Задача 10) -----------------------------------

@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from api.services.day_template import DayTemplateType
 from api.services.models import (
@@ -14,6 +14,7 @@ from api.services.models import (
     AppUserMicrocycle,
     DayBlueprint,
     DayMuscleTarget,
+    Exercise,
     Mesocycle,
     MesocyclePhase,
     PeriodizationProposal,
@@ -21,6 +22,9 @@ from api.services.models import (
     SplitDaySlot,
     TrainingBlock,
     UserSplit,
+    WorkoutSession,
+    WorkoutSessionExercise,
+    WorkoutSessionSet,
 )
 from api.services.periodization import params
 from api.services.periodization.repository import ensure_active_block
@@ -436,3 +440,130 @@ async def test_context_reports_zero_workouts_during_deload(client, db, test_user
         "разгрузка уже идёт — тренировок ДО её начала осталось 0, а не null "
         "и не отрицательное число"
     )
+
+
+# --- Разрыв "висящие предложения по закрытому блоку" --------------------
+
+
+@pytest.mark.asyncio
+async def test_context_returns_boundary_proposal_from_the_closed_block(
+    client, db, test_user: AppUser
+):
+    """Главный тест сквозного разрыва: карточка итогов (block_boundary)
+    материализуется service.refresh_proposals ПО БЛОКУ, КОТОРЫЙ ТОЛЬКО ЧТО
+    ЗАКРЫЛ автопереход, — по построению она никогда не лежит на блоке,
+    который в момент запроса активен. Старый фильтр `block_id == block.id`
+    (по активному блоку) эту карточку не найдёт никогда, хотя
+    refresh_proposals её честно создал.
+
+    Блок с реальной завершённой тренировкой внутри доходит до конца, запрос
+    /periodization/context сам вызывает safe_refresh_proposals, автопереход
+    закрывает block1 и открывает block2, пересчёт создаёт карточку итогов
+    по block1. Проверяем, что она есть в ответе и что её block_id указывает
+    на ЗАКРЫТЫЙ блок, а не на активный.
+    """
+    marker = uuid.uuid4().hex[:8]
+    exercise = Exercise(
+        name=f"Тестовое упражнение итогов блока {marker}",
+        category="base",
+        main_muscle_group="chest",
+        difficulty="beginner",
+        equipment_needed=[],
+        source="custom",
+        app_user_id=test_user.id,
+    )
+    db.add(exercise)
+    await db.flush()
+
+    start = date.today() - timedelta(days=20)
+    block1 = await _seed(db, test_user.id, start)
+
+    workout = WorkoutSession(
+        app_user_id=test_user.id,
+        source="free",
+        status="finished",
+        finished_at=datetime.now(timezone.utc),
+        training_block_id=block1.id,
+    )
+    db.add(workout)
+    await db.flush()
+
+    se = WorkoutSessionExercise(
+        workout_session_id=workout.id, exercise_id=exercise.id, order_index=0
+    )
+    db.add(se)
+    await db.flush()
+
+    for set_number in range(1, 4):
+        db.add(
+            WorkoutSessionSet(
+                workout_session_exercise_id=se.id,
+                set_number=set_number,
+                set_type="normal",
+                weight=60.0,
+                reps=8,
+                effort_level="medium",
+                is_completed=True,
+            )
+        )
+    await db.commit()
+
+    try:
+        response = await client.get("/periodization/context")
+
+        assert response.status_code == 200
+        body = response.json()
+        active_block_id = body["block"]["block_id"]
+        assert active_block_id != block1.id, (
+            "предпосылка теста: автопереход обязан был закрыть block1 и "
+            "открыть новый активный блок"
+        )
+
+        boundary = [p for p in body["proposals"] if p["kind"] == "block_boundary"]
+        assert len(boundary) == 1, (
+            "карточка итогов закрытого блока обязана дойти до клиента через "
+            "/periodization/context — раньше фильтр по активному блоку её "
+            "отсекал"
+        )
+        assert boundary[0]["block_id"] == block1.id, (
+            "карточка итогов обязана нести id ЗАКРЫТОГО блока, а не "
+            "активного — иначе клиент откроет разбор не того блока"
+        )
+    finally:
+        # Порядок важен (тот же, что в conftest.test_user и в
+        # test_periodization_repository.test_state_snapshot_captures_progression):
+        # подходы -> упражнения сессии -> сессия -> упражнение.
+        await db.execute(
+            delete(WorkoutSessionSet).where(
+                WorkoutSessionSet.workout_session_exercise_id == se.id
+            )
+        )
+        await db.execute(
+            delete(WorkoutSessionExercise).where(WorkoutSessionExercise.id == se.id)
+        )
+        await db.execute(delete(WorkoutSession).where(WorkoutSession.id == workout.id))
+        await db.execute(delete(Exercise).where(Exercise.id == exercise.id))
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_context_proposal_carries_its_block_id(client, db, test_user: AppUser):
+    """У каждого предложения в ответе /periodization/context обязан быть
+    block_id — иначе клиент не знает, к какому блоку вести пользователя, и
+    вынужден подставлять id активного блока (что для карточки итогов
+    закрытого блока — уже НЕ ТОТ блок)."""
+    block = await _seed(db, test_user.id, date.today())
+    proposal = PeriodizationProposal(
+        app_user_id=test_user.id, block_id=block.id,
+        kind=params.KIND_EARLY_DELOAD, reason_code=params.REASON_FATIGUE_HIGH,
+        payload={"after_phase_number": 1}, status=params.STATUS_PENDING,
+    )
+    db.add(proposal)
+    await db.commit()
+
+    response = await client.get("/periodization/context")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["proposals"]) == 1
+    assert body["proposals"][0]["block_id"] == block.id
