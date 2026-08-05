@@ -22,6 +22,7 @@ from api.services.models import (
     WorkoutSessionSet,
 )
 from api.services.periodization import params
+from api.services.periodization import phases as phase_ops
 from api.services.periodization import repository as periodization_repository
 from api.services.periodization.repository import (
     block_state,
@@ -513,3 +514,120 @@ async def test_state_snapshot_skips_exercises_without_history(
     finally:
         await db.execute(delete(Exercise).where(Exercise.id == exercise.id))
         await db.commit()
+
+
+# --- Финальное ревью, Находка 1: close_and_advance перечитывает шаблон -------
+
+
+@pytest.mark.asyncio
+async def test_next_block_picks_up_the_edited_template(db, test_user: AppUser):
+    """Правка шаблона мезоцикла (спека: «активный блок не меняется, новый
+    шаблон применится со следующего») обязана долететь до следующего блока.
+    До фикса close_and_advance клонировал phases ЗАКРЫВАЕМОГО блока — то есть
+    добавленная сюда фаза не попала бы НИКУДА, начиная со второго блока."""
+    await _seed_periodization(db, test_user.id)
+    user_meso = (
+        await db.execute(
+            select(AppUserMesocycle).where(
+                AppUserMesocycle.app_user_id == test_user.id,
+                AppUserMesocycle.is_active.is_(True),
+            )
+        )
+    ).scalars().first()
+
+    block_length = 21  # 3 фазы по 7 дней из _seed_periodization
+    old_start = TODAY - timedelta(days=block_length + 4)
+    old_block = await ensure_active_block(db, test_user.id, old_start)
+    assert [p["effort_tier"] for p in old_block.phases] == ["easy", "medium", "deload"]
+    assert TODAY > old_block.planned_end_date, "сценарий должен требовать переката"
+
+    # Пользователь редактирует активный шаблон ПОСЛЕ того, как блок уже создан
+    # (ровно сценарий из спеки — правка приходит, пока блок уже идёт).
+    db.add(
+        MesocyclePhase(
+            mesocycle_id=user_meso.mesocycle_id,
+            phase_number=4,
+            name="extra",
+            effort_tier="medium",
+        )
+    )
+    await db.commit()
+
+    active = await ensure_active_block(db, test_user.id, TODAY)
+
+    assert active.id != old_block.id, "сценарий должен закрыть старый блок и открыть следующий"
+    assert [p["effort_tier"] for p in active.phases] == [
+        "easy", "medium", "deload", "medium",
+    ], "следующий блок обязан подхватить ОТРЕДАКТИРОВАННЫЙ шаблон, а не снимок закрытого блока"
+    assert active.user_mesocycle_id == user_meso.id
+    assert active.mesocycle_id == user_meso.mesocycle_id
+
+
+@pytest.mark.asyncio
+async def test_inserted_deload_does_not_survive_into_the_next_block(db, test_user: AppUser):
+    """Досрочная разгрузка, вставленная в блок пользователем, — правка ЭТОГО
+    ОДНОГО блока. До фикса close_and_advance клонировал phases закрываемого
+    блока целиком, поэтому вставленная разгрузка увековечивалась бы в каждом
+    следующем блоке."""
+    await _seed_periodization(db, test_user.id)
+    block_length = 21
+    old_start = TODAY - timedelta(days=block_length + 4)
+    old_block = await ensure_active_block(db, test_user.id, old_start)
+    assert len(old_block.phases) == 3
+
+    # Симулируем то же самое действие, что и service._perform("insert_deload"):
+    # вставляем разгрузку сразу после первой фазы блока.
+    updated = phase_ops.insert_deload(
+        phase_ops.from_json(old_block.phases),
+        after_phase_number=1,
+        length_days=old_block.microcycle_length,
+    )
+    old_block.phases = phase_ops.to_json(updated)
+    await db.flush()
+    assert len(old_block.phases) == 4, "в закрываемом блоке разгрузка и правда вставлена"
+    assert TODAY > old_block.planned_end_date, "сценарий должен требовать переката"
+
+    active = await ensure_active_block(db, test_user.id, TODAY)
+
+    assert active.id != old_block.id
+    assert len(active.phases) == 3, (
+        "у следующего блока фаз должно быть столько же, сколько в шаблоне — "
+        "лишней (вставленной) разгрузки быть не должно"
+    )
+    assert [p["effort_tier"] for p in active.phases] == ["easy", "medium", "deload"]
+
+
+@pytest.mark.asyncio
+async def test_next_block_falls_back_to_snapshot_without_a_template(db, test_user: AppUser):
+    """Активного шаблона нет (пользователь отвязал/деактивировал мезоцикл) —
+    следующий блок всё равно обязан появиться, по снимку закрытого блока: без
+    фолбэка пользователь остался бы вовсе без активного блока."""
+    await _seed_periodization(db, test_user.id)
+    block_length = 21
+    old_start = TODAY - timedelta(days=block_length + 4)
+    old_block = await ensure_active_block(db, test_user.id, old_start)
+    old_block_id = old_block.id
+    old_user_mesocycle_id = old_block.user_mesocycle_id
+    old_mesocycle_id = old_block.mesocycle_id
+    assert TODAY > old_block.planned_end_date, "сценарий должен требовать переката"
+
+    user_meso = (
+        await db.execute(
+            select(AppUserMesocycle).where(
+                AppUserMesocycle.app_user_id == test_user.id,
+                AppUserMesocycle.is_active.is_(True),
+            )
+        )
+    ).scalars().first()
+    user_meso.is_active = False
+    await db.commit()
+
+    active = await ensure_active_block(db, test_user.id, TODAY)
+
+    assert active is not None, "блок обязан появиться даже без активного шаблона"
+    assert active.id != old_block_id
+    assert [p["effort_tier"] for p in active.phases] == ["easy", "medium", "deload"], (
+        "фолбэк — снимок закрытого блока, а не пустой список"
+    )
+    assert active.user_mesocycle_id == old_user_mesocycle_id
+    assert active.mesocycle_id == old_mesocycle_id

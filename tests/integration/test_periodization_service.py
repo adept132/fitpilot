@@ -396,3 +396,70 @@ async def test_safe_refresh_keeps_caller_changes_on_failure(db, test_user: AppUs
         "запись вызывающей стороны обязана пережить упавший пересчёт "
         "периодизации и закоммититься вместе с остальной работой эндпоинта"
     )
+
+
+# --- Финальное ревью, Находка 2: висящие карточки итогов истекают -----------
+
+
+@pytest.mark.asyncio
+async def test_older_boundary_proposals_expire_when_a_new_block_closes(
+    db, test_user: AppUser
+):
+    """Пользователь ушёл с экрана итогов первого блока, не ответив на
+    карточку (штатный выбор «доработать по плану», см. бриф Находки 2) — она
+    осталась pending. Когда закрывается ВТОРОЙ блок и по нему материализуется
+    своя карточка итогов, разбор первого блока уже неактуален — его место
+    занял разбор второго. Без фикса первая карточка висела бы pending
+    бессрочно и заслоняла бы вторую."""
+    await _seed(db, test_user.id)
+    from api.services.periodization.repository import ensure_active_block
+
+    block1 = await ensure_active_block(db, test_user.id, date(2026, 7, 1))
+    assert block1.planned_end_date == date(2026, 7, 14)
+
+    # Закрываем первый блок автопереходом (тот же приём, что и MODERATE_OVERDUE
+    # выше — просрочка меньше params.LAYOFF_DAYS_AFTER_BLOCK_END).
+    first_result = await refresh_proposals(db, test_user.id, date(2026, 7, 16))
+    assert [p.kind for p in first_result] == [params.KIND_BLOCK_BOUNDARY]
+
+    block2 = (
+        await db.execute(
+            select(TrainingBlock).where(
+                TrainingBlock.app_user_id == test_user.id,
+                TrainingBlock.status == "active",
+            )
+        )
+    ).scalars().first()
+    assert block2 is not None and block2.id != block1.id
+    assert block2.planned_end_date == date(2026, 7, 28)
+
+    # Пользователь так и не ответил на карточку первого блока — она осталась
+    # pending. Теперь закрываем ВТОРОЙ блок тем же автопереходом (2 дня
+    # просрочки — тот же запас, что и у MODERATE_OVERDUE).
+    second_result = await refresh_proposals(db, test_user.id, date(2026, 7, 30))
+    assert [p.kind for p in second_result] == [params.KIND_BLOCK_BOUNDARY]
+
+    proposal1 = (
+        await db.execute(
+            select(PeriodizationProposal).where(
+                PeriodizationProposal.block_id == block1.id,
+                PeriodizationProposal.kind == params.KIND_BLOCK_BOUNDARY,
+            )
+        )
+    ).scalars().first()
+    proposal2 = (
+        await db.execute(
+            select(PeriodizationProposal).where(
+                PeriodizationProposal.block_id == block2.id,
+                PeriodizationProposal.kind == params.KIND_BLOCK_BOUNDARY,
+            )
+        )
+    ).scalars().first()
+
+    assert proposal1 is not None and proposal1.status == params.STATUS_EXPIRED, (
+        "карточка итогов первого (более раннего) блока обязана истечь, когда "
+        "закрылся второй"
+    )
+    assert proposal2 is not None and proposal2.status == params.STATUS_PENDING, (
+        "карточка итогов только что закрытого блока обязана остаться pending"
+    )

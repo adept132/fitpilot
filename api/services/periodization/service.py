@@ -6,7 +6,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import delete as sa_delete, select
+from sqlalchemy import delete as sa_delete, select, update as sa_update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -116,6 +116,68 @@ def _dedup_key(kind: str, reason_code: str, payload: dict) -> tuple:
     return (kind,)
 
 
+# P0-08, финальное ревью, Находка 2 (Important): виды предложений, которые
+# истекают, когда закрывается более поздний блок и по нему материализуется
+# новая карточка итогов. block_boundary и structural — оба рождаются
+# ИСКЛЮЧИТЕЛЬНО из ветки decide()._boundary_proposals (см. decide.py: она
+# срабатывает только при inp.position.is_complete, то есть только для уже
+# ЗАКРЫТОГО блока) — оба вида, соответственно, разбирают состояние блока,
+# который уже в прошлом. early_deload и postpone_deload сюда сознательно не
+# входят: они про решение по АКТИВНОМУ блоку прямо сейчас (разгружаться ли
+# сегодня), а не про разбор истории, и не теряют смысл от того, что где-то
+# закрылся ещё один блок.
+_EXPIRE_ON_NEW_BOUNDARY_KINDS = (params.KIND_BLOCK_BOUNDARY, params.KIND_STRUCTURAL)
+
+
+async def _expire_older_boundary_proposals(
+    session: AsyncSession, app_user_id: int, block: TrainingBlock
+) -> None:
+    """Истечь ещё pending карточки итогов и структурные предложения БОЛЕЕ
+    РАННИХ блоков этого пользователя (P0-08, финальное ревью, Находка 2).
+
+    Вызывается ровно тогда, когда только что материализована НОВАЯ карточка
+    итогов по блоку `block` (см. вызов в _materialize ниже) — разбор
+    позапрошлого блока уже неактуален, его место занял разбор последнего.
+    Без этого предложения копятся бессрочно: единственное место, где раньше
+    выставлялся params.STATUS_EXPIRED, — конфликт в apply_decision по уже
+    закрытому блоку (см. _BLOCK_MUTATING_ACTIONS ниже), а он срабатывает,
+    только если пользователь вообще попытался ответить на устаревшую
+    карточку. Если пользователь просто ушёл с экрана итогов, не решив ничего
+    (штатный и поощряемый спекой выбор «доработать по плану»), карточка
+    висела бы pending вечно и заслоняла бы актуальную.
+
+    Сравниваем по НОМЕРУ блока (block_index), а не по дате: у TrainingBlock
+    нет надёжной единой даты для такого сравнения — actual_end_date/
+    planned_end_date есть не у всех блоков в одинаковом смысле (закрытие
+    close_stale_block, layoff, досрочная разгрузка дают разные даты закрытия
+    для блоков, которые тем не менее строго упорядочены индексом). block_index
+    же — монотонный и уникальный на пользователя (см. докстринг phases.py про
+    инварианты блока), поэтому "более ранний блок" однозначно means
+    block_index меньше, чем у только что закрытого.
+    """
+    earlier_block_ids = (
+        await session.execute(
+            select(TrainingBlock.id).where(
+                TrainingBlock.app_user_id == app_user_id,
+                TrainingBlock.block_index < block.block_index,
+            )
+        )
+    ).scalars().all()
+    if not earlier_block_ids:
+        return
+    await session.execute(
+        sa_update(PeriodizationProposal)
+        .where(
+            PeriodizationProposal.app_user_id == app_user_id,
+            PeriodizationProposal.block_id.in_(earlier_block_ids),
+            PeriodizationProposal.kind.in_(_EXPIRE_ON_NEW_BOUNDARY_KINDS),
+            PeriodizationProposal.status == params.STATUS_PENDING,
+        )
+        .values(status=params.STATUS_EXPIRED)
+    )
+    await session.flush()
+
+
 async def _materialize(
     session: AsyncSession, app_user_id: int, block: TrainingBlock, today: date
 ) -> list[PeriodizationProposal]:
@@ -182,6 +244,18 @@ async def _materialize(
             continue
         known.add(key)
         created.append(row)
+
+    # P0-08, финальное ревью, Находка 2: новая карточка итогов (block_boundary)
+    # только что материализовалась по блоку `block` — значит, `block` уже
+    # закрыт (см. докстринг _expire_older_boundary_proposals: этот kind
+    # рождается только при is_complete). Разбор БОЛЕЕ РАННИХ блоков того же
+    # пользователя устарел, его место занял разбор этого — истекаем их.
+    # Проверяем по `created`, а не по `proposals`: если карточка итогов для
+    # ЭТОГО блока уже была создана раньше (обычный повторный пересчёт,
+    # задедуплицировалась в цикле выше), истечение уже случилось при её
+    # первом появлении и повторять его не нужно.
+    if any(p.kind == params.KIND_BLOCK_BOUNDARY for p in created):
+        await _expire_older_boundary_proposals(session, app_user_id, block)
 
     return created
 
