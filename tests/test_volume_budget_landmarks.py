@@ -1,6 +1,4 @@
 """Бюджет объёма клампится в физиологический диапазон."""
-import pytest
-
 from api.services.volume.landmarks import SYSTEMIC_CAP_EFF, Landmarks, landmarks_for
 from api.services.volume_calculator import calculate_volume_budget, clamp_target
 
@@ -56,3 +54,22 @@ def test_systemic_cap_comes_from_effective_table():
 def test_total_stays_under_effective_cap():
     budget = calculate_volume_budget("advanced", ["chest", "lats"])
     assert budget.meta.total_weekly_sets <= SYSTEMIC_CAP_EFF["advanced"]
+
+
+def test_longer_microcycle_scales_targets_inside_the_band():
+    # Регрессия: раньше множитель применялся только к границам, и цель,
+    # уже лежащая внутри диапазона, не менялась при смене длины микроцикла.
+    week = calculate_volume_budget("intermediate", [], microcycle_length=7)
+    long_cycle = calculate_volume_budget("intermediate", [], microcycle_length=10)
+
+    grown = [
+        muscle
+        for muscle, target in long_cycle.weekly_targets.items()
+        if target.target_sets > week.weekly_targets[muscle].target_sets
+    ]
+    # Практически каждая тренируемая мышца обязана вырасти, а не единицы,
+    # сброшенные с уменьшившегося пола.
+    trainable = [m for m, t in week.weekly_targets.items() if t.target_sets > 0]
+    assert len(grown) >= len(trainable) - 2, (
+        f"выросли только {sorted(grown)} из {sorted(trainable)}"
+    )
