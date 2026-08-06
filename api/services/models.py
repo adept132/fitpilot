@@ -984,6 +984,18 @@ class UserCalendarDay(Base):
     # Фактически залогированная сессия (появится после завершения тренировки)
     actual_workout_session_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
+    # P0-09: принятые пользователем правки предписания на этот день.
+    # Список {exercise_id, delta_sets, proposal_id}.
+    #
+    # Правка живёт НА ДНЕ, а не в WorkoutPlanExercise, потому что
+    # UserCalendarDay.plan_id указывает на ПЕРЕИСПОЛЬЗУЕМЫЙ шаблон:
+    # SchedulingEngine._score_and_find_best_plan сажает один и тот же план
+    # на все подходящие дни, и правка target_sets в плане изменила бы
+    # каждый такой день навсегда.
+    volume_adjustments: Mapped[Optional[list]] = mapped_column(
+        JSONB, nullable=True
+    )
+
     plan = relationship("WorkoutPlan", lazy="noload")
 
 

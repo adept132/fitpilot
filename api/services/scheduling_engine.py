@@ -156,6 +156,21 @@ class SchedulingEngine:
             select(WorkoutPlan).where(WorkoutPlan.app_user_id == app_user_id)
         )).scalars().all())
 
+        # P0-09: дни, пережившие выборочную перегенерацию (_wipe_future_calendar
+        # оставляет дни с фактом/принятой правкой), уже занимают часть диапазона
+        # [from_date, until_date]. Ниже эти даты пропускаются при материализации,
+        # НО не выводятся из-под учёта счётчиков (total_workout_days_passed,
+        # позиция в сплите) — иначе раскладка сплита разъехалась бы для всех
+        # дней ПОСЛЕ пропущенной даты. Опрос сделан один раз до цикла, а не
+        # индивидуальным SELECT на каждую дату.
+        existing_dates = set((await session.execute(
+            select(UserCalendarDay.target_date).where(
+                UserCalendarDay.app_user_id == app_user_id,
+                UserCalendarDay.target_date >= from_date,
+                UserCalendarDay.target_date <= until_date,
+            )
+        )).scalars().all())
+
         # Счётчик отработанных дней сплита ведём от НАЧАЛА блока, иначе при
         # перегенерации с середины сплит начнётся заново с первого дня.
         current_date = block.start_date
@@ -189,7 +204,12 @@ class SchedulingEngine:
                 # этой задачей) и сознательно не трогается здесь.
                 total_workout_days_passed += 1
 
-            if current_date >= from_date:
+            # P0-09: current_date not in existing_dates — единственное
+            # дополнительное условие. Оно ТОЛЬКО подавляет вставку строки;
+            # ветки выше (weekday/slot/pos/total_workout_days_passed) уже
+            # отработали в этой итерации безусловно, так что пропуск даты
+            # здесь не сдвигает раскладку сплита на последующих днях.
+            if current_date >= from_date and current_date not in existing_dates:
                 plan_id_to_save = None
                 if not is_rest_day:
                     plan_id_to_save = SchedulingEngine._score_and_find_best_plan(

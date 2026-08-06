@@ -170,6 +170,29 @@ async def db():
         yield session
 
 
+@pytest_asyncio.fixture
+async def active_block(db: AsyncSession, test_user: AppUser):
+    """Минимальный активный блок для тестов перегенерации (P0-09, Задача 6)."""
+    from datetime import date, timedelta
+
+    from api.services.models import TrainingBlock
+    from api.services.volume.repository import utc_today
+
+    block = TrainingBlock(
+        app_user_id=test_user.id,
+        block_index=1,
+        phases=[{"phase_number": 1, "name": "medium", "effort_tier": "medium", "length_days": 7}],
+        microcycle_length=7,
+        start_date=utc_today() - timedelta(days=3),
+        planned_end_date=utc_today() + timedelta(days=10),
+        status="active",
+    )
+    db.add(block)
+    await db.commit()
+    await db.refresh(block)
+    yield block
+
+
 # --- Фикстуры для тестов жизненного цикла движка прогрессии (P0-06, Задача 14) ---
 #
 # ВАЖНО: строятся на db/test_user (коммитящее соединение), а НЕ на

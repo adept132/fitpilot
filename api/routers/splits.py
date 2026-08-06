@@ -366,10 +366,13 @@ async def launch_split(
     )
     session.add(new_user_split)
 
-    # 5. Очищаем будущее расписание в UserCalendarDay
+    # 5. Очищаем будущее расписание в UserCalendarDay.
+    # P0-09: request.start_date приходит ОТ ПОЛЬЗОВАТЕЛЯ и может лежать в
+    # прошлом — без фильтра по статусу смена сплита стирала бы историю.
     delete_stmt = delete(UserCalendarDay).where(
         UserCalendarDay.app_user_id == current_user.id,
-        UserCalendarDay.target_date >= request.start_date
+        UserCalendarDay.target_date >= request.start_date,
+        UserCalendarDay.status == "planned",
     )
     await session.execute(delete_stmt)
 

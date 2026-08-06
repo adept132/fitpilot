@@ -6,7 +6,14 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import delete as sa_delete, select, update as sa_update
+from sqlalchemy import (
+    cast as sa_cast,
+    delete as sa_delete,
+    or_ as sa_or,
+    select,
+    update as sa_update,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -628,18 +635,31 @@ _BLOCK_MUTATING_ACTIONS = frozenset({"insert_deload", "close_block", "postpone"}
 async def _wipe_future_calendar(
     session: AsyncSession, app_user_id: int, block: TrainingBlock, first_future: date
 ) -> None:
-    """Снести дни календаря БЛОКА строго с first_future и дальше.
+    """Снести дни календаря БЛОКА с first_future, КРОМЕ несущих факт или решение.
 
-    Прошлое неприкосновенно: сегодня это безопасно только потому, что
-    UserCalendarDay не хранит факт (status всегда planned, ссылки на
-    завершённую сессию нет). Когда P0-09 добавит учёт факта, это правило
-    придётся ужесточить.
+    P0-09 закрывает долг, зафиксированный в §8.1 спеки P0-08. Прежнее
+    правило «удаляем всё после first_future» было безопасно ровно до тех
+    пор, пока UserCalendarDay не хранил факта. Теперь удаление обходит:
+
+      - дни со status != 'planned' — там уже есть выполнение или пропуск;
+      - дни с непустым volume_adjustments — там лежит принятое
+        пользователем решение, которое иначе исчезло бы при ближайшей
+        вставке разгрузки.
+
+    Уцелевшие дни остаются со своей старой координатой фазы. Это
+    сознательный обмен: сохранить факт важнее, чем перерисовать прошедший
+    или уже настроенный день.
     """
     await session.execute(
         sa_delete(UserCalendarDay).where(
             UserCalendarDay.app_user_id == app_user_id,
             UserCalendarDay.block_id == block.id,
             UserCalendarDay.target_date >= first_future,
+            UserCalendarDay.status == "planned",
+            sa_or(
+                UserCalendarDay.volume_adjustments.is_(None),
+                UserCalendarDay.volume_adjustments == sa_cast([], JSONB),
+            ),
         )
     )
     await session.flush()
