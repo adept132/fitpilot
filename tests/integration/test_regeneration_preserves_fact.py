@@ -3,13 +3,13 @@
 До P0-09 правило «удаляем всё после сегодня» было безопасно только потому,
 что UserCalendarDay не хранил ни статуса выполнения, ни ссылки на сессию.
 """
-from datetime import date, timedelta
+from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 
 from api.services.models import UserCalendarDay
-from api.services.periodization.service import _wipe_future_calendar
+from api.services.periodization.service import _regenerate_future, _wipe_future_calendar
 from api.services.volume.repository import utc_today
 
 pytestmark = pytest.mark.asyncio
@@ -88,3 +88,58 @@ async def test_wipe_still_removes_untouched_future(db, test_user, active_block):
     await db.commit()
 
     assert await _surviving_dates(db, test_user.id) == set()
+
+
+async def test_regeneration_over_a_survivor_makes_no_duplicate_and_keeps_the_layout(
+    db, test_user, active_block
+):
+    """Самое опасное место задачи: уцелевший день остаётся в базе, а
+    генератор проходит по тому же диапазону. Проверяем оба свойства —
+    что второй строки на ту же дату не появилось И что раскладка сплита
+    на последующих днях не уехала из-за пропуска."""
+    today = utc_today()
+
+    # 1. Эталон: перегенерация на чистом календаре блока.
+    await _regenerate_future(db, test_user.id, active_block, today)
+    await db.commit()
+    baseline = (await db.execute(
+        select(UserCalendarDay.target_date, UserCalendarDay.day_tag,
+               UserCalendarDay.microcycle_day_number)
+        .where(UserCalendarDay.app_user_id == test_user.id,
+               UserCalendarDay.target_date > today)
+        .order_by(UserCalendarDay.target_date)
+    )).all()
+    assert baseline, "перегенерация должна была создать будущие дни"
+
+    # 2. Делаем один из будущих дней уцелевшим и перегенерируем снова.
+    survivor_date = baseline[1].target_date
+    await db.execute(
+        update(UserCalendarDay)
+        .where(UserCalendarDay.app_user_id == test_user.id,
+               UserCalendarDay.target_date == survivor_date)
+        .values(status="completed")
+    )
+    await db.commit()
+
+    await _regenerate_future(db, test_user.id, active_block, today)
+    await db.commit()
+
+    # Ни одной даты в двух экземплярах.
+    dupes = (await db.execute(
+        select(UserCalendarDay.target_date, func.count(UserCalendarDay.id))
+        .where(UserCalendarDay.app_user_id == test_user.id)
+        .group_by(UserCalendarDay.target_date)
+        .having(func.count(UserCalendarDay.id) > 1)
+    )).all()
+    assert dupes == [], f"дубли дат после перегенерации: {dupes}"
+
+    # Раскладка сплита на днях ПОСЛЕ уцелевшего не уехала.
+    after = (await db.execute(
+        select(UserCalendarDay.target_date, UserCalendarDay.day_tag,
+               UserCalendarDay.microcycle_day_number)
+        .where(UserCalendarDay.app_user_id == test_user.id,
+               UserCalendarDay.target_date > survivor_date)
+        .order_by(UserCalendarDay.target_date)
+    )).all()
+    expected = [row for row in baseline if row.target_date > survivor_date]
+    assert after == expected

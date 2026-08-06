@@ -303,6 +303,21 @@ class SchedulingEngine:
         slots_queue = sorted(blueprint.slots, key=lambda s: s.day_order)
         split_length = len(slots_queue)
 
+        # P0-09: та же дыра с дублирующейся строкой, что была в
+        # generate_block_days (см. её комментарий выше), открыта и здесь —
+        # эта ветка живёт, когда у пользователя не настроена периодизация
+        # (ensure_active_block вернула None выше), и splits.py всё равно
+        # спускает сюда даты, уже занятые уцелевшими днями (attach_session_to_day
+        # пишет status="completed" независимо от периодизации). Опрос сделан
+        # один раз до цикла, как и там.
+        existing_dates = set((await session.execute(
+            select(UserCalendarDay.target_date).where(
+                UserCalendarDay.app_user_id == app_user_id,
+                UserCalendarDay.target_date >= start_date,
+                UserCalendarDay.target_date <= start_date + timedelta(days=preview_length_days - 1),
+            )
+        )).scalars().all())
+
         # 2. Микроцикл (Настройки тяжести дней)
         micro_stmt = (
             select(AppUserMicrocycle)
@@ -393,22 +408,31 @@ class SchedulingEngine:
 
                 total_workout_days_passed += 1  # День сплита отработан
 
-            cal_day = UserCalendarDay(
-                app_user_id=app_user_id,
-                target_date=current_date,
-                user_mesocycle_id=user_mesocycle_id if user_mesocycle_id else None,
-                mesocycle_phase_number=phase_number,
-                user_microcycle_id=user_micro.id if user_micro else None,
-                microcycle_day_number=micro_day_num,  # <--- ПИШЕМ РЕАЛЬНЫЙ ДЕНЬ МИКРОЦИКЛА
-                day_tag=day_bp.name,
-                micro_tag=micro_tag_calc,
-                meso_tag=meso_tag_calc,
-                plan_id=plan_id_to_save,
-                is_rest_day=is_rest_day,
-                is_blackout=is_banned,
-                status="planned"
-            )
-            session.add(cal_day)
+            # P0-09: current_date not in existing_dates — единственное
+            # дополнительное условие, зеркалит generate_block_days. Все
+            # вычисления и счётчики выше (weekday/slot/pos/
+            # total_workout_days_passed) уже отработали безусловно в этой
+            # итерации, так что пропуск вставки здесь не сдвигает раскладку
+            # сплита на последующих днях. НЕ continue — иначе current_date
+            # не продвинулся бы и цикл завис.
+            if current_date not in existing_dates:
+                cal_day = UserCalendarDay(
+                    app_user_id=app_user_id,
+                    target_date=current_date,
+                    user_mesocycle_id=user_mesocycle_id if user_mesocycle_id else None,
+                    mesocycle_phase_number=phase_number,
+                    user_microcycle_id=user_micro.id if user_micro else None,
+                    microcycle_day_number=micro_day_num,  # <--- ПИШЕМ РЕАЛЬНЫЙ ДЕНЬ МИКРОЦИКЛА
+                    day_tag=day_bp.name,
+                    micro_tag=micro_tag_calc,
+                    meso_tag=meso_tag_calc,
+                    plan_id=plan_id_to_save,
+                    is_rest_day=is_rest_day,
+                    is_blackout=is_banned,
+                    status="planned"
+                )
+                session.add(cal_day)
+
             current_date += timedelta(days=1)
 
         await session.commit()

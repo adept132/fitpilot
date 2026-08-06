@@ -172,10 +172,28 @@ async def db():
 
 @pytest_asyncio.fixture
 async def active_block(db: AsyncSession, test_user: AppUser):
-    """Минимальный активный блок для тестов перегенерации (P0-09, Задача 6)."""
-    from datetime import date, timedelta
+    """Минимальный активный блок для тестов перегенерации (P0-09, Задача 6).
 
-    from api.services.models import TrainingBlock
+    Несёт при себе минимальный активный сплит из двух дней (Push/Pull).
+    Без него SchedulingEngine.generate_block_days видит пустую slots_queue
+    и не кладёт в календарь ни одной строки (см. её ранний `if not
+    slots_queue: return 0`) — тесты, которые перегенерируют календарь
+    поверх этого блока (P0-09, Задача 6, ревью, Находка 3), иначе работали
+    бы над пустым диапазоном и ничего бы не проверяли. Два разных дня, а не
+    один, чтобы сдвиг раскладки при пропуске уцелевшей даты был виден и по
+    day_tag, а не только по счётчику микроцикла.
+    """
+    from datetime import timedelta
+
+    from api.services.day_template import DayTemplateType
+    from api.services.models import (
+        DayBlueprint,
+        DayMuscleTarget,
+        SplitBlueprint,
+        SplitDaySlot,
+        TrainingBlock,
+        UserSplit,
+    )
     from api.services.volume.repository import utc_today
 
     block = TrainingBlock(
@@ -188,6 +206,29 @@ async def active_block(db: AsyncSession, test_user: AppUser):
         status="active",
     )
     db.add(block)
+
+    blueprint = SplitBlueprint(
+        name="Тестовый сплит Push/Pull", author_id=test_user.id, length_days=2, is_system=False,
+    )
+    day_push = DayBlueprint(
+        name="Push", author_id=test_user.id, template_type=DayTemplateType.PUSH, is_system=False,
+    )
+    day_pull = DayBlueprint(
+        name="Pull", author_id=test_user.id, template_type=DayTemplateType.PULL, is_system=False,
+    )
+    db.add_all([blueprint, day_push, day_pull])
+    await db.flush()
+    db.add(DayMuscleTarget(day_id=day_push.id, muscle_group_id="chest"))
+    db.add(DayMuscleTarget(day_id=day_pull.id, muscle_group_id="back"))
+    db.add(SplitDaySlot(blueprint_id=blueprint.id, day_id=day_push.id, day_order=0))
+    db.add(SplitDaySlot(blueprint_id=blueprint.id, day_id=day_pull.id, day_order=1))
+    db.add(
+        UserSplit(
+            app_user_id=test_user.id, blueprint_id=blueprint.id, is_active=True, current_day=1,
+            selected_plans={},
+        )
+    )
+
     await db.commit()
     await db.refresh(block)
     yield block
