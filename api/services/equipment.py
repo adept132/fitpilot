@@ -19,6 +19,10 @@ DIP_BARS = "dip_bars"
 BODYWEIGHT = "bodyweight"
 KETTLEBELL = "kettlebell"
 BAND = "band"
+PLATE = "plate"
+AB_ROLLER = "ab_roller"
+BOX = "box"
+EXERCISE_BALL = "exercise_ball"
 
 CANONICAL = {
     BARBELL,
@@ -32,6 +36,10 @@ CANONICAL = {
     BODYWEIGHT,
     KETTLEBELL,
     BAND,
+    PLATE,
+    AB_ROLLER,
+    BOX,
+    EXERCISE_BALL,
 }
 
 # EN -> RU (для справки/дефолтов; основной перевод — на фронте)
@@ -47,6 +55,10 @@ RU_LABELS = {
     BODYWEIGHT: "Свой вес",
     KETTLEBELL: "Гиря",
     BAND: "Фитнес-резинка",
+    PLATE: "Блин",
+    AB_ROLLER: "Ролик для пресса",
+    BOX: "Тумба",
+    EXERCISE_BALL: "Фитбол",
 }
 
 # Все синонимы (RU/EN, lowercase, ё->е) -> канон.
@@ -82,6 +94,17 @@ _SYNONYMS = {
     # band
     "band": BAND, "resistance_band": BAND, "фитнес-резинка": BAND,
     "резинка": BAND, "эспандер": BAND,
+    # plate (блин от штанги как самостоятельный снаряд: Front Plate Raise)
+    "plate": PLATE, "блин": PLATE, "диск": PLATE,
+    # ab roller
+    "ab_roller": AB_ROLLER, "ab roller": AB_ROLLER, "ролик": AB_ROLLER,
+    "ролик для пресса": AB_ROLLER, "колесо для пресса": AB_ROLLER,
+    # box / тумба (опора, а не отягощение: Box Squat)
+    "box": BOX, "тумба": BOX, "плиометрический бокс": BOX,
+    # fit / exercise ball
+    "exercise_ball": EXERCISE_BALL, "exercise ball": EXERCISE_BALL,
+    "stability ball": EXERCISE_BALL, "фитбол": EXERCISE_BALL,
+    "гимнастический мяч": EXERCISE_BALL,
 }
 
 
@@ -135,6 +158,10 @@ _TEXT_STEMS = [
     ("резинк", BAND),
     ("эспандер", BAND),
     ("лент", BAND),
+    ("блин", PLATE),
+    ("ролик", AB_ROLLER),
+    ("тумб", BOX),
+    ("фитбол", EXERCISE_BALL),
 ]
 
 
@@ -225,9 +252,13 @@ _STEP_CATEGORY = {
     FREE_MACHINE: STEP_PLATE,
     DUMBBELL: STEP_DUMBBELL,
     BLOCK_MACHINE: STEP_BLOCK,
+    PLATE: STEP_PLATE,  # блин и есть шаг набора блинов
 }
 # Приоритет "весонесущего" оборудования, если у упражнения их несколько.
-_STEP_PRIORITY = [BARBELL, DUMBBELL, SMITH, FREE_MACHINE, BLOCK_MACHINE, KETTLEBELL]
+# ab_roller / box / exercise_ball сюда не входят: это опора, а не отягощение.
+_STEP_PRIORITY = [
+    BARBELL, DUMBBELL, SMITH, FREE_MACHINE, BLOCK_MACHINE, KETTLEBELL, PLATE
+]
 
 
 def equipment_to_step_category(equipment_needed) -> str:
