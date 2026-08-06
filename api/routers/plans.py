@@ -32,8 +32,14 @@ router = APIRouter(prefix="/plans", tags=["Plans"])
 
 LOCATION_EQUIPMENT = {
     "gym": None,
-    "free_weights": {"barbell", "dumbbell", "kettlebell", "bench", "pullup_bar", "dip_bars", "bodyweight"},
-    "home": {"dumbbell", "kettlebell", "band", "bodyweight", "pullup_bar"},
+    "free_weights": {
+        "barbell", "dumbbell", "kettlebell", "bench", "pullup_bar", "dip_bars",
+        "bodyweight", "plate", "box", "exercise_ball", "ab_roller",
+    },
+    "home": {
+        "dumbbell", "kettlebell", "band", "bodyweight", "pullup_bar",
+        "ab_roller", "exercise_ball",
+    },
 }
 
 
