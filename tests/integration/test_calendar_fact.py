@@ -148,3 +148,32 @@ async def test_explicit_link_wins_over_date_for_past_midnight_session(
     await db.refresh(today)
     assert yesterday.actual_workout_session_id == workout_id
     assert today.actual_workout_session_id is None
+
+
+async def test_finish_survives_a_failure_in_calendar_attachment(
+    client, auth_headers, db, test_user, monkeypatch
+):
+    # Обещание «падение учёта adherence не роняет завершение тренировки»
+    # должно быть проверено, а не заявлено: голый try/except его не давал.
+    day = await _make_day(db, test_user.id, _utc_today())
+
+    import api.services.volume.repository as volume_repo
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("attachment exploded")
+
+    monkeypatch.setattr(volume_repo, "attach_session_to_day", boom)
+
+    started = await client.post(
+        "/workouts/start",
+        headers=auth_headers,
+        json={"source": "free", "calendar_day_id": day.id},
+    )
+    workout_id = started.json()["id"]
+
+    resp = await client.post(f"/workouts/{workout_id}/finish", headers=auth_headers)
+    assert resp.status_code == 200, resp.text
+
+    await db.refresh(day)
+    assert day.status == "planned"
+    assert day.actual_workout_session_id is None

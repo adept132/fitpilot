@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.services.models import UserCalendarDay, WorkoutSession
+
+logger = logging.getLogger(__name__)
 
 
 async def attach_session_to_day(
@@ -58,3 +61,35 @@ async def attach_session_to_day(
     day.status = "completed"
     day.actual_workout_session_id = workout.id
     return day
+
+
+async def guarded(session: AsyncSession, label: str, work) -> Any:
+    """Выполнить надстроечную работу так, чтобы её падение не уронило
+    основной путь и не отравило транзакцию вызывающего.
+
+    Голого try/except здесь недостаточно: работа идёт в ТОЙ ЖЕ сессии,
+    которую вызывающий эндпоинт потом коммитит, и ошибка уровня DBAPI
+    помечает транзакцию как требующую отката — следующий session.commit()
+    упадёт с PendingRollbackError, хотя исключение уже поймано и
+    залогировано. SAVEPOINT изолирует падение.
+
+    Форма без `async with` — сознательная: контекст-менеджер регистрирует
+    себя владельцем транзакционного контекста и ломается, если обёрнутая
+    работа успела закоммитить сессию сама. Подробный разбор — в докстринге
+    safe_refresh_proposals (api/services/periodization/service.py).
+
+    `work` — уже созданная корутина; корутины ленивы, поэтому создание её
+    до begin_nested() безопасно.
+    """
+    nested = await session.begin_nested()
+    try:
+        result = await work
+    except Exception:  # noqa: BLE001
+        logger.exception("P0-09: %s — упало, основной путь продолжается", label)
+        if nested.is_active:
+            await nested.rollback()
+        return None
+    else:
+        if nested.is_active:
+            await nested.commit()
+        return result

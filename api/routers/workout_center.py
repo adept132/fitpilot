@@ -1,4 +1,3 @@
-import logging
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
@@ -46,8 +45,6 @@ from api.schemas.workout_center import (
 from api.services.volume_service import VolumeService
 
 router = APIRouter(prefix="", tags=["workout-center"])
-
-logger = logging.getLogger(__name__)
 
 
 def build_split_day_read(slot: SplitDaySlot) -> WorkoutCenterSplitDayRead:
@@ -644,15 +641,17 @@ async def finish_workout(
     workout.status = "finished"
     workout.finished_at = finished_at
 
-    # P0-09: календарь запоминает факт. Ошибка здесь не должна ронять
-    # завершение тренировки — учёт adherence это надстройка над основным
-    # путём, тот же принцип, что и у решателя периодизации.
-    try:
-        from api.services.volume.repository import attach_session_to_day
+    # P0-09: календарь запоминает факт. guarded() изолирует падение в
+    # SAVEPOINT — учёт adherence это надстройка, и она не имеет права
+    # уронить завершение тренировки ни исключением, ни отравленной
+    # транзакцией (см. её докстринг).
+    from api.services.volume.repository import attach_session_to_day, guarded
 
-        await attach_session_to_day(db, current_app_user.id, workout)
-    except Exception:
-        logger.exception("P0-09: не удалось привязать сессию %s к дню", workout.id)
+    await guarded(
+        db,
+        "привязка сессии к дню календаря",
+        attach_session_to_day(db, current_app_user.id, workout),
+    )
 
     # Оценка результата и предварительное предписание на следующий раз.
     # next_prescription едет на устройство и делает прогрессию доступной
