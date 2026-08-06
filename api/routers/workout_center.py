@@ -99,6 +99,19 @@ async def build_context(
         session: AsyncSession,
         app_user: AppUser,
 ) -> WorkoutCenterContextRead:
+    # P0-09: пропуски проставляются лениво, при обращении. guarded()
+    # изолирует падение в SAVEPOINT — голого try/except мало: работа идёт в
+    # той же сессии, которую эндпоинт потом коммитит, и ошибка уровня DBAPI
+    # уронила бы commit через PendingRollbackError, хотя исключение уже
+    # поймано. Без контекста дня пользователь не начнёт тренировку.
+    from api.services.volume.repository import guarded, mark_missed_days, utc_today
+
+    await guarded(
+        session,
+        "простановка пропущенных дней",
+        mark_missed_days(session, app_user.id, utc_today()),
+    )
+
     # --- 1. ЗАГРУЗКА СПЛИТОВ ---
     splits_stmt = (
         select(SplitBlueprint)
