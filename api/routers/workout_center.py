@@ -1,3 +1,4 @@
+import logging
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
@@ -45,6 +46,8 @@ from api.schemas.workout_center import (
 from api.services.volume_service import VolumeService
 
 router = APIRouter(prefix="", tags=["workout-center"])
+
+logger = logging.getLogger(__name__)
 
 
 def build_split_day_read(slot: SplitDaySlot) -> WorkoutCenterSplitDayRead:
@@ -435,9 +438,6 @@ async def start_workout(
             # чтобы RIR/диапазон повторов считались по фактическому дню, а не по хардкоду.
             current_day_index = cal_day.microcycle_day_number
 
-            # Можно сразу перевести день календаря в статус "completed" или "in_progress"
-            # cal_day.status = "in_progress"
-
             training_block_id = cal_day.block_id
 
     # 2. Если это полностью свободная тренировка, берем глобальные активные циклы
@@ -503,7 +503,7 @@ async def start_workout(
         split_day_id=payload.split_day_id if payload.source == "by_parameters" else None,
         plan_id=payload.plan_id,
 
-        # calendar_day_id=payload.calendar_day_id, # (если добавил колонку в БД)
+        calendar_day_id=payload.calendar_day_id,
 
         app_user_mesocycle_id=meso_id,
         mesocycle_phase=current_phase,
@@ -643,6 +643,16 @@ async def finish_workout(
     finished_at = datetime.now(timezone.utc)
     workout.status = "finished"
     workout.finished_at = finished_at
+
+    # P0-09: календарь запоминает факт. Ошибка здесь не должна ронять
+    # завершение тренировки — учёт adherence это надстройка над основным
+    # путём, тот же принцип, что и у решателя периодизации.
+    try:
+        from api.services.volume.repository import attach_session_to_day
+
+        await attach_session_to_day(db, current_app_user.id, workout)
+    except Exception:
+        logger.exception("P0-09: не удалось привязать сессию %s к дню", workout.id)
 
     # Оценка результата и предварительное предписание на следующий раз.
     # next_prescription едет на устройство и делает прогрессию доступной

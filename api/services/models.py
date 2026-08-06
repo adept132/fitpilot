@@ -303,6 +303,14 @@ class WorkoutSession(Base):
     training_block_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("training_blocks.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # P0-09: плановый день, к которому сессия ОТНОСИТСЯ по намерению
+    # пользователя. Фиксируется при старте, когда намерение достоверно
+    # известно. Обратная ссылка UserCalendarDay.actual_workout_session_id —
+    # это ФАКТ, проставляемый при завершении; поля значат разное и нужны оба.
+    calendar_day_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("user_calendar.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
     mesocycle_phase: Mapped[Optional[int]] = mapped_column()
     app_user_microcycle_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("app_user_microcycles.id",
                                                                                       ondelete="SET NULL"),
