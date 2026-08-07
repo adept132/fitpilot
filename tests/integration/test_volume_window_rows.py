@@ -70,6 +70,49 @@ async def test_no_calendar_means_no_window(db, test_user):
     assert await current_window(db, test_user.id, utc_today()) is None
 
 
+async def test_window_does_not_span_a_gap_between_blocks(db, test_user, active_block):
+    """Critical из ревью: без привязки к блоку последнее окно блока
+    растягивалось через разрыв до старта следующего, и тренировки,
+    сделанные в промежутке, приписывались чужому блоку."""
+    from api.services.models import TrainingBlock
+
+    start = utc_today() - timedelta(days=20)
+
+    # Блок 1: один микроцикл из 4 дней.
+    for offset in range(4):
+        await _day(db, test_user.id, active_block.id,
+                   start + timedelta(days=offset), (offset % 4) + 1)
+
+    # Разрыв в неделю, затем блок 2 со своим микроциклом.
+    second = TrainingBlock(
+        app_user_id=test_user.id, block_index=active_block.block_index + 1,
+        phases=[{"phase_number": 1, "name": "medium",
+                 "effort_tier": "medium", "length_days": 7}],
+        microcycle_length=7,
+        start_date=start + timedelta(days=11),
+        planned_end_date=start + timedelta(days=18),
+        status="active",
+    )
+    db.add(second)
+    await db.commit()
+    await db.refresh(second)
+
+    for offset in range(4):
+        await _day(db, test_user.id, second.id,
+                   start + timedelta(days=11 + offset), (offset % 4) + 1)
+    await db.commit()
+
+    first_window = await current_window(db, test_user.id, start + timedelta(days=2))
+    assert first_window is not None
+    assert first_window.block_id == active_block.id
+    # Окно обязано кончиться внутри своего блока, а не дотянуться до дня
+    # перед стартом второго.
+    assert first_window.end_date == start + timedelta(days=3)
+
+    # И следующего окна ВНУТРИ первого блока нет — второй блок это не «дальше».
+    assert await window_after(db, test_user.id, first_window) is None
+
+
 async def test_prescribed_counts_plan_sets_and_adjustments(
     db, test_user, active_block, seeded_plan, seeded_history
 ):

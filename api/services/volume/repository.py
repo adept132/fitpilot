@@ -18,7 +18,6 @@ from api.services.models import (
     WorkoutSessionExercise,
     WorkoutSessionSet,
 )
-from api.services.muscle_keys import to_system_key
 from api.services.volume.measure import (
     MuscleContribution,
     accumulate,
@@ -195,8 +194,10 @@ class Window:
     is_deload: bool
 
 
-async def _window_starts(session: AsyncSession, app_user_id: int) -> list:
-    """Дни, с которых начинаются микроциклы, по возрастанию даты.
+async def _window_starts(
+    session: AsyncSession, app_user_id: int, block_id: Optional[int]
+) -> list:
+    """Дни, с которых начинаются микроциклы, по возрастанию даты — в ПРЕДЕЛАХ ОДНОГО БЛОКА.
 
     Границы берутся из УЖЕ материализованной правды — сброса
     UserCalendarDay.microcycle_day_number в 1, — а не считаются формулой
@@ -204,22 +205,52 @@ async def _window_starts(session: AsyncSession, app_user_id: int) -> list:
     микроцикла разрешена с учётом blackout и вставленных разгрузок; вторая
     формула стала бы вторым источником правды, ровно той болезнью, которую
     P0-08 лечил у номера фазы.
+
+    Скоуп по `block_id` обязателен (ревью Задачи 8 P0-09, Critical): блоки
+    закрываются в разное время и разными путями (close_stale_block, layoff,
+    досрочная разгрузка — api/services/periodization/service.py), и
+    непрерывность дат между концом одного блока и стартом следующего никто
+    не гарантирует. Без привязки к блоку маркеры собирались бы по всей
+    истории пользователя сразу, и последнее окно одного блока молча
+    растягивалось бы через разрыв до дня перед стартом следующего.
+
+    `block_id=None` — дни, сгенерированные до P0-08, у них block_id ещё не
+    проставлен; фильтруем через `.is_(None)`, а не `== None`, потому что
+    SQL не считает NULL равным NULL через `=`.
     """
+    if block_id is None:
+        block_filter = UserCalendarDay.block_id.is_(None)
+    else:
+        block_filter = UserCalendarDay.block_id == block_id
     rows = (await session.execute(
         select(UserCalendarDay)
         .where(
             UserCalendarDay.app_user_id == app_user_id,
             UserCalendarDay.microcycle_day_number == 1,
+            block_filter,
         )
         .order_by(UserCalendarDay.target_date)
     )).scalars().all()
     return list(rows)
 
 
-async def _last_calendar_date(session: AsyncSession, app_user_id: int) -> Optional[date]:
+async def _last_calendar_date(
+    session: AsyncSession, app_user_id: int, block_id: Optional[int]
+) -> Optional[date]:
+    """Последняя дата календаря В ПРЕДЕЛАХ ОДНОГО БЛОКА.
+
+    Тот же скоуп, что и у `_window_starts` и по той же причине: без него
+    последнее окно блока растягивалось бы до конца всего календаря
+    пользователя, а не до конца своего блока.
+    """
+    if block_id is None:
+        block_filter = UserCalendarDay.block_id.is_(None)
+    else:
+        block_filter = UserCalendarDay.block_id == block_id
     return (await session.execute(
         select(func.max(UserCalendarDay.target_date)).where(
-            UserCalendarDay.app_user_id == app_user_id
+            UserCalendarDay.app_user_id == app_user_id,
+            block_filter,
         )
     )).scalar_one_or_none()
 
@@ -227,13 +258,13 @@ async def _last_calendar_date(session: AsyncSession, app_user_id: int) -> Option
 def _window_from(starts: list, index: int, last_date: date) -> Window:
     """Собрать Window по позиции `index` в списке стартов микроциклов.
 
-    ВАЖНО: window_index здесь всегда `index + 1` — это единственное место,
-    которое присваивает номер окну. `window_after` полагается на то, что
-    номер окна равен его позиции в `starts` плюс один (см. её докстринг) —
-    если эта нумерация когда-нибудь перестанет быть последовательной
-    (например, окна начнут удаляться или нумероваться по датам блока),
-    `window_after` тихо подставит не тот индекс в `starts` и вернёт не то
-    окно. Явно фиксируем инвариант здесь и в window_after.
+    `starts` уже скоупится одним блоком (см. `_window_starts`), поэтому
+    window_index = `index + 1` — это номер окна ВНУТРИ БЛОКА, а не сквозной
+    номер по всей истории пользователя (по аналогии с phase_number, P0-08).
+
+    `window_after` больше не полагается на эту нумерацию для поиска позиции
+    в заново загруженном `starts` — она ищет позицию по `start_date` (см. её
+    докстринг), так что связка по индексу сюда не тянется.
     """
     head = starts[index]
     end = (
@@ -254,11 +285,33 @@ def _window_from(starts: list, index: int, last_date: date) -> Window:
 async def current_window(
     session: AsyncSession, app_user_id: int, today: date
 ) -> Optional[Window]:
-    """Окно, в которое попадает дата. None, если календаря нет."""
-    starts = await _window_starts(session, app_user_id)
+    """Окно, в которое попадает дата. None, если календаря нет.
+
+    Сначала находим день календаря, покрывающий `today` (последний день с
+    `target_date <= today`) — он определяет БЛОК. Дальше все стартовые
+    маркеры микроцикла и последняя дата ищутся только внутри этого блока
+    (ревью Задачи 8 P0-09, Critical): блоки закрываются в разное время и
+    разными путями, непрерывность дат между ними не гарантирована, и без
+    привязки к блоку окно могло бы молча растянуться через разрыв в чужой
+    блок.
+    """
+    covering_day = (await session.execute(
+        select(UserCalendarDay)
+        .where(
+            UserCalendarDay.app_user_id == app_user_id,
+            UserCalendarDay.target_date <= today,
+        )
+        .order_by(UserCalendarDay.target_date.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+    if covering_day is None:
+        return None
+    block_id = covering_day.block_id
+
+    starts = await _window_starts(session, app_user_id, block_id)
     if not starts:
         return None
-    last_date = await _last_calendar_date(session, app_user_id)
+    last_date = await _last_calendar_date(session, app_user_id, block_id)
     if last_date is None:
         return None
 
@@ -276,25 +329,30 @@ async def current_window(
 async def window_after(
     session: AsyncSession, app_user_id: int, window: Window
 ) -> Optional[Window]:
-    """Следующее окно. Оно уже сгенерировано — календарь развёрнут вперёд.
+    """Следующее окно ВНУТРИ ТОГО ЖЕ БЛОКА. Оно уже сгенерировано — календарь
+    развёрнут вперёд.
 
-    Полагается на инвариант `_window_from`: window_index == позиция в
-    `starts` + 1 (см. её докстринг). Поэтому позиция СЛЕДУЮЩЕГО окна в
-    заново загруженном `starts` — это ровно `window.window_index` (без
-    вычитания единицы). Если `_window_from` когда-нибудь начнёт нумеровать
-    иначе, этот код молча возьмёт не тот элемент списка — тесты
-    `test_window_after_returns_the_following_microcycle` и
-    `test_window_starts_where_microcycle_day_resets_to_one` вместе
-    фиксируют оба конца этой связи и упадут первыми, если она разъедется.
+    Позиция окна ищется по дате начала (`window.start_date`), а не по
+    `window.window_index` (ревью Задачи 8 P0-09, Important): связка по
+    индексу полагалась на то, что второй независимый вызов `_window_starts`
+    вернёт те же элементы в том же порядке, и на инвариант нумерации
+    `_window_from`, без всякой гарантии этого на уровне кода. Поиск по дате
+    от этой связки не зависит вовсе.
+
+    Если следующего микроцикла в этом блоке нет — блок кончился; следующий
+    блок (если он есть) это не "дальше" в рамках текущего окна, поэтому None.
     """
-    starts = await _window_starts(session, app_user_id)
-    last_date = await _last_calendar_date(session, app_user_id)
+    starts = await _window_starts(session, app_user_id, window.block_id)
+    last_date = await _last_calendar_date(session, app_user_id, window.block_id)
     if not starts or last_date is None:
         return None
-    index = window.window_index  # window_index = позиция + 1
-    if index >= len(starts):
+    index = next(
+        (i for i, head in enumerate(starts) if head.target_date == window.start_date),
+        None,
+    )
+    if index is None or index + 1 >= len(starts):
         return None
-    return _window_from(starts, index, last_date)
+    return _window_from(starts, index + 1, last_date)
 
 
 @dataclass(frozen=True)
