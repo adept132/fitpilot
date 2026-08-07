@@ -120,7 +120,8 @@ async def decide_proposal(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     result = await apply_decision(
-        db, current_user.id, proposal_id, payload.action, payload.client_uuid
+        db, current_user.id, proposal_id, payload.action, payload.client_uuid,
+        options=payload.options,
     )
     if result["status"] == "not_found":
         raise HTTPException(status_code=404, detail="Предложение не найдено")

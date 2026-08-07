@@ -779,6 +779,7 @@ async def apply_decision(
     action: str,
     client_uuid: Optional[str] = None,
     today: Optional[date] = None,
+    options: Optional[dict] = None,
 ) -> dict:
     """Применить решение пользователя по предложению периодизации.
 
@@ -820,6 +821,34 @@ async def apply_decision(
             "current_status": proposal.status,
             "decided_action": proposal.decided_action,
         }
+
+    if proposal.kind == params.KIND_VOLUME_REVIEW:
+        # P0-09, Задача 11: обзор объёма — свой вид решения в той же таблице
+        # (см. докстринг KIND_VOLUME_REVIEW). Не блок-мутирующее действие и
+        # не структурная замена — TrainingBlock здесь не нужен, поэтому ветка
+        # стоит ДО его загрузки и ДО проверки _BLOCK_MUTATING_ACTIONS, которая
+        # смысла для этого вида не имеет.
+        from api.services.volume.service import apply_volume_decision
+
+        outcome = await apply_volume_decision(
+            session, app_user_id, proposal, action, options or {}
+        )
+        proposal.status = (
+            params.STATUS_ACCEPTED
+            if outcome["applied"]
+            else params.STATUS_DECLINED
+        )
+        proposal.client_uuid = client_uuid
+        proposal.decided_at = datetime.now(timezone.utc)
+        # Брифовый набросок этой ветки заканчивался на flush() — по аналогии
+        # с остальной apply_decision (proposal.status и мутации applyVolume
+        # копятся в ОДНОЙ сессии, которую эндпоинт больше нигде не коммитит:
+        # get_db не автокоммитит на выходе, см. app/database.SessionLocal).
+        # Без явного commit() здесь решение и правки бюджета/предписания
+        # молча терялись бы при реальном вызове через роутер — тесты этой
+        # ветки коммитят сами и бага не поймали бы.
+        await session.commit()
+        return outcome
 
     block = (
         await session.execute(

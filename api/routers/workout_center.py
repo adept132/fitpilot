@@ -112,6 +112,19 @@ async def build_context(
         mark_missed_days(session, app_user.id, utc_today()),
     )
 
+    # P0-09, Задача 11: обзор объёма материализуется лениво здесь же — по
+    # тому же принципу «тихо доделать при обращении», что и пропуски выше.
+    # guarded(), а не голый try/except — по той же причине (см. её докстринг):
+    # падение решателя не должно отравить сессию, которую build_context
+    # делит с остальной сборкой контекста.
+    from api.services.volume.service import refresh_volume_proposals
+
+    await guarded(
+        session,
+        "обновление обзора объёма",
+        refresh_volume_proposals(session, app_user.id, utc_today()),
+    )
+
     # --- 1. ЗАГРУЗКА СПЛИТОВ ---
     splits_stmt = (
         select(SplitBlueprint)
