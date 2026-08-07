@@ -20,6 +20,7 @@ from api.services.models import (
     WorkoutSessionExercise,
     WorkoutSessionSet,
 )
+from api.services.muscle_keys import to_system_key
 from api.services.volume.landmarks import landmarks_for
 from api.services.volume.measure import (
     MuscleContribution,
@@ -653,3 +654,41 @@ async def recompute_stale_window(
     snapshot.muscles = muscles
     flag_modified(snapshot, "muscles")
     return snapshot
+
+
+async def muscle_frequency(
+    session: AsyncSession, app_user_id: int, window: Window
+) -> dict[str, int]:
+    """Сколько раз за окно мышца встречается как ГЛАВНАЯ в предписании.
+
+    Нужна для рантайм-клампа потолка: табличный MRV предполагает разумную
+    частоту, а в реальном сплите она своя.
+    """
+    days = (await session.execute(
+        select(UserCalendarDay.plan_id).where(
+            UserCalendarDay.app_user_id == app_user_id,
+            UserCalendarDay.target_date >= window.start_date,
+            UserCalendarDay.target_date <= window.end_date,
+            UserCalendarDay.plan_id.is_not(None),
+        )
+    )).scalars().all()
+    if not days:
+        return {}
+
+    rows = (await session.execute(
+        select(WorkoutPlanExercise.plan_id, Exercise.main_muscle_group)
+        .join(Exercise, WorkoutPlanExercise.exercise_id == Exercise.id)
+        .where(WorkoutPlanExercise.plan_id.in_(set(days)))
+    )).all()
+
+    muscles_by_plan: dict[int, set[str]] = {}
+    for plan_id, main in rows:
+        key = to_system_key(main)
+        if key:
+            muscles_by_plan.setdefault(plan_id, set()).add(key)
+
+    frequency: dict[str, int] = {}
+    for plan_id in days:
+        for key in muscles_by_plan.get(plan_id, set()):
+            frequency[key] = frequency.get(key, 0) + 1
+    return frequency
