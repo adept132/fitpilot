@@ -49,3 +49,57 @@ async def test_overview_without_calendar_returns_empty_window(
     assert body["shape_version"] == 2
     assert body["window"] is None
     assert body["muscles"] == {}
+
+
+async def test_overview_carries_raw_budget_from_profile(
+    client, auth_headers, db, test_user, active_block, seeded_plan
+):
+    """Критичная находка ревью P0-09 Task 16: редактор бюджета (VolumeMatrixWidget)
+    правит сам volume_budget, а окно отдаёт только производные величины по
+    мышцам. Без сырого budget в ответе редактору нечем было наполниться —
+    он молча оставался мёртвым (currentBudget=null). budget должен прийти
+    как есть из профиля на обоих путях возврата (с окном и без)."""
+    raw_budget = {
+        "version": "1",
+        "meta": {
+            "focus_muscles": ["chest"],
+            "distribution_type": "even",
+            "total_weekly_sets": 12,
+        },
+        "constraints": {
+            "systemic_cap_per_week": 60,
+            "max_sets_per_session_per_muscle": 6,
+        },
+        "weekly_targets": {"chest": {"target_sets": 12, "min_floor": 6, "is_focus": True}},
+    }
+    db.add(AppUserProfile(
+        app_user_id=test_user.id, experience_level="intermediate",
+        volume_budget=raw_budget,
+    ))
+    start = utc_today() - timedelta(days=2)
+    for offset in range(6):
+        db.add(UserCalendarDay(
+            app_user_id=test_user.id, target_date=start + timedelta(days=offset),
+            block_id=active_block.id, plan_id=seeded_plan.id, day_tag="push",
+            micro_tag="medium", meso_tag="medium", microcycle_day_number=offset + 1,
+            is_rest_day=False, is_blackout=False, status="planned",
+        ))
+    await db.commit()
+
+    resp = await client.get("/api/progress/volume-overview", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["window"] is not None
+    assert body["budget"] == raw_budget
+
+
+async def test_overview_budget_is_none_without_profile(
+    client, auth_headers, db, test_user
+):
+    # Нет профиля — редактору нечего показывать, budget честно None
+    # (не {} — {} читался бы редактором как «валидный пустой бюджет»).
+    resp = await client.get("/api/progress/volume-overview", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["window"] is None
+    assert body["budget"] is None

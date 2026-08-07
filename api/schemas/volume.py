@@ -43,3 +43,8 @@ class VolumeOverviewRead(BaseModel):
     level: Optional[str] = None
     adherence: Optional[AdherenceRead] = None
     muscles: dict[str, MuscleVolumeRead] = {}
+    # Сырой volume_budget профиля. Нужен редактору бюджета: окно отдаёт
+    # ПРОИЗВОДНЫЕ величины по мышцам, а редактор правит сам бюджет.
+    # Отдаётся здесь, а не отдельным запросом, потому что профиль на этом
+    # пути уже прочитан.
+    budget: Optional[dict] = None

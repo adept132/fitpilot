@@ -53,11 +53,12 @@ async def get_volume_overview(
         select(AppUserProfile).where(AppUserProfile.app_user_id == current_user.id)
     )).scalar_one_or_none()
     level = profile.experience_level if profile else None
+    budget = profile.volume_budget if profile else None
     targets = targets_from_budget(profile)
 
     window = await volume_repo.current_window(db, current_user.id, today)
     if window is None:
-        return VolumeOverviewRead(level=level)
+        return VolumeOverviewRead(level=level, budget=budget)
 
     prescribed = await volume_repo.prescribed_for(db, current_user.id, window)
     performed = await volume_repo.performed_for(db, current_user.id, window)
@@ -119,6 +120,7 @@ async def get_volume_overview(
             missed_days=adherence.missed_days,
         ),
         muscles=muscles,
+        budget=budget,
     )
 
 
