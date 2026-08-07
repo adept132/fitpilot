@@ -9,6 +9,7 @@ from api.services.volume.decide import (
     headline_reason,
 )
 from api.services.volume.landmarks import Landmarks
+from api.services.volume.measure import INDIRECT_WEIGHT
 
 LM = Landmarks(mev=6, mav=12, mrv=18, mev_direct=4, mrv_direct=14)
 
@@ -130,3 +131,56 @@ def test_headline_prefers_direct_ceiling():
 
 def test_headline_of_empty_list_is_none():
     assert headline_reason([]) is None
+
+
+def test_ceiling_indirect_excess_targets_budget_not_prescription():
+    """Избыток преимущественно косвенный: рычаг лежит не на этой мышце,
+    а на базовом упражнении выше по цепочке. Требовать «убери подходы с
+    трицепса», когда трицепс забит жимами, — вредный совет, поэтому правка
+    должна адресовать бюджет (budget_to_range), а не предписание мышцы.
+    """
+    # effective = 2 + 40*0.5 = 22 > MRV(18); direct_share = 2/22 ~ 0.09 — явное меньшинство.
+    closed = {"chest": state(direct=2.0, indirect=40.0)}
+    result = decide(inp(closed))
+    adj = next(a for a in result if a.reason_code == params.REASON_ABOVE_MRV)
+    assert adj.kind == params.KIND_BUDGET_TO_RANGE
+
+
+def test_ceiling_direct_excess_targets_prescription_cut():
+    """Избыток преимущественно прямой: рычаг лежит на самой мышце, поэтому
+    правка режет предписание (prescription_cut), а не уходит в бюджет.
+    """
+    # effective = 13 + 12*0.5 = 19 > MRV(18); direct_share = 13/19 ~ 0.68 — явное большинство.
+    closed = {"chest": state(direct=13.0, indirect=12.0)}
+    result = decide(inp(closed))
+    adj = next(a for a in result if a.reason_code == params.REASON_ABOVE_MRV)
+    assert adj.kind == params.KIND_PRESCRIPTION_CUT
+
+
+def test_ceiling_direct_share_boundary_falls_to_prescription_cut():
+    """Ровно на границе DIRECT_SHARE_MAJORITY_RATIO сравнение ">=" в _ceiling
+    относит долю к большинству, поэтому граница уходит в prescription_cut,
+    а не в budget_to_range. Значения выведены из самой константы, чтобы
+    тест следовал за порогом, если его перекалибруют.
+    """
+    effective_target = 20.0  # > MRV(18) с запасом
+    ratio = params.DIRECT_SHARE_MAJORITY_RATIO
+    direct = effective_target * ratio
+    indirect = (effective_target - direct) / INDIRECT_WEIGHT
+    closed = {"chest": state(direct=direct, indirect=indirect)}
+    result = decide(inp(closed))
+    adj = next(a for a in result if a.reason_code == params.REASON_ABOVE_MRV)
+    assert adj.kind == params.KIND_PRESCRIPTION_CUT
+
+
+def test_ceiling_direct_cap_and_effective_breach_yield_one_adjustment():
+    """Прямой потолок и эффективный потолок нарушены одновременно: правка
+    ровно одна, и это правка прямого потолка — прямое превышение
+    проверяется первым и возвращается сразу, не размываясь тем, что
+    эффективная сумма тоже вне диапазона.
+    """
+    # direct=16 > mrv_direct(14); effective = 16 + 10*0.5 = 21 > mrv(18) — оба потолка пробиты.
+    closed = {"chest": state(direct=16.0, indirect=10.0)}
+    result = decide(inp(closed, next_prescribed={"chest": 12.0}))
+    assert len(result) == 1
+    assert result[0].reason_code == params.REASON_DIRECT_ABOVE_CAP
