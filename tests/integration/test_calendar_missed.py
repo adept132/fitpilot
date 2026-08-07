@@ -1,9 +1,11 @@
 """Пропущенные дни проставляются лениво; adherence считает только рабочие дни."""
+import uuid
 from datetime import date, timedelta
 
 import pytest
+from sqlalchemy import delete
 
-from api.services.models import UserCalendarDay
+from api.services.models import AppUser, UserCalendarDay
 from api.services.volume.repository import adherence_for_range, mark_missed_days, utc_today
 
 pytestmark = pytest.mark.asyncio
@@ -68,6 +70,48 @@ async def test_completed_day_is_not_overwritten(db, test_user):
     await db.commit()
     await db.refresh(day)
     assert day.status == "completed"
+
+
+async def test_mark_missed_days_does_not_touch_other_users_days(db, test_user):
+    """P0-09 T5 (Minor, promoted): mark_missed_days — bulk UPDATE, и
+    предикат app_user_id — единственное условие, чьё молчаливое отсутствие
+    было бы разрушительным сразу для ВСЕХ пользователей (не 404, а тихая
+    порча чужих данных). У находки не было теста — ревью явно просило его
+    добавить отдельно от остальных находок этого файла.
+
+    Второй пользователь создаётся по тому же паттерну, что и в
+    test_periodization_api._make_second_user: реальная строка в БД, а не
+    несуществующий id — иначе тест прошёл бы даже без фильтра по
+    app_user_id вовсе.
+    """
+    marker = uuid.uuid4().hex[:12]
+    other_user = AppUser(
+        firebase_uid=f"test-second-{marker}",
+        email=f"test-second-{marker}@example.com",
+        display_name="Second Test User",
+    )
+    db.add(other_user)
+    await db.commit()
+    await db.refresh(other_user)
+
+    try:
+        mine = await _day(db, test_user.id, utc_today() - timedelta(days=2))
+        theirs = await _day(db, other_user.id, utc_today() - timedelta(days=2))
+
+        marked = await mark_missed_days(db, test_user.id, utc_today())
+        await db.commit()
+        await db.refresh(mine)
+        await db.refresh(theirs)
+
+        assert marked == 1
+        assert mine.status == "missed"
+        # Чужой день того же возраста обязан остаться нетронутым — иначе
+        # bulk UPDATE без предиката app_user_id молча испортил бы
+        # календарь ВСЕХ пользователей разом.
+        assert theirs.status == "planned"
+    finally:
+        await db.execute(delete(AppUser).where(AppUser.id == other_user.id))
+        await db.commit()
 
 
 async def test_adherence_counts_only_working_days(db, test_user):
