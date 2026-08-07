@@ -89,6 +89,14 @@ async def _pick_day_for(
     Берём первый день окна, где есть упражнение с этой главной мышцей:
     правка должна называть конкретное упражнение в конкретный день, иначе
     совет «добавь два подхода на широчайшие» некуда применить.
+
+    P0-09 I1: `status == "planned"` и `target_date >= utc_today()` —
+    `_apply_prescription` отказывает на любом дне, который уже не "planned"
+    (отработан или пропущен), а без фильтра здесь эта функция с готовностью
+    называла именно такой день, если он оказывался первым в окне по дате.
+    Пользователь принимал совет на дне 3, а замороженный `day_id` указывал
+    на уже прошедший день 1 — правка молча не применялась, хотя `decide()`
+    предлагал её с расчётом на реальное применение.
     """
     from api.services.models import Exercise
     from api.services.muscle_keys import to_system_key
@@ -99,6 +107,8 @@ async def _pick_day_for(
             UserCalendarDay.app_user_id == app_user_id,
             UserCalendarDay.target_date >= window.start_date,
             UserCalendarDay.target_date <= window.end_date,
+            UserCalendarDay.target_date >= repository.utc_today(),
+            UserCalendarDay.status == "planned",
             UserCalendarDay.plan_id.is_not(None),
         )
         .order_by(UserCalendarDay.target_date)
@@ -506,20 +516,59 @@ async def _apply_frequency(
 async def _apply_prescription(
     session: AsyncSession, app_user_id: int, proposal_id: int, item: dict
 ) -> bool:
+    """Записать правку предписания в день, разрешённый ПРЯМО СЕЙЧАС.
+
+    P0-09 I1: `day_id`/`exercise_id` в payload заморожены в момент, когда
+    `_pick_day_for` строила предложение, — карточка не блокирующая и может
+    провисеть pending часы или дни. Если за это время замороженный день
+    перестал быть "planned" (пользователь его отработал или он пропущен),
+    слепое доверие старому `day_id` тихо хоронит правку отказом, хотя в
+    окне вполне может найтись другой, ещё не пройденный день с той же
+    главной мышцей. Поэтому день переразрешается здесь: замороженные
+    значения используются, только если день всё ещё валиден; иначе —
+    свежий поиск через `_pick_day_for` по текущему окну.
+    """
     day_id = item.get("day_id")
     exercise_id = item.get("exercise_id")
-    if not day_id or not exercise_id:
-        return False
+    muscle = item.get("muscle")
 
-    day = (await session.execute(
-        select(UserCalendarDay).where(
-            UserCalendarDay.id == day_id,
-            UserCalendarDay.app_user_id == app_user_id,
+    day = None
+    if day_id:
+        day = (await session.execute(
+            select(UserCalendarDay).where(
+                UserCalendarDay.id == day_id,
+                UserCalendarDay.app_user_id == app_user_id,
+            )
+        )).scalar_one_or_none()
+
+    frozen_valid = (
+        day is not None
+        and day.status == "planned"
+        and day.target_date >= repository.utc_today()
+        and exercise_id is not None
+    )
+
+    if not frozen_valid:
+        if not muscle:
+            return False
+        window = await repository.current_window(
+            session, app_user_id, repository.utc_today()
         )
-    )).scalar_one_or_none()
-    if day is None or day.status != "planned":
-        # День уже отработан или пропущен — править его предписание поздно.
-        return False
+        if window is None:
+            return False
+        day_id, exercise_id = await _pick_day_for(session, app_user_id, window, muscle)
+        if day_id is None or exercise_id is None:
+            # Ни одного валидного дня для этой мышцы не нашлось — правку
+            # честно не применяем, а не молча привязываем к устаревшему дню.
+            return False
+        day = (await session.execute(
+            select(UserCalendarDay).where(
+                UserCalendarDay.id == day_id,
+                UserCalendarDay.app_user_id == app_user_id,
+            )
+        )).scalar_one_or_none()
+        if day is None:
+            return False
 
     existing = list(day.volume_adjustments or [])
     existing.append({

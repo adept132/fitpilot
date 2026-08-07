@@ -311,6 +311,137 @@ async def test_apply_prescription_lever_writes_day_adjustments(
     ]
 
 
+async def test_apply_prescription_reresolves_when_frozen_day_already_completed(
+    db, test_user, active_block, seeded_plan, seeded_history
+):
+    """P0-09 I1 (Important): `_pick_day_for` строила предложение по первому
+    дню окна с нужной мышцей, не глядя на статус, — `_apply_prescription`
+    же требует `status == "planned"`. Карточка не блокирующая: пользователь
+    вполне может отработать день 1 (тот самый замороженный `day_id`) и
+    только потом решить по предложению, назвавшему именно его. До фикса это
+    значило тихий отказ ("declined"), хотя днём позже в том же окне лежит
+    валидный день с той же главной мышцей. Проверяем, что правка теперь
+    переразрешается на этот более поздний день, а не просто молча гибнет.
+    """
+    db.add(AppUserProfile(
+        app_user_id=test_user.id, experience_level="intermediate",
+        volume_budget={"weekly_targets": {"chest": {"target_sets": 12, "min_floor": 6}}},
+    ))
+    today = utc_today()
+    # Маркер начала окна — нужен только current_window(), чтобы вообще
+    # найти окно при переразрешении на apply-time. Без plan_id намеренно:
+    # _pick_day_for отбирает дни с plan_id IS NOT NULL, и если бы у маркера
+    # тоже был seeded_plan (chest), он сам оказался бы «более ранним
+    # валидным днём» и замаскировал бы то, что проверяет этот тест.
+    marker_day = UserCalendarDay(
+        app_user_id=test_user.id, target_date=today, block_id=active_block.id,
+        plan_id=None, day_tag="push", micro_tag="medium",
+        meso_tag="medium", microcycle_day_number=1,
+        is_rest_day=False, is_blackout=False, status="planned",
+    )
+    # Замороженный день — на момент постройки предложения был "planned",
+    # но к моменту решения пользователь его уже отработал.
+    frozen_day = UserCalendarDay(
+        app_user_id=test_user.id, target_date=today + timedelta(days=1),
+        block_id=active_block.id, plan_id=seeded_plan.id, day_tag="push",
+        micro_tag="medium", meso_tag="medium", microcycle_day_number=2,
+        is_rest_day=False, is_blackout=False, status="completed",
+    )
+    # Более поздний, всё ещё валидный день с той же главной мышцей (тот же
+    # план — seeded_plan бьёт на "chest").
+    later_day = UserCalendarDay(
+        app_user_id=test_user.id, target_date=today + timedelta(days=2),
+        block_id=active_block.id, plan_id=seeded_plan.id, day_tag="push",
+        micro_tag="medium", meso_tag="medium", microcycle_day_number=3,
+        is_rest_day=False, is_blackout=False, status="planned",
+    )
+    db.add_all([marker_day, frozen_day, later_day])
+    await db.commit()
+    await db.refresh(frozen_day)
+    await db.refresh(later_day)
+
+    proposal = PeriodizationProposal(
+        app_user_id=test_user.id, block_id=active_block.id,
+        kind=periodization_params.KIND_VOLUME_REVIEW,
+        reason_code="below_mev",
+        payload={"window_id": None, "adjustments": [
+            {"index": 0, "kind": "prescription_add", "muscle": "chest",
+             "reason_code": "below_mev", "delta_sets": 2,
+             "exercise_id": seeded_history.id, "day_id": frozen_day.id},
+        ]},
+        status=periodization_params.STATUS_PENDING,
+    )
+    db.add(proposal)
+    await db.commit()
+
+    result = await apply_volume_decision(
+        db, test_user.id, proposal, "apply_volume", {"accepted": [0]}
+    )
+    await db.commit()
+    await db.refresh(frozen_day)
+    await db.refresh(later_day)
+
+    assert result["applied"] == [0]
+    assert result["status"] == "applied"
+    # Отработанный день не тронут — правка сама переехала на более поздний.
+    assert frozen_day.volume_adjustments in (None, [])
+    assert later_day.volume_adjustments == [
+        {"exercise_id": seeded_history.id, "delta_sets": 2, "proposal_id": proposal.id}
+    ]
+
+
+async def test_apply_prescription_declines_honestly_when_no_valid_day_left(
+    db, test_user, active_block, seeded_plan, seeded_history
+):
+    """Тот же сценарий устаревшего day_id, но БЕЗ более позднего валидного
+    дня в окне — переразрешение обязано честно вернуть "declined", а не
+    привязать правку к отработанному дню и не упасть."""
+    db.add(AppUserProfile(
+        app_user_id=test_user.id, experience_level="intermediate",
+        volume_budget={"weekly_targets": {"chest": {"target_sets": 12, "min_floor": 6}}},
+    ))
+    today = utc_today()
+    marker_day = UserCalendarDay(
+        app_user_id=test_user.id, target_date=today, block_id=active_block.id,
+        plan_id=seeded_plan.id, day_tag="push", micro_tag="medium",
+        meso_tag="medium", microcycle_day_number=1,
+        is_rest_day=False, is_blackout=False, status="completed",
+    )
+    frozen_day = UserCalendarDay(
+        app_user_id=test_user.id, target_date=today + timedelta(days=1),
+        block_id=active_block.id, plan_id=seeded_plan.id, day_tag="push",
+        micro_tag="medium", meso_tag="medium", microcycle_day_number=2,
+        is_rest_day=False, is_blackout=False, status="completed",
+    )
+    db.add_all([marker_day, frozen_day])
+    await db.commit()
+    await db.refresh(frozen_day)
+
+    proposal = PeriodizationProposal(
+        app_user_id=test_user.id, block_id=active_block.id,
+        kind=periodization_params.KIND_VOLUME_REVIEW,
+        reason_code="below_mev",
+        payload={"window_id": None, "adjustments": [
+            {"index": 0, "kind": "prescription_add", "muscle": "chest",
+             "reason_code": "below_mev", "delta_sets": 2,
+             "exercise_id": seeded_history.id, "day_id": frozen_day.id},
+        ]},
+        status=periodization_params.STATUS_PENDING,
+    )
+    db.add(proposal)
+    await db.commit()
+
+    result = await apply_volume_decision(
+        db, test_user.id, proposal, "apply_volume", {"accepted": [0]}
+    )
+    await db.commit()
+    await db.refresh(frozen_day)
+
+    assert result["applied"] == []
+    assert result["status"] == "declined"
+    assert frozen_day.volume_adjustments in (None, [])
+
+
 async def test_unaccepted_adjustments_are_not_applied(db, test_user, active_block):
     profile = AppUserProfile(
         app_user_id=test_user.id, experience_level="intermediate",
