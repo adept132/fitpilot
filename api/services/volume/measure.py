@@ -102,6 +102,10 @@ def apply_adjustments(
     for item in compiled:
         delta = delta_by_exercise.get(item.get("exercise_id"))
         if not delta:
+            # Без правки отдаём тот же объект, что пришёл на входе (не копию).
+            # Безопасно, пока ничего ниже по цепочке не мутирует элементы
+            # результата на месте — если это перестанет быть так, здесь
+            # понадобится dict(item).
             result.append(item)
             continue
         patched = dict(item)
