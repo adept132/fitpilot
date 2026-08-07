@@ -9,15 +9,18 @@ from typing import Any, Optional
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from api.services.models import (
     Exercise,
     UserCalendarDay,
+    VolumeWindow,
     WorkoutPlanExercise,
     WorkoutSession,
     WorkoutSessionExercise,
     WorkoutSessionSet,
 )
+from api.services.volume.landmarks import landmarks_for
 from api.services.volume.measure import (
     MuscleContribution,
     accumulate,
@@ -484,3 +487,160 @@ def build_rows(
             performed_indirect=fact.indirect,
         )
     return rows
+
+
+# [КОНФИГ] Доля дней окна, у которых должно быть предписание, чтобы окно
+# считалось окном. Ниже порога это обрывок после смены сплита, и его
+# «недобор» — артефакт, а не сигнал.
+MIN_PRESCRIBED_DAY_RATIO = 0.5
+
+
+async def close_window(
+    session: AsyncSession,
+    app_user_id: int,
+    window: Optional[Window],
+    target_by_muscle: dict[str, float],
+    level: Optional[str],
+) -> Optional[VolumeWindow]:
+    """Заморозить окно снимком. Идемпотентна.
+
+    Возвращает None, если окна нет или оно не дотягивает до окна по числу
+    дней с предписанием.
+    """
+    if window is None:
+        return None
+
+    existing = (await session.execute(
+        select(VolumeWindow).where(
+            VolumeWindow.app_user_id == app_user_id,
+            VolumeWindow.block_id == window.block_id,
+            VolumeWindow.window_index == window.window_index,
+        )
+    )).scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    day_rows = (await session.execute(
+        select(UserCalendarDay.plan_id, UserCalendarDay.is_rest_day).where(
+            UserCalendarDay.app_user_id == app_user_id,
+            UserCalendarDay.target_date >= window.start_date,
+            UserCalendarDay.target_date <= window.end_date,
+        )
+    )).all()
+    working = [r for r in day_rows if not r.is_rest_day]
+    if not working:
+        return None
+    with_plan = sum(1 for r in working if r.plan_id is not None)
+    if with_plan / len(working) < MIN_PRESCRIBED_DAY_RATIO:
+        return None
+
+    prescribed = await prescribed_for(session, app_user_id, window)
+    performed = await performed_for(session, app_user_id, window)
+    rows = build_rows(target_by_muscle, prescribed, performed)
+    adherence = await adherence_for_range(
+        session, app_user_id, window.start_date, window.end_date
+    )
+
+    landmarks_snapshot: dict[str, dict] = {}
+    for muscle in rows:
+        lm = landmarks_for(muscle, level)
+        if lm is None:
+            continue
+        landmarks_snapshot[muscle] = {
+            "mev": lm.mev, "mav": lm.mav, "mrv": lm.mrv,
+            "mev_direct": lm.mev_direct, "mrv_direct": lm.mrv_direct,
+        }
+
+    snapshot = VolumeWindow(
+        app_user_id=app_user_id,
+        block_id=window.block_id,
+        window_index=window.window_index,
+        phase_number=window.phase_number,
+        start_date=window.start_date,
+        end_date=window.end_date,
+        muscles={
+            muscle: {
+                "target": row.target,
+                "prescribed": row.prescribed,
+                "performed_direct": row.performed_direct,
+                "performed_indirect": row.performed_indirect,
+            }
+            for muscle, row in rows.items()
+        },
+        adherence={
+            "planned_days": adherence.planned_days,
+            "completed_days": adherence.completed_days,
+            "missed_days": adherence.missed_days,
+        },
+        landmarks=landmarks_snapshot,
+    )
+    session.add(snapshot)
+    await session.flush()
+    return snapshot
+
+
+async def closed_windows(
+    session: AsyncSession, app_user_id: int, limit: int
+) -> list[VolumeWindow]:
+    """Последние закрытые окна, новые первыми."""
+    return list((await session.execute(
+        select(VolumeWindow)
+        .where(VolumeWindow.app_user_id == app_user_id)
+        .order_by(VolumeWindow.end_date.desc())
+        .limit(limit)
+    )).scalars().all())
+
+
+async def recompute_stale_window(
+    session: AsyncSession,
+    app_user_id: int,
+    snapshot: VolumeWindow,
+) -> Optional[VolumeWindow]:
+    """Пересобрать снимок, если подходы окна правились ПОСЛЕ его создания.
+
+    Спека §7: правка подхода задним числом пересчитывает снимок, но
+    принятое по нему решение не отменяется — предложение уже
+    материализовано и живёт своей жизнью.
+
+    Возвращает снимок (обновлённый или нетронутый) либо None, если
+    пересчитывать нечего.
+    """
+    touched_at = (await session.execute(
+        select(func.max(WorkoutSessionSet.updated_at))
+        .select_from(WorkoutSessionSet)
+        .join(
+            WorkoutSessionExercise,
+            WorkoutSessionSet.workout_session_exercise_id == WorkoutSessionExercise.id,
+        )
+        .join(
+            WorkoutSession,
+            WorkoutSessionExercise.workout_session_id == WorkoutSession.id,
+        )
+        .where(
+            WorkoutSession.app_user_id == app_user_id,
+            func.date(WorkoutSession.started_at) >= snapshot.start_date,
+            func.date(WorkoutSession.started_at) <= snapshot.end_date,
+        )
+    )).scalar_one_or_none()
+
+    if touched_at is None or touched_at <= snapshot.created_at:
+        return None
+
+    window = Window(
+        block_id=snapshot.block_id,
+        window_index=snapshot.window_index,
+        phase_number=snapshot.phase_number,
+        start_date=snapshot.start_date,
+        end_date=snapshot.end_date,
+        is_deload=False,
+    )
+    performed = await performed_for(session, app_user_id, window)
+
+    muscles = dict(snapshot.muscles or {})
+    for muscle, row in muscles.items():
+        fact = performed.get(muscle)
+        row["performed_direct"] = fact.direct if fact else 0.0
+        row["performed_indirect"] = fact.indirect if fact else 0.0
+    snapshot.muscles = muscles
+    flag_modified(snapshot, "muscles")
+    return snapshot

@@ -1047,6 +1047,47 @@ class TrainingBlock(Base):
     )
 
 
+class VolumeWindow(Base):
+    """Снимок ЗАКРЫТОГО окна объёма (P0-09).
+
+    Открытые окна здесь не лежат: они меняются после каждого подхода, и
+    кэшировать нечего. Строка создаётся один раз, при закрытии микроцикла.
+
+    landmarks — СНИМОК границ, действовавших на момент закрытия. Таблица
+    объявлена калибруемой, и после её правки решение, принятое по старым
+    границам, обязано остаться объяснимым: без снимка экран итогов задним
+    числом показал бы превышение, которого в тот момент не было.
+    """
+    __tablename__ = "volume_windows"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("app_users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    block_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("training_blocks.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+
+    window_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    phase_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    start_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+
+    # По мышце: {target, prescribed, performed_direct, performed_indirect}.
+    # Каналы факта раздельно, а не эффективной суммой: отношение к
+    # превышению прямого объёма жёстче, и без состава этого не выразить.
+    muscles: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    adherence: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    landmarks: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class UserExerciseRepOverride(Base):
     """Персональный диапазон повторов на упражнение (P0-08, структурная правка).
 
