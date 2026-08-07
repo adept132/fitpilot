@@ -8,6 +8,7 @@ from api.services.models import (
     AppUserProfile,
     Exercise,
     PeriodizationProposal,
+    TrainingBlock,
     UserCalendarDay,
     VolumeWindow,
     WorkoutPlan,
@@ -219,6 +220,65 @@ async def test_apply_budget_lever_moves_weekly_target(db, test_user, active_bloc
 
     assert result["status"] == "applied"
     assert profile.volume_budget["weekly_targets"]["chest"]["target_sets"] == 18
+
+
+async def test_apply_budget_lever_does_not_collapse_target_on_long_microcycle(
+    db, test_user
+):
+    """P0-09 I2 (Important): landmarks._TABLE — за 7 ДНЕЙ, а target_sets в
+    бюджете уже смасштабирован под ФАКТИЧЕСКУЮ длину микроцикла блока
+    (volume_calculator.clamp_target использует тот же cycle_multiplier). До
+    фикса `_apply_budget` клампила результат против СЫРОГО lm.mrv — на
+    десятидневном микроцикле легитимная цель схлопывалась бы до
+    семидневного потолка при каждом принятии рычага.
+
+    Chest/intermediate: raw mrv=18. На микроцикле 10 дней масштабированный
+    потолок floor(18 * 10/7) = 25. Цель 24 (легитимно выше 18, но внутри
+    масштабированного потолка) обязана пережить принятие рычага без
+    изменений — рычаг здесь ничего не двигает (delta_sets=0), только
+    клампит, и именно кламп — то, что проверяется.
+    """
+    block = TrainingBlock(
+        app_user_id=test_user.id, block_index=1,
+        phases=[{"phase_number": 1, "name": "medium", "effort_tier": "medium", "length_days": 10}],
+        microcycle_length=10,
+        start_date=utc_today() - timedelta(days=3),
+        planned_end_date=utc_today() + timedelta(days=20),
+        status="active",
+    )
+    db.add(block)
+    profile = AppUserProfile(
+        app_user_id=test_user.id, experience_level="intermediate",
+        volume_budget={"weekly_targets": {"chest": {"target_sets": 24, "min_floor": 6}}},
+    )
+    db.add(profile)
+    await db.commit()
+    await db.refresh(block)
+
+    proposal = PeriodizationProposal(
+        app_user_id=test_user.id, block_id=block.id,
+        kind=periodization_params.KIND_VOLUME_REVIEW,
+        reason_code="above_mrv",
+        payload={"window_id": None, "adjustments": [
+            {"index": 0, "kind": "budget_to_range", "muscle": "chest",
+             "reason_code": "above_mrv", "delta_sets": 0},
+        ]},
+        status=periodization_params.STATUS_PENDING,
+    )
+    db.add(proposal)
+    await db.commit()
+
+    result = await apply_volume_decision(
+        db, test_user.id, proposal, "apply_volume", {"accepted": [0]}
+    )
+    await db.commit()
+    await db.refresh(profile)
+
+    assert result["status"] == "applied"
+    target = profile.volume_budget["weekly_targets"]["chest"]["target_sets"]
+    # До фикса кламп шёл против сырого mrv=18 и обрезал бы цель до 18.
+    assert target == 24
+    assert target > 18
 
 
 async def test_apply_frequency_lever_scales_all_weekly_targets(

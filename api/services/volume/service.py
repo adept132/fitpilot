@@ -27,7 +27,7 @@ from api.services.volume.decide import (
     decide,
     headline_reason,
 )
-from api.services.volume.landmarks import Landmarks, landmarks_for
+from api.services.volume.landmarks import Landmarks, landmarks_for, scale_landmarks
 
 logger = logging.getLogger(__name__)
 
@@ -406,10 +406,10 @@ async def apply_volume_decision(
             continue
         kind = item["kind"]
         if kind == params.KIND_BUDGET_TO_RANGE:
-            if await _apply_budget(session, app_user_id, item):
+            if await _apply_budget(session, app_user_id, item, proposal.block_id):
                 applied.append(item["index"])
         elif kind == params.KIND_BUDGET_TO_FREQUENCY:
-            if await _apply_frequency(session, app_user_id, item):
+            if await _apply_frequency(session, app_user_id, item, proposal.block_id):
                 applied.append(item["index"])
         elif kind in (params.KIND_PRESCRIPTION_ADD, params.KIND_PRESCRIPTION_CUT):
             if await _apply_prescription(session, app_user_id, proposal.id, item):
@@ -428,7 +428,7 @@ async def apply_volume_decision(
 
 
 async def _apply_budget(
-    session: AsyncSession, app_user_id: int, item: dict
+    session: AsyncSession, app_user_id: int, item: dict, block_id: Optional[int] = None
 ) -> bool:
     profile = (await session.execute(
         select(AppUserProfile).where(AppUserProfile.app_user_id == app_user_id)
@@ -445,12 +445,20 @@ async def _apply_budget(
     lm = landmarks_for(muscle, profile.experience_level)
     if lm is None:
         return False
+    # P0-09 I2: target_sets в бюджете уже смасштабирован под ФАКТИЧЕСКУЮ
+    # длину микроцикла блока (volume_calculator.clamp_target). Клампить его
+    # против СЫРЫХ (за 7 дней) lm.mev/lm.mrv значило бы судить десятидневную
+    # цель семидневным потолком — легитимная цель схлопывалась бы при
+    # каждом принятии рычага. Масштабируем границы той же формулой, что и
+    # close_window при заморозке снимка (см. landmarks.scale_landmarks).
+    cycle_multiplier = await repository.block_microcycle_length(session, block_id) / 7.0
+    scaled_lm = scale_landmarks(lm, cycle_multiplier)
 
     row = dict(weekly[muscle])
     updated = int(row.get("target_sets") or 0) + int(item.get("delta_sets") or 0)
     # Итог всё равно клампится в диапазон: правка не имеет права вынести
     # цель за физиологические границы, ради которых она и делается.
-    row["target_sets"] = max(lm.mev, min(lm.mrv, updated))
+    row["target_sets"] = max(scaled_lm.mev, min(scaled_lm.mrv, updated))
     weekly[muscle] = row
     budget["weekly_targets"] = weekly
     profile.volume_budget = budget
@@ -459,7 +467,7 @@ async def _apply_budget(
 
 
 async def _apply_frequency(
-    session: AsyncSession, app_user_id: int, item: dict
+    session: AsyncSession, app_user_id: int, item: dict, block_id: Optional[int] = None
 ) -> bool:
     """Привести весь бюджет к реально достижимой частоте.
 
@@ -489,6 +497,11 @@ async def _apply_frequency(
     if profile is None or not profile.volume_budget:
         return False
 
+    # P0-09 I2: та же логика, что и в _apply_budget — клампим против границ,
+    # смасштабированных под фактическую длину микроцикла блока, а не против
+    # сырой (за 7 дней) таблицы.
+    cycle_multiplier = await repository.block_microcycle_length(session, block_id) / 7.0
+
     budget = dict(profile.volume_budget)
     weekly = dict(budget.get("weekly_targets") or {})
     changed = False
@@ -497,10 +510,13 @@ async def _apply_frequency(
         current = int((row or {}).get("target_sets") or 0)
         if lm is None or current <= 0:
             continue
-        scaled = max(lm.mev, min(lm.mrv, int(math.floor(current * observed))))
-        if scaled != current:
+        scaled_lm = scale_landmarks(lm, cycle_multiplier)
+        scaled_target = max(
+            scaled_lm.mev, min(scaled_lm.mrv, int(math.floor(current * observed)))
+        )
+        if scaled_target != current:
             patched = dict(row)
-            patched["target_sets"] = scaled
+            patched["target_sets"] = scaled_target
             weekly[muscle] = patched
             changed = True
 

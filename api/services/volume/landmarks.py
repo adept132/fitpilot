@@ -1,7 +1,17 @@
 """Физиологические ориентиры объёма по мышце.
 
 ВСЕ ЗНАЧЕНИЯ — СТАРТОВЫЕ, подлежат калибровке на накопленных данных.
-Единица — эффективные подходы за микроцикл (measure.INDIRECT_WEIGHT).
+Единица — эффективные подходы ЗА 7 ДНЕЙ (measure.INDIRECT_WEIGHT), а НЕ за
+микроцикл: длина микроцикла блока (`TrainingBlock.microcycle_length`)
+переменная (P0-08) и может отличаться от семи дней в любую сторону.
+Масштабирование этой таблицы к фактической длине микроцикла происходит
+СНАРУЖИ — см. `scale_landmarks` здесь же и `volume_calculator.clamp_target`
+(тот же множитель `cycle_multiplier = microcycle_length / 7`). Ревью P0-09
+(I2, Important): раньше эта строка ошибочно утверждала «за микроцикл», из-за
+чего часть вызывающего кода (decide()/`_apply_budget`/`_apply_frequency`)
+сравнивала цель, уже смасштабированную под фактическую длину, с СЫРЫМИ
+границами этой таблицы — на микроцикле длиннее семи дней потолок и цель
+оказывались на разных шкалах.
 
 Провенанс, в порядке приоритета:
   1. Мета-аналитическая дозозависимость (Schoenfeld/Ogborn/Krieger 2017;
@@ -183,6 +193,31 @@ def landmarks_for(muscle: str, level: Optional[str]) -> Optional[Landmarks]:
         mrv=mrv,
         mev_direct=math.floor(mev * mev_ratio),
         mrv_direct=math.floor(mrv * mrv_ratio),
+    )
+
+
+def scale_landmarks(lm: Landmarks, cycle_multiplier: float) -> Landmarks:
+    """Отмасштабировать ориентиры к фактической длине микроцикла блока.
+
+    `_TABLE` — за 7 ДНЕЙ (см. докстринг модуля). Любое сравнение с
+    показателем, накопленным за окно, чья реальная длина
+    (`TrainingBlock.microcycle_length`) отличается от семи дней, обязано
+    идти против ЭТИХ масштабированных границ — иначе десятидневное окно
+    судится по семидневному потолку: `above_mrv` срабатывает ложно на
+    легитимном объёме, а `budget_to_range`/`budget_to_frequency`
+    схлопывают цель до заниженного raw-MRV при принятии.
+
+    Округление ВНИЗ на всех пяти величинах — тот же принцип, что и у
+    `landmarks_for` для mev_direct/mrv_direct и у
+    `volume_calculator.clamp_target` для цели: для пола это мягче, для
+    потолка — консервативнее.
+    """
+    return Landmarks(
+        mev=math.floor(lm.mev * cycle_multiplier),
+        mav=math.floor(lm.mav * cycle_multiplier),
+        mrv=math.floor(lm.mrv * cycle_multiplier),
+        mev_direct=math.floor(lm.mev_direct * cycle_multiplier),
+        mrv_direct=math.floor(lm.mrv_direct * cycle_multiplier),
     )
 
 

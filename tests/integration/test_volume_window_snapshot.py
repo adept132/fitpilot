@@ -4,7 +4,7 @@ from datetime import date, timedelta
 import pytest
 from sqlalchemy import func, select
 
-from api.services.models import UserCalendarDay, VolumeWindow
+from api.services.models import TrainingBlock, UserCalendarDay, VolumeWindow
 from api.services.volume.repository import (
     close_window,
     closed_windows,
@@ -53,6 +53,43 @@ async def test_close_window_writes_snapshot(db, test_user, active_block, seeded_
     # Снимок landmarks обязателен: таблица калибруемая, и решение,
     # принятое по старым границам, должно остаться объяснимым.
     assert row.landmarks["chest"]["mrv"] == 18
+
+
+async def test_close_window_scales_landmarks_by_block_microcycle_length(
+    db, test_user, seeded_plan
+):
+    """P0-09 I2 (Important): landmarks._TABLE — за 7 ДНЕЙ. На блоке с
+    microcycle_length=10 замороженные в снимке границы обязаны быть
+    смасштабированы (cycle_multiplier=10/7), а не взяты сырыми — иначе
+    decide() судит десятидневный факт семидневным потолком.
+
+    Chest/intermediate raw (mev=6, mav=12, mrv=18). Масштаб 10/7:
+    floor(6*10/7)=8, floor(12*10/7)=17, floor(18*10/7)=25.
+    """
+    block = TrainingBlock(
+        app_user_id=test_user.id, block_index=1,
+        phases=[{"phase_number": 1, "name": "medium", "effort_tier": "medium", "length_days": 10}],
+        microcycle_length=10,
+        start_date=utc_today() - timedelta(days=10),
+        planned_end_date=utc_today() + timedelta(days=20),
+        status="active",
+    )
+    db.add(block)
+    await db.flush()
+
+    start = utc_today() - timedelta(days=9)
+    await _seed_microcycle(db, test_user.id, block.id, start, seeded_plan.id, days=10)
+
+    window = await current_window(db, test_user.id, start)
+    row = await close_window(
+        db, test_user.id, window, {"chest": 24.0}, level="intermediate"
+    )
+    await db.commit()
+
+    assert row is not None
+    assert row.landmarks["chest"]["mev"] == 8
+    assert row.landmarks["chest"]["mav"] == 17
+    assert row.landmarks["chest"]["mrv"] == 25
 
 
 async def test_close_window_is_idempotent(db, test_user, active_block, seeded_plan):

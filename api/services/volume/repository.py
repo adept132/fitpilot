@@ -13,6 +13,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from api.services.models import (
     Exercise,
+    TrainingBlock,
     UserCalendarDay,
     VolumeWindow,
     WorkoutPlanExercise,
@@ -21,7 +22,7 @@ from api.services.models import (
     WorkoutSessionSet,
 )
 from api.services.muscle_keys import to_system_key
-from api.services.volume.landmarks import landmarks_for
+from api.services.volume.landmarks import landmarks_for, scale_landmarks
 from api.services.volume.measure import (
     MuscleContribution,
     accumulate,
@@ -496,6 +497,21 @@ def build_rows(
 MIN_PRESCRIBED_DAY_RATIO = 0.5
 
 
+async def block_microcycle_length(
+    session: AsyncSession, block_id: Optional[int]
+) -> int:
+    """Длина микроцикла блока в днях. 7 (дефолт таблицы landmarks) для
+    легаси-календаря без block_id или для блока, который к моменту вызова
+    уже не существует — деградация, а не падение (см. докстринг Window о
+    до-P0-08 календарях)."""
+    if block_id is None:
+        return 7
+    length = (await session.execute(
+        select(TrainingBlock.microcycle_length).where(TrainingBlock.id == block_id)
+    )).scalar_one_or_none()
+    return length or 7
+
+
 async def close_window(
     session: AsyncSession,
     app_user_id: int,
@@ -551,14 +567,26 @@ async def close_window(
         session, app_user_id, window.start_date, window.end_date
     )
 
+    # P0-09 I2: таблица landmarks — за 7 ДНЕЙ (см. докстринг модуля), а
+    # target_by_muscle приходит из профиля уже смасштабированным под
+    # ФАКТИЧЕСКУЮ длину микроцикла блока (volume_calculator.clamp_target,
+    # тот же cycle_multiplier). Без масштабирования границ ЗДЕСЬ снимок
+    # окна нёс бы цель на одной шкале и потолок — на другой: на
+    # десятидневном микроцикле легитимная цель выше семидневного MRV
+    # схлопывалась бы при принятии budget-рычага, а above_mrv срабатывал
+    # бы ложно, потому что десять дней работы меряются семидневным
+    # потолком. Масштабируем здесь — decide() читает границы из снимка и
+    # больше не обязан ничего знать про cycle_multiplier сам.
+    cycle_multiplier = await block_microcycle_length(session, window.block_id) / 7.0
     landmarks_snapshot: dict[str, dict] = {}
     for muscle in rows:
         lm = landmarks_for(muscle, level)
         if lm is None:
             continue
+        scaled = scale_landmarks(lm, cycle_multiplier)
         landmarks_snapshot[muscle] = {
-            "mev": lm.mev, "mav": lm.mav, "mrv": lm.mrv,
-            "mev_direct": lm.mev_direct, "mrv_direct": lm.mrv_direct,
+            "mev": scaled.mev, "mav": scaled.mav, "mrv": scaled.mrv,
+            "mev_direct": scaled.mev_direct, "mrv_direct": scaled.mrv_direct,
         }
 
     snapshot = VolumeWindow(
