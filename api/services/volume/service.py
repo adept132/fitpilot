@@ -8,6 +8,7 @@ from datetime import date, timedelta
 from typing import Optional
 
 from sqlalchemy import select
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -327,6 +328,32 @@ async def refresh_volume_proposals(
             item["day_id"] = day_id
             item["exercise_id"] = exercise_id
         payload_items.append(item)
+
+    # P0-09 C2: uq_periodization_proposals_pending уникален по (block_id,
+    # kind, COALESCE(payload->>'exercise_id','')) — для volume_review это
+    # (block_id, 'volume_review', ''), потому что у этого kind нет
+    # exercise_id в payload вовсе. Окно N+1 закрывается ВОЗМОЖНО, пока
+    # карточка окна N ещё pending: экран необязывающий, дожидание решения —
+    # штатное состояние (см. докстринг apply_volume_decision). Строка выше
+    # (`existing is not None: return existing`) уже отсекла случай «карточка
+    # для ЭТОГО ЖЕ окна уже есть» — значит любая ещё pending volume_review
+    # карточка данного блока, до которой мы дошли здесь, обязана быть по
+    # СТАРШЕМУ окну. Без явного истечения вставка ниже валит flush()
+    # IntegrityError'ом, guarded() откатывает ВЕСЬ SAVEPOINT и вместе с ним
+    # только что записанный close_window-снимок — пользователь навсегда
+    # застревает с исключением на каждом /workout-center/context. Совет
+    # устаревшего окна и так неактуален (свежее уже посчитано), поэтому
+    # истечение — не костыль вокруг индекса, а более честный UX.
+    await session.execute(
+        sa_update(PeriodizationProposal)
+        .where(
+            PeriodizationProposal.app_user_id == app_user_id,
+            PeriodizationProposal.block_id == finished.block_id,
+            PeriodizationProposal.kind == periodization_params.KIND_VOLUME_REVIEW,
+            PeriodizationProposal.status == periodization_params.STATUS_PENDING,
+        )
+        .values(status=periodization_params.STATUS_EXPIRED)
+    )
 
     proposal = PeriodizationProposal(
         app_user_id=app_user_id,

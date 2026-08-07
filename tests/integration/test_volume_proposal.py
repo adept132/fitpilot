@@ -2,16 +2,20 @@
 from datetime import date, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from api.services.models import (
     AppUserProfile,
+    Exercise,
     PeriodizationProposal,
     UserCalendarDay,
+    VolumeWindow,
+    WorkoutPlan,
+    WorkoutPlanExercise,
 )
 from api.services.periodization import params as periodization_params
 from api.services.periodization.service import apply_decision
-from api.services.volume.repository import utc_today
+from api.services.volume.repository import guarded, utc_today
 from api.services.volume.service import apply_volume_decision, refresh_volume_proposals
 from app.database import SessionLocal
 
@@ -62,6 +66,106 @@ async def test_refresh_creates_single_proposal_for_closed_window(
     assert proposal.status == periodization_params.STATUS_PENDING
     assert proposal.payload["adjustments"], "правки должны быть перечислены в payload"
     assert "window_id" in proposal.payload
+
+
+async def test_second_pending_volume_review_supersedes_first_and_keeps_snapshot(
+    db, test_user, active_block
+):
+    """P0-09 C2 (Critical): окно N+1 закрывается, пока карточка окна N ещё
+    pending, — штатное недожидание решения (экран необязывающий, спека).
+
+    До фикса вторая вставка pending volume_review валила flush()
+    IntegrityError'ом: uq_periodization_proposals_pending уникален по
+    (block_id, kind, COALESCE(payload->>'exercise_id','')), а у
+    volume_review нет exercise_id в payload вовсе — ключ один и тот же для
+    любого окна одного блока. guarded() ловил исключение, но откатывал ВЕСЬ
+    SAVEPOINT — вместе с уже записанным close_window-снимком ВТОРОГО окна,
+    хотя сам снимок был совершенно валиден. Пользователь навсегда застревал
+    с исключением на каждом /workout-center/context.
+
+    План намеренно НЕ бьёт по "chest" (единственной мышце с целью в
+    бюджете): упражнение здесь на "quads", поэтому предписание следующего
+    окна по груди всегда 0, и разрыв цели (`_prescription_gap` в decide.py)
+    срабатывает на КАЖДОМ закрытии окна независимо от предыдущего —
+    ровно то, что нужно, чтобы у ПЕРВОГО же закрытого окна была своя
+    карточка (а не только у второго, как в остальных тестах файла, где
+    план совпадает с целью бюджета и первое окно молчит).
+    """
+    profile = AppUserProfile(
+        app_user_id=test_user.id, experience_level="intermediate",
+        volume_budget={"weekly_targets": {"chest": {"target_sets": 12, "min_floor": 6}}},
+    )
+    db.add(profile)
+
+    off_target_exercise = Exercise(
+        name="C2 quads exercise", category="base", main_muscle_group="quads",
+        difficulty="beginner", equipment_needed=[], source="custom",
+        app_user_id=test_user.id,
+    )
+    db.add(off_target_exercise)
+    await db.flush()
+    plan = WorkoutPlan(
+        app_user_id=test_user.id, name="C2 plan", day_tag="legs",
+        micro_tag="medium", meso_tag="medium",
+    )
+    db.add(plan)
+    await db.flush()
+    db.add(WorkoutPlanExercise(
+        plan_id=plan.id, exercise_id=off_target_exercise.id, order_index=0, target_sets=3,
+    ))
+    await db.flush()
+
+    first_start = utc_today() - timedelta(days=11)
+    await _seed_two_windows(db, test_user.id, active_block.id, plan.id, first_start)
+
+    # Шаг 1: закрыть окно 0 (в этот момент открыто окно 1) — карточка A.
+    proposal_a = await refresh_volume_proposals(
+        db, test_user.id, first_start + timedelta(days=4)
+    )
+    await db.commit()
+    assert proposal_a is not None
+    assert proposal_a.status == periodization_params.STATUS_PENDING
+
+    # Шаг 2: НЕ решаем по карточке A. Открывается будущее окно, закрывается
+    # окно 1 — вторая pending-карточка volume_review для того же блока.
+    # Оборачиваем в guarded() так же, как это делает build_context, — иначе
+    # тест проверял бы не тот путь, на котором нашлась находка.
+    proposal_b = await guarded(
+        db,
+        "test C2: refresh_volume_proposals — второе окно без решения по первому",
+        refresh_volume_proposals(db, test_user.id, first_start + timedelta(days=8)),
+    )
+    await db.commit()
+
+    assert proposal_b is not None, (
+        "снимок и предложение второго окна не должны теряться из-за "
+        "ещё не решённой карточки первого окна"
+    )
+    assert proposal_b.id != proposal_a.id
+    assert proposal_b.status == periodization_params.STATUS_PENDING
+
+    rows = (await db.execute(
+        select(PeriodizationProposal).where(
+            PeriodizationProposal.app_user_id == test_user.id,
+            PeriodizationProposal.kind == periodization_params.KIND_VOLUME_REVIEW,
+        )
+    )).scalars().all()
+    pending = [r for r in rows if r.status == periodization_params.STATUS_PENDING]
+    assert len(pending) == 1
+    assert pending[0].id == proposal_b.id
+
+    refreshed_a = await db.get(PeriodizationProposal, proposal_a.id)
+    assert refreshed_a.status == periodization_params.STATUS_EXPIRED
+
+    # Снимок ВТОРОГО окна обязан пережить SAVEPOINT — это и есть регрессия:
+    # до фикса guarded() откатывал его вместе с провалившейся вставкой карточки.
+    snapshot_count = await db.scalar(
+        select(func.count()).select_from(VolumeWindow).where(
+            VolumeWindow.app_user_id == test_user.id,
+            VolumeWindow.block_id == active_block.id,
+        )
+    )
+    assert snapshot_count == 2
 
 
 async def test_refresh_is_idempotent_for_the_same_window(
