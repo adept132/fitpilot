@@ -48,3 +48,12 @@ class VolumeOverviewRead(BaseModel):
     # Отдаётся здесь, а не отдельным запросом, потому что профиль на этом
     # пути уже прочитан.
     budget: Optional[dict] = None
+    # P0-09 I4 (Important): shim совместимости со сборками ДО shape v2.
+    # Старый клиент делал `setPerformedSets(data.performed_sets)`, а на
+    # рендере — `Object.values(performedSets)`; с полем, убранным в v2, это
+    # TypeError на экране прогресса, а не деградация вида. Значение — то же
+    # эффективное выполненное по мышце, что и в muscles[*].performed_direct
+    # + performed_indirect, просто сложенные (см. MuscleRow.performed_effective
+    # в volume/repository.py). Заполнять ничего не стоит, новый клиент это
+    # поле игнорирует. Можно убрать, когда сборки до v2 гарантированно вымерли.
+    performed_sets: dict[str, float] = {}

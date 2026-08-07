@@ -86,6 +86,10 @@ async def get_volume_overview(
     frequency = await volume_repo.muscle_frequency(db, current_user.id, window)
 
     muscles: dict[str, MuscleVolumeRead] = {}
+    # P0-09 I4: shim совместимости со сборками ДО shape v2 (см. докстринг
+    # поля в api/schemas/volume.py) — то же эффективное выполненное, что
+    # уходит в muscles[*], просто сложенное в одно число на мышцу.
+    performed_sets: dict[str, float] = {}
     for muscle, row in rows.items():
         lm = landmarks_for(muscle, level)
         if lm is None:
@@ -101,6 +105,7 @@ async def get_volume_overview(
             mev_direct=lm.mev_direct,
             mrv_direct=reachable_mrv(muscle, level, frequency.get(muscle, 1)),
         )
+        performed_sets[muscle] = row.performed_effective
 
     length = (window.end_date - window.start_date).days + 1
     return VolumeOverviewRead(
@@ -121,6 +126,7 @@ async def get_volume_overview(
         ),
         muscles=muscles,
         budget=budget,
+        performed_sets=performed_sets,
     )
 
 
