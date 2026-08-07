@@ -10,8 +10,10 @@ from api.services.models import (
     UserCalendarDay,
 )
 from api.services.periodization import params as periodization_params
+from api.services.periodization.service import apply_decision
 from api.services.volume.repository import utc_today
 from api.services.volume.service import apply_volume_decision, refresh_volume_proposals
+from app.database import SessionLocal
 
 pytestmark = pytest.mark.asyncio
 
@@ -115,6 +117,54 @@ async def test_apply_budget_lever_moves_weekly_target(db, test_user, active_bloc
     assert profile.volume_budget["weekly_targets"]["chest"]["target_sets"] == 18
 
 
+async def test_apply_frequency_lever_scales_all_weekly_targets(
+    db, test_user, active_block
+):
+    """Ревью Задачи 11, Important 2: до фикса `budget_to_frequency`
+    (muscle=None, delta_sets=0) маршрутился в `_apply_budget`, которая
+    отказывает немедленно на `not muscle` — рычаг «привести цель к реальной
+    частоте» был непроходим НИ ПРИ КАКИХ данных. Проверяем, что теперь он
+    маршрутится в `_apply_frequency` и реально масштабирует ВСЕ мышцы
+    бюджета на наблюдаемую исполняемость (а не только названную в
+    payload — payload у этого рычага мышцу не называет вовсе)."""
+    profile = AppUserProfile(
+        app_user_id=test_user.id, experience_level="intermediate",
+        volume_budget={"weekly_targets": {
+            "chest": {"target_sets": 20, "min_floor": 6},
+            "lats": {"target_sets": 20, "min_floor": 6},
+        }},
+    )
+    db.add(profile)
+    proposal = PeriodizationProposal(
+        app_user_id=test_user.id, block_id=active_block.id,
+        kind=periodization_params.KIND_VOLUME_REVIEW,
+        reason_code="adherence_gap",
+        payload={"window_id": None, "adjustments": [
+            {"index": 0, "kind": "budget_to_frequency", "muscle": None,
+             "reason_code": "adherence_gap", "delta_sets": 0,
+             "detail": {"ratios": [0.5, 0.6]}},
+        ]},
+        status=periodization_params.STATUS_PENDING,
+    )
+    db.add(proposal)
+    await db.commit()
+
+    result = await apply_volume_decision(
+        db, test_user.id, proposal, "apply_volume", {"accepted": [0]}
+    )
+    await db.commit()
+    await db.refresh(profile)
+
+    # До фикса: applied == [] независимо от данных — это и была находка.
+    assert result["applied"] == [0]
+    assert result["status"] == "applied"
+    weekly = profile.volume_budget["weekly_targets"]
+    # observed = (0.5 + 0.6) / 2 = 0.55; floor(20 * 0.55) = 11, что попадает
+    # в диапазон MEV..MRV для chest/lats на intermediate — клампа не видно.
+    assert weekly["chest"]["target_sets"] == 11
+    assert weekly["lats"]["target_sets"] == 11
+
+
 async def test_apply_prescription_lever_writes_day_adjustments(
     db, test_user, active_block, seeded_plan, seeded_history
 ):
@@ -182,3 +232,104 @@ async def test_unaccepted_adjustments_are_not_applied(db, test_user, active_bloc
     await db.refresh(profile)
 
     assert profile.volume_budget["weekly_targets"]["chest"]["target_sets"] == 25
+
+
+async def test_apply_decision_declines_when_nothing_accepted(
+    db, test_user, active_block
+):
+    """Ревью Задачи 11, Important 4: путь через apply_decision (не напрямую
+    через apply_volume_decision) — тот самый путь, которым реально ходит
+    роутер, и тот самый, где обнаружился пропавший commit(). Все пять
+    тестов выше коммитят сами и бьют в apply_volume_decision напрямую, так
+    что этот commit() для них не мог провалиться незаметно."""
+    profile = AppUserProfile(
+        app_user_id=test_user.id, experience_level="intermediate",
+        volume_budget={"weekly_targets": {"chest": {"target_sets": 25, "min_floor": 6}}},
+    )
+    db.add(profile)
+    proposal = PeriodizationProposal(
+        app_user_id=test_user.id, block_id=active_block.id,
+        kind=periodization_params.KIND_VOLUME_REVIEW, reason_code="above_mrv",
+        payload={"window_id": None, "adjustments": [
+            {"index": 0, "kind": "budget_to_range", "muscle": "chest",
+             "reason_code": "above_mrv", "delta_sets": -7},
+        ]},
+        status=periodization_params.STATUS_PENDING,
+    )
+    db.add(proposal)
+    await db.commit()
+    await db.refresh(proposal)
+    proposal_id = proposal.id
+
+    result = await apply_decision(
+        db, test_user.id, proposal_id,
+        periodization_params.ACTION_APPLY_VOLUME,
+        options={"accepted": []},
+    )
+    assert result["applied"] == []
+    assert result["status"] == "declined"
+
+    # Ключевая проверка: читаем из СОВЕРШЕННО ДРУГОЙ сессии, не из `db`.
+    # `db` держит тот же Python-объект `proposal` в identity map — его
+    # .status уже выставлен в памяти вызовом apply_decision независимо от
+    # того, добрался ли этот commit() реально до БД. Если бы явный
+    # session.commit() внутри ветки KIND_VOLUME_REVIEW пропал (это и был
+    # реальный баг ревью первого прохода), `db.refresh(proposal)` увидел бы
+    # тот же pending, который откатился бы при закрытии сессии эндпоинтом,
+    # а этот тест остался бы зелёным. Свежая сессия этого не прощает.
+    async with SessionLocal() as fresh:
+        reread = await fresh.get(PeriodizationProposal, proposal_id)
+        assert reread is not None
+        assert reread.status == periodization_params.STATUS_DECLINED
+        assert reread.decided_action == periodization_params.ACTION_APPLY_VOLUME
+
+
+async def test_apply_decision_persists_budget_mutation_via_fresh_session(
+    db, test_user, active_block
+):
+    """Ревью Задачи 11, Important 4: непустой accepted на budget_to_range
+    через apply_decision — и мутация профиля, и статус предложения должны
+    пережить закрытие исходной сессии, не только остаться в identity map
+    `db`."""
+    profile = AppUserProfile(
+        app_user_id=test_user.id, experience_level="intermediate",
+        volume_budget={"weekly_targets": {"chest": {"target_sets": 25, "min_floor": 6}}},
+    )
+    db.add(profile)
+    proposal = PeriodizationProposal(
+        app_user_id=test_user.id, block_id=active_block.id,
+        kind=periodization_params.KIND_VOLUME_REVIEW, reason_code="above_mrv",
+        payload={"window_id": None, "adjustments": [
+            {"index": 0, "kind": "budget_to_range", "muscle": "chest",
+             "reason_code": "above_mrv", "delta_sets": -7},
+        ]},
+        status=periodization_params.STATUS_PENDING,
+    )
+    db.add(proposal)
+    await db.commit()
+    await db.refresh(proposal)
+    proposal_id = proposal.id
+    app_user_id = test_user.id
+
+    result = await apply_decision(
+        db, test_user.id, proposal_id,
+        periodization_params.ACTION_APPLY_VOLUME,
+        options={"accepted": [0]},
+    )
+    assert result["applied"] == [0]
+    assert result["status"] == "applied"
+
+    # Свежая сессия — та же логика, что и в тесте выше: identity map `db`
+    # не доказывает, что commit() реально случился.
+    async with SessionLocal() as fresh:
+        reread_proposal = await fresh.get(PeriodizationProposal, proposal_id)
+        assert reread_proposal.status == periodization_params.STATUS_ACCEPTED
+        # AppUserProfile.id — суррогатный PK, app_user_id — лишь уникальный
+        # FK; fresh.get() адресует по PK, поэтому здесь select(), а не get().
+        reread_profile = (await fresh.execute(
+            select(AppUserProfile).where(AppUserProfile.app_user_id == app_user_id)
+        )).scalar_one()
+        assert (
+            reread_profile.volume_budget["weekly_targets"]["chest"]["target_sets"]
+            == 18
+        )

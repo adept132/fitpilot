@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import date, timedelta
 from typing import Optional
 
@@ -14,12 +15,12 @@ from api.services.models import (
     AppUserProfile,
     PeriodizationProposal,
     UserCalendarDay,
+    VolumeWindow,
     WorkoutPlanExercise,
 )
 from api.services.periodization import params as periodization_params
 from api.services.volume import params, repository
 from api.services.volume.decide import (
-    Adjustment,
     DecisionInput,
     MuscleState,
     decide,
@@ -128,19 +129,55 @@ async def _close_backlog(
     окне — no-op. Решение и предложение здесь не создаются: высказаться
     стоит только по самому свежему окну, а более старые нужны лишь как
     материал для «previous» в decide().
+
+    ВАЖНО (ревью Задачи 11, Important 1): `refresh_volume_proposals` зовётся
+    на КАЖДОМ `build_context` — самом горячем эндпоинте приложения. В
+    steady state (пользователь заходит хотя бы раз в микроцикл) окно,
+    непосредственно предшествующее `finished`, уже закрыто предыдущим
+    вызовом, и полный обратный обход не находит ни одного разрыва — но
+    честно тратит на это до `MAX_BACKLOG_WINDOWS` итераций по три запроса
+    каждая, вечно, впустую. Поэтому здесь короткое замыкание: одним
+    запросом проверяем снимок непосредственно предыдущего окна и, если он
+    уже есть, выходим — по индукции это означает, что вся история старше
+    него тоже уже закрыта (она была бы закрыта тем же способом на каком-то
+    предыдущем вызове). Полный обход остаётся только для настоящего
+    разрыва — пользователь пропустил визит на 2+ микроцикла.
     """
-    chain = []
-    cursor = finished
-    for _ in range(MAX_BACKLOG_WINDOWS):
-        earlier = await repository.current_window(
+    earlier = await repository.current_window(
+        session, app_user_id, finished.start_date - timedelta(days=1)
+    )
+    if earlier is None or earlier.start_date >= finished.start_date:
+        return
+
+    existing = (await session.execute(
+        select(VolumeWindow.id).where(
+            VolumeWindow.app_user_id == app_user_id,
+            VolumeWindow.block_id == earlier.block_id,
+            VolumeWindow.window_index == earlier.window_index,
+        )
+    )).scalar_one_or_none()
+    if existing is not None:
+        return
+
+    chain = [earlier]
+    cursor = earlier
+    for _ in range(MAX_BACKLOG_WINDOWS - 1):
+        nxt = await repository.current_window(
             session, app_user_id, cursor.start_date - timedelta(days=1)
         )
-        if earlier is None or earlier.start_date >= cursor.start_date:
+        if nxt is None or nxt.start_date >= cursor.start_date:
             break
-        chain.append(earlier)
-        cursor = earlier
+        chain.append(nxt)
+        cursor = nxt
 
     for window in reversed(chain):
+        # Снимок пишется с ТЕКУЩИМИ (на момент вызова) target_by_muscle и
+        # level пользователя, а не с теми, что были актуальны в момент,
+        # когда это окно реально шло — истории профиля нет (то же
+        # ограничение, что и у close_window для самого `finished`, см. его
+        # докстринг). При многонедельном догоняющем закрытии разрыв между
+        # «уровнем тогда» и «уровнем сейчас» шире, чем для одного окна —
+        # это известная фикция снимка, а не баг.
         await repository.close_window(
             session, app_user_id, window, target_by_muscle, level
         )
@@ -222,8 +259,17 @@ async def refresh_volume_proposals(
     # отсортирована по end_date по убыванию (closed_windows), а `snapshot` —
     # самый свежий закрытый снимок из всех, поэтому первый элемент `history`
     # с другим id — это и есть хронологически предыдущее окно.
+    #
+    # Ревью Задачи 11, Minor: `w.id != snapshot.id` («самое свежее ДРУГОЕ
+    # окно») — не то же самое, что «непосредственно предшествующее». Если
+    # промежуточное окно не получило снимка (отвергнуто ratio-guard'ом в
+    # close_window — доля дней с предписанием ниже MIN_PRESCRIBED_DAY_RATIO),
+    # «самое свежее другое» окно в history может оказаться НЕ смежным со
+    # `snapshot`, а «пол» решателя (FLOOR_REQUIRES_PREVIOUS_WINDOW) обязан
+    # подтверждаться именно смежным предыдущим окном. Выражаем условие
+    # смежности напрямую через даты, а не через позицию в списке.
     previous_snapshot = next(
-        (w for w in history if w.id != snapshot.id), None
+        (w for w in history if w.end_date < snapshot.start_date), None
     )
 
     next_prescribed_raw = await repository.prescribed_for(
@@ -239,6 +285,25 @@ async def refresh_volume_proposals(
         is_deload=finished.is_deload,
     ))
     if not adjustments:
+        return None
+
+    if finished.block_id is None:
+        # Ревью Задачи 11, Important 3: PeriodizationProposal.block_id — NOT
+        # NULL, а Window.block_id для до-P0-08 календарей (дни, у которых
+        # ещё не был проставлен block_id) намеренно nullable. Для такого
+        # пользователя `PeriodizationProposal(block_id=None)` упал бы на
+        # flush() нарушением NOT NULL; guarded() в build_context эту ошибку
+        # глотает и логирует, так что обзор объёма молча никогда бы не
+        # материализовался, а исключение тихо копилось бы в логах на КАЖДОМ
+        # обращении. Обзору объёма физически некуда повеситься без блока —
+        # это деградация легаси-календаря, а не ошибка: снимок окна
+        # (`snapshot`, уже записан выше через close_window) остаётся в
+        # истории, теряется только карточка предложения для пользователя.
+        logger.info(
+            "P0-09: обзор объёма пропущен для app_user_id=%s — окно %s без "
+            "block_id (легаси-календарь до P0-08)",
+            app_user_id, snapshot.id,
+        )
         return None
 
     payload_items = []
@@ -289,7 +354,13 @@ async def apply_volume_decision(
     означает «ничего не применять»: экран не блокирующий, и бездействие
     равно «продолжаем по плану».
     """
-    accepted = set(options.get("accepted") or [])
+    # Ревью Задачи 11, Minor: `options` приходит из тела HTTP-запроса и не
+    # типизировано на границе — `{"accepted": 5}` дошёл бы до `set(5)` и
+    # упал бы TypeError'ом уже внутри транзакции (500 вместо вежливого
+    # отказа). Нечисловой/не-list `accepted` трактуем как пустой — то же
+    # осознанное «ничего не применять», что и для явно пустого списка.
+    raw_accepted = options.get("accepted")
+    accepted = set(raw_accepted) if isinstance(raw_accepted, list) else set()
     items = (proposal.payload or {}).get("adjustments") or []
 
     applied: list[int] = []
@@ -297,14 +368,26 @@ async def apply_volume_decision(
         if item["index"] not in accepted:
             continue
         kind = item["kind"]
-        if kind in (params.KIND_BUDGET_TO_RANGE, params.KIND_BUDGET_TO_FREQUENCY):
+        if kind == params.KIND_BUDGET_TO_RANGE:
             if await _apply_budget(session, app_user_id, item):
+                applied.append(item["index"])
+        elif kind == params.KIND_BUDGET_TO_FREQUENCY:
+            if await _apply_frequency(session, app_user_id, item):
                 applied.append(item["index"])
         elif kind in (params.KIND_PRESCRIPTION_ADD, params.KIND_PRESCRIPTION_CUT):
             if await _apply_prescription(session, app_user_id, proposal.id, item):
                 applied.append(item["index"])
 
-    return {"status": "applied", "proposal_id": proposal.id, "applied": applied}
+    # Ревью Задачи 11, Minor: раньше здесь всегда стоял "applied", даже
+    # когда `applied` пуст и вызывающая apply_decision пишет
+    # proposal.status = STATUS_DECLINED — ответ и записанная строка
+    # расходились. Синхронизируем прямо здесь, а не в вызывающей стороне,
+    # чтобы расхождение не завелось снова в новом вызывающем коде.
+    return {
+        "status": "applied" if applied else "declined",
+        "proposal_id": proposal.id,
+        "applied": applied,
+    }
 
 
 async def _apply_budget(
@@ -332,6 +415,61 @@ async def _apply_budget(
     # цель за физиологические границы, ради которых она и делается.
     row["target_sets"] = max(lm.mev, min(lm.mrv, updated))
     weekly[muscle] = row
+    budget["weekly_targets"] = weekly
+    profile.volume_budget = budget
+    flag_modified(profile, "volume_budget")
+    return True
+
+
+async def _apply_frequency(
+    session: AsyncSession, app_user_id: int, item: dict
+) -> bool:
+    """Привести весь бюджет к реально достижимой частоте.
+
+    Рычаг не про мышцу, а про расписание целиком: если из шести
+    предписанных дней стабильно выходит четыре, цель по КАЖДОЙ мышце
+    завышена в одной и той же пропорции. Масштабируем все цели на
+    наблюдаемую исполняемость и снова клампим каждую в её диапазон —
+    правка не имеет права вынести цель за границы, ради которых делается.
+
+    Ревью Задачи 11, Important 2: до этой функции `budget_to_frequency`
+    эмитился decide() с `muscle=None`, а `apply_volume_decision` маршрутил
+    его в `_apply_budget`, которая немедленно отказывает на `not muscle`.
+    Рычаг «привести цель к реальной частоте» существовал только в тексте
+    карточки — принять его пользователь не мог: `applied` оставался пустым,
+    предложение уходило в declined, а бюджет не менялся.
+    """
+    ratios = [float(r) for r in (item.get("detail") or {}).get("ratios") or []]
+    if not ratios:
+        return False
+    observed = sum(ratios) / len(ratios)
+    if observed <= 0:
+        return False
+
+    profile = (await session.execute(
+        select(AppUserProfile).where(AppUserProfile.app_user_id == app_user_id)
+    )).scalar_one_or_none()
+    if profile is None or not profile.volume_budget:
+        return False
+
+    budget = dict(profile.volume_budget)
+    weekly = dict(budget.get("weekly_targets") or {})
+    changed = False
+    for muscle, row in weekly.items():
+        lm = landmarks_for(muscle, profile.experience_level)
+        current = int((row or {}).get("target_sets") or 0)
+        if lm is None or current <= 0:
+            continue
+        scaled = max(lm.mev, min(lm.mrv, int(math.floor(current * observed))))
+        if scaled != current:
+            patched = dict(row)
+            patched["target_sets"] = scaled
+            weekly[muscle] = patched
+            changed = True
+
+    if not changed:
+        return False
+
     budget["weekly_targets"] = weekly
     profile.volume_budget = budget
     flag_modified(profile, "volume_budget")

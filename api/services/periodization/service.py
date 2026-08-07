@@ -830,14 +830,36 @@ async def apply_decision(
         # смысла для этого вида не имеет.
         from api.services.volume.service import apply_volume_decision
 
-        outcome = await apply_volume_decision(
-            session, app_user_id, proposal, action, options or {}
-        )
+        # Ревью Задачи 11, Minor: `action` раньше не проверялся вовсе — ЛЮБАЯ
+        # строка доходила до apply_volume_decision, а решение о том, что
+        # именно применять, целиком отдавалось `options["accepted"]`. Это
+        # значит, что `action="decline"` с непустым (по ошибке клиента или
+        # чужого вызова) `accepted` всё равно применил бы правки — состояние
+        # решения полностью управлялось бы телом запроса, а не заявленным
+        # действием. Валидируем: применяем ТОЛЬКО при action ==
+        # ACTION_APPLY_VOLUME (ради которого константа и заведена в
+        # params.py); любое другое действие — безусловный отказ, `accepted`
+        # игнорируется целиком, а не просто "не находится".
+        if action == params.ACTION_APPLY_VOLUME:
+            outcome = await apply_volume_decision(
+                session, app_user_id, proposal, action, options or {}
+            )
+        else:
+            outcome = {
+                "status": "declined",
+                "proposal_id": proposal.id,
+                "applied": [],
+            }
         proposal.status = (
             params.STATUS_ACCEPTED
             if outcome["applied"]
             else params.STATUS_DECLINED
         )
+        # Каждая другая ветка apply_decision проставляет decided_action —
+        # эта не была исключением по замыслу, просто забылась (ревью Задачи
+        # 11, Minor): конфликтный ответ (см. проверку статуса выше по
+        # функции) для обзора объёма отдавал бы decided_action: null.
+        proposal.decided_action = action
         proposal.client_uuid = client_uuid
         proposal.decided_at = datetime.now(timezone.utc)
         # Брифовый набросок этой ветки заканчивался на flush() — по аналогии
