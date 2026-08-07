@@ -194,6 +194,28 @@ _SYNC_INDEXES = [
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_user_exercise_rep_overrides_user_exercise "
         "ON user_exercise_rep_overrides (app_user_id, exercise_id)",
     ),
+    (
+        # P0-09 I6 (Important): close_window (volume/repository.py) читает
+        # существующий снимок через scalar_one_or_none() и, если строки нет,
+        # вставляет новую — читает-потом-пишет без блокировки, ровно тот же
+        # класс гонки, что и у uq_periodization_proposals_pending выше.
+        # /workout-center/context и /periodization/context дёргаются с
+        # клиента одновременно на старте приложения — та самая гонка,
+        # которая мотивировала оба индекса рядом. Без уникальности гонка
+        # создаёт ВТОРУЮ строку на тот же (app_user_id, block_id,
+        # window_index); после этого scalar_one_or_none() при КАЖДОМ
+        # следующем вызове ловит MultipleResultsFound, guarded() глотает
+        # исключение, и весь контур объёма молча умирает НАВСЕГДА для этого
+        # пользователя — не разовая гонка, а перманентный отказ.
+        # COALESCE(block_id, 0) — block_id nullable у легаси-календаря
+        # (до-P0-08 дни без блока, см. докстринг Window/_window_starts),
+        # а обычный UNIQUE трактует каждый NULL как отличный от любого
+        # другого NULL и не поймал бы дубль у ДВУХ легаси-окон с одинаковым
+        # window_index.
+        "uq_volume_windows_user_block_index",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_volume_windows_user_block_index "
+        "ON volume_windows (app_user_id, COALESCE(block_id, 0), window_index)",
+    ),
 ]
 
 

@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -612,8 +613,32 @@ async def close_window(
         },
         landmarks=landmarks_snapshot,
     )
-    session.add(snapshot)
-    await session.flush()
+    # P0-09 I6 (Important): чтение `existing` выше и вставка здесь неатомарны
+    # — /workout-center/context и /periodization/context дёргаются с
+    # клиента одновременно на старте приложения (та же гонка, что
+    # мотивировала uq_periodization_proposals_pending). Конкурентный вызов
+    # мог пройти своё чтение до нашего коммита и сейчас вставляет ТОТ ЖЕ
+    # снимок. uq_volume_windows_user_block_index (app/database.py) ловит
+    # это на уровне БД. Без SAVEPOINT здесь и обработки IntegrityError
+    # каждый ПОСЛЕДУЮЩИЙ вызов close_window для этого окна натыкался бы на
+    # ДВЕ строки и падал MultipleResultsFound на `existing` выше —
+    # guarded() глотает это исключение, и контур объёма молча умирает
+    # навсегда для пользователя, попавшего в гонку один раз.
+    try:
+        async with session.begin_nested():
+            session.add(snapshot)
+            await session.flush()
+    except IntegrityError:
+        # Не ошибка, а именно тот исход, ради которого индекс поставлен:
+        # конкурент уже вставил и закоммитил снимок этого окна первым.
+        # Перечитываем и возвращаем ЕГО строку вместо падения.
+        return (await session.execute(
+            select(VolumeWindow).where(
+                VolumeWindow.app_user_id == app_user_id,
+                VolumeWindow.block_id == window.block_id,
+                VolumeWindow.window_index == window.window_index,
+            )
+        )).scalar_one()
     return snapshot
 
 

@@ -1,4 +1,5 @@
 """Закрытое окно замораживается снимком и не пересоздаётся повторно."""
+import asyncio
 from datetime import date, timedelta
 
 import pytest
@@ -12,6 +13,7 @@ from api.services.volume.repository import (
     recompute_stale_window,
     utc_today,
 )
+from app.database import SessionLocal
 
 pytestmark = pytest.mark.asyncio
 
@@ -109,6 +111,88 @@ async def test_close_window_is_idempotent(db, test_user, active_block, seeded_pl
         )
     )).scalar_one()
     assert total == 1
+
+
+async def test_close_window_race_does_not_leave_duplicate_or_raise(
+    db, test_user, active_block, seeded_plan
+):
+    """P0-09 I6 (Important): чтение `existing` и вставка снимка в close_window
+    неатомарны — /workout-center/context и /periodization/context дёргаются
+    с клиента одновременно на старте приложения. Без уникального индекса
+    гонка создаёт ВТОРУЮ строку на то же (app_user_id, block_id,
+    window_index); после этого КАЖДЫЙ следующий close_window падает
+    MultipleResultsFound на `existing = ...scalar_one_or_none()`, guarded()
+    глотает исключение — контур объёма молча умирает НАВСЕГДА для
+    пользователя, попавшего в гонку один раз.
+
+    Гонка воспроизводится ДЕТЕРМИНИРОВАННО, а не понадеявшись на удачное
+    чередование корутин: отдельная сессия вставляет и держит НЕЗАКОММИЧЕННУЮ
+    строку-конкурента с тем же ключом (app_user_id, block_id, window_index).
+    Наш `close_window` её не видит на своей проверке `existing` (read
+    committed) и доходит до собственной вставки — Postgres на уровне
+    уникального индекса блокирует эту вставку, ожидая исхода
+    конкурирующей транзакции, и после её коммита детерминированно
+    возвращает конфликт. Именно так и выглядит настоящая гонка, просто
+    воспроизведённая без угадывания тайминга asyncio.
+    """
+    start = utc_today() - timedelta(days=6)
+    await _seed_microcycle(db, test_user.id, active_block.id, start, seeded_plan.id)
+    window = await current_window(db, test_user.id, start)
+
+    concurrent_session = SessionLocal()
+    try:
+        concurrent_row = VolumeWindow(
+            app_user_id=test_user.id, block_id=window.block_id,
+            window_index=window.window_index, phase_number=window.phase_number,
+            start_date=window.start_date, end_date=window.end_date,
+            muscles={}, adherence={
+                "planned_days": 0, "completed_days": 0, "missed_days": 0,
+            },
+            landmarks={},
+        )
+        concurrent_session.add(concurrent_row)
+        # flush(), не commit(): строка уже держит блокировку уникального
+        # индекса на уровне БД, но ещё не видна другим транзакциям через
+        # обычное чтение — ровно то состояние, в котором наш `existing`
+        # выше её не находит.
+        await concurrent_session.flush()
+
+        async def _commit_concurrent_after_delay():
+            # Задержка заведомо больше времени, за которое close_window
+            # успевает дойти до своей вставки на этом маленьком наборе
+            # данных, — к моменту коммита наша вставка уже блокируется на
+            # конфликте и ждёт именно этот коммит.
+            await asyncio.sleep(0.2)
+            await concurrent_session.commit()
+
+        result, _ = await asyncio.gather(
+            close_window(db, test_user.id, window, {}, level="intermediate"),
+            _commit_concurrent_after_delay(),
+        )
+    finally:
+        await concurrent_session.close()
+
+    await db.commit()
+
+    assert result is not None, (
+        "close_window обязана вернуть строку конкурента, а не упасть"
+    )
+    total = (await db.execute(
+        select(func.count(VolumeWindow.id)).where(
+            VolumeWindow.app_user_id == test_user.id,
+            VolumeWindow.block_id == active_block.id,
+        )
+    )).scalar_one()
+    assert total == 1
+
+    # Повторное обращение (эквивалент следующего захода на
+    # /workout-center/context) обязано отработать без MultipleResultsFound —
+    # до фикса именно ТУТ проявлялся перманентный отказ.
+    window_again = await current_window(db, test_user.id, start)
+    again = await close_window(
+        db, test_user.id, window_again, {}, level="intermediate"
+    )
+    assert again is not None
 
 
 async def test_window_with_too_few_prescribed_days_is_not_closed(
