@@ -5,7 +5,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal, Optional, Dict, Union, List
 from api.schemas.supersets import WorkoutStructureResponse
-from pydantic import BaseModel, ConfigDict, Field
+from api.services.muscle_keys import to_system_key
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 WorkoutSource = Literal["free", "split_day", "plan"]
@@ -33,6 +34,28 @@ class ExerciseShortResponse(BaseModel):
 
     main_muscle_group: str | None = None
     secondary_muscle_groups: Optional[Union[List[str], str]] = None
+
+    # P0-09: нормализованные системные ключи. Раньше клиент нормализовал
+    # русские названия сам, тремя копиями RU_TO_EN_MAP, и каждая копия
+    # расходилась со справочником по-своему. Нормализация — на бэкенде,
+    # в единственном to_system_key.
+    muscle_key: Optional[str] = None
+    secondary_muscle_keys: List[str] = []
+
+    @model_validator(mode="after")
+    def _normalize_muscle_keys(self) -> "ExerciseShortResponse":
+        self.muscle_key = to_system_key(self.main_muscle_group)
+
+        raw_secondary = self.secondary_muscle_groups
+        if isinstance(raw_secondary, str):
+            items: List[str] = [s.strip() for s in raw_secondary.split(",") if s.strip()]
+        else:
+            items = list(raw_secondary or [])
+
+        self.secondary_muscle_keys = [
+            key for key in (to_system_key(item) for item in items) if key is not None
+        ]
+        return self
 
 
 class AutoprogressionResponse(BaseModel):
