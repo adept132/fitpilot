@@ -56,3 +56,28 @@ def test_already_system_key_passes_through():
     )
     assert resp.muscle_key == "chest"
     assert resp.secondary_muscle_keys == ["triceps"]
+
+
+def test_secondary_muscle_keys_deduplicated_when_two_ru_synonyms_collapse():
+    """P0-09 I5 (Important): to_system_key схлопывает "Трапеция" и
+    "Трапеции" (единственное/множественное — оба варианта живут в каталоге,
+    см. api/services/muscle_keys.py) на один и тот же ключ "traps". Без
+    дедупа список нёс бы этот ключ дважды — клиентский трекер суммирует
+    += по каждому элементу и удвоил бы вклад мышцы, хотя measure.contribution()
+    на сервере такого дубля не считает вовсе."""
+    resp = ExerciseShortResponse(
+        id=1, name="Шраги", main_muscle_group="Грудь",
+        secondary_muscle_groups=["Трапеция", "Трапеции"],
+    )
+    assert resp.secondary_muscle_keys == ["traps"]
+
+
+def test_secondary_muscle_keys_exclude_primary_key():
+    # Если каталог продублировал главную мышцу среди синергистов, прямой
+    # вклад уже учтён через muscle_key — второй раз его в secondary не несём.
+    resp = ExerciseShortResponse(
+        id=1, name="Жим лёжа", main_muscle_group="Грудь",
+        secondary_muscle_groups=["Грудь", "Трицепс"],
+    )
+    assert resp.muscle_key == "chest"
+    assert resp.secondary_muscle_keys == ["triceps"]

@@ -52,9 +52,25 @@ class ExerciseShortResponse(BaseModel):
         else:
             items = list(raw_secondary or [])
 
-        self.secondary_muscle_keys = [
-            key for key in (to_system_key(item) for item in items) if key is not None
-        ]
+        # P0-09 I5 (Important): to_system_key схлопывает несколько RU/EN
+        # синонимов на один системный ключ — каталог вполне может нести
+        # два разных сырых названия, нормализующихся в одно и то же.
+        # Дедуп на бэкенде, а не у каждого потребителя по отдельности:
+        # клиентский трекер суммирует += по каждому элементу списка и
+        # удвоил бы вклад мышцы, тогда как measure.contribution() (сервер)
+        # дедуп уже делает у СЕБЯ — расхождение клиента и сервера была
+        # находкой ревью. Также исключаем главную мышцу: если каталог
+        # продублировал её среди синергистов, прямой вклад уже учтён
+        # через muscle_key.
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for raw in items:
+            key = to_system_key(raw)
+            if key is None or key == self.muscle_key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(key)
+        self.secondary_muscle_keys = deduped
         return self
 
 
