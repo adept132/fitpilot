@@ -5,6 +5,7 @@ from api.services.volume.measure import (
     INDIRECT_WEIGHT,
     MuscleContribution,
     accumulate,
+    apply_adjustments,
     contribution,
 )
 
@@ -68,3 +69,38 @@ def test_accumulate_does_not_mutate_inputs():
     total = {"chest": MuscleContribution(direct=3.0, indirect=0.0)}
     accumulate(total, {"chest": MuscleContribution(direct=1.0, indirect=0.0)})
     assert total["chest"] == MuscleContribution(direct=3.0, indirect=0.0)
+
+
+def test_apply_adjustments_adds_sets_to_matching_exercise():
+    compiled = [
+        {"exercise_id": 10, "target_sets": 3},
+        {"exercise_id": 11, "target_sets": 4},
+    ]
+    result = apply_adjustments(compiled, [{"exercise_id": 10, "delta_sets": 2}])
+    assert result[0]["target_sets"] == 5
+    assert result[1]["target_sets"] == 4
+
+
+def test_apply_adjustments_cuts_but_never_below_one():
+    # Ноль подходов означал бы «убрать упражнение» — это другое решение,
+    # с другой карточкой и другими последствиями для истории прогрессии.
+    compiled = [{"exercise_id": 10, "target_sets": 2}]
+    result = apply_adjustments(compiled, [{"exercise_id": 10, "delta_sets": -5}])
+    assert result[0]["target_sets"] == 1
+
+
+def test_apply_adjustments_ignores_unknown_exercise():
+    compiled = [{"exercise_id": 10, "target_sets": 3}]
+    result = apply_adjustments(compiled, [{"exercise_id": 999, "delta_sets": 2}])
+    assert result[0]["target_sets"] == 3
+
+
+def test_apply_adjustments_without_adjustments_returns_equal_list():
+    compiled = [{"exercise_id": 10, "target_sets": 3}]
+    assert apply_adjustments(compiled, None) == compiled
+
+
+def test_apply_adjustments_does_not_mutate_input():
+    compiled = [{"exercise_id": 10, "target_sets": 3}]
+    apply_adjustments(compiled, [{"exercise_id": 10, "delta_sets": 2}])
+    assert compiled[0]["target_sets"] == 3

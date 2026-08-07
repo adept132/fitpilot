@@ -71,6 +71,48 @@ def contribution(
     return result
 
 
+# [КОНФИГ] Нижняя граница подходов после срезающей правки. Ноль означал бы
+# «убрать упражнение» — это другое решение, с другой карточкой и другими
+# последствиями для истории прогрессии (load_history читает по exercise_id).
+MIN_SETS_AFTER_ADJUSTMENT = 1
+
+
+def apply_adjustments(
+    compiled: list[dict],
+    adjustments: Optional[list[dict]],
+) -> list[dict]:
+    """Наложить принятые правки объёма на скомпилированный список упражнений.
+
+    Вход и выход — те же словари, что отдаёт calculate_exercise_recommendations.
+    Входной список не мутируется.
+    """
+    if not adjustments:
+        return compiled
+
+    delta_by_exercise: dict[int, int] = {}
+    for item in adjustments:
+        try:
+            exercise_id = int(item["exercise_id"])
+            delta = int(item["delta_sets"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        delta_by_exercise[exercise_id] = delta_by_exercise.get(exercise_id, 0) + delta
+
+    result: list[dict] = []
+    for item in compiled:
+        delta = delta_by_exercise.get(item.get("exercise_id"))
+        if not delta:
+            result.append(item)
+            continue
+        patched = dict(item)
+        patched["target_sets"] = max(
+            MIN_SETS_AFTER_ADJUSTMENT,
+            int(item.get("target_sets") or 0) + delta,
+        )
+        result.append(patched)
+    return result
+
+
 def accumulate(
     total: dict[str, MuscleContribution],
     part: dict[str, MuscleContribution],

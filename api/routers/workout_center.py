@@ -532,6 +532,22 @@ async def start_workout(
             session, app_user.id, plan_id=payload.plan_id, current_day_index=current_day_index
         )
 
+        # P0-09: принятые пользователем правки объёма живут на дне
+        # календаря (UserCalendarDay.volume_adjustments), а не в плане —
+        # план переиспользуется на всех подходящих днях. Накладываем их
+        # ДО построения контекста прогрессии, чтобы движок увидел
+        # фактическое число подходов, а не шаблонное.
+        if payload.calendar_day_id:
+            from api.services.volume.measure import apply_adjustments
+
+            adjustments_row = (await session.execute(
+                select(UserCalendarDay.volume_adjustments).where(
+                    UserCalendarDay.id == payload.calendar_day_id,
+                    UserCalendarDay.app_user_id == app_user.id,
+                )
+            )).scalar_one_or_none()
+            compiled_exercises = apply_adjustments(compiled_exercises, adjustments_row)
+
         # P0-06 C1: до этого фикса /workouts/start с plan_id создавал
         # WorkoutSessionExercise только со снимками recommended_*, ни разу не
         # вызывая движок. Из-за write-once в persist_prescription и
