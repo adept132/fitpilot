@@ -335,6 +335,23 @@ async def _apply_snapshot(
     workout.sync_version = (workout.sync_version or 0) + 1
     new_version = workout.sync_version
 
+    # P0-09 C1: календарь запоминает факт и здесь тоже. Реальный путь
+    # завершения тренировки идёт ЧЕРЕЗ ЭТУ РУЧКУ (офлайн-репозиторий
+    # клиента шлёт снимок сюда, а не в устаревший /workouts/{id}/finish —
+    # см. её докстринг), поэтому привязка к дню календаря без этого хука
+    # никогда не срабатывала на боевом пути: mark_missed_days тем временем
+    # исправно помечал те же дни пропущенными на следующий обход контекста.
+    # guarded() изолирует падение в SAVEPOINT по тем же причинам, что и на
+    # дублирующем (но живом) месте в workout_center.finish_workout.
+    if workout.status == "finished":
+        from api.services.volume.repository import attach_session_to_day, guarded
+
+        await guarded(
+            db,
+            "привязка синхронизированной сессии к дню календаря",
+            attach_session_to_day(db, app_user_id, workout),
+        )
+
     await db.commit()
     workout_id = workout.id
 
