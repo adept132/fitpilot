@@ -520,14 +520,23 @@ async def close_window(
     if existing is not None:
         return existing
 
+    # Ни день отдыха, ни blackout не несут предписания по построению —
+    # SchedulingEngine намеренно оставляет на них plan_id = None (отпуск,
+    # переезд и т.п.). Знаменатель «доли дней с предписанием» должен
+    # исключать оба флага той же логикой, что и adherence_for_range: иначе
+    # окно с несколькими blackout-днями (отпускная неделя) штрафуется за
+    # чужое решение и отвергается как обрывок после смены сплита, хотя
+    # ничего подобного не произошло.
     day_rows = (await session.execute(
-        select(UserCalendarDay.plan_id, UserCalendarDay.is_rest_day).where(
+        select(UserCalendarDay.plan_id).where(
             UserCalendarDay.app_user_id == app_user_id,
             UserCalendarDay.target_date >= window.start_date,
             UserCalendarDay.target_date <= window.end_date,
+            UserCalendarDay.is_rest_day.is_(False),
+            UserCalendarDay.is_blackout.is_(False),
         )
     )).all()
-    working = [r for r in day_rows if not r.is_rest_day]
+    working = day_rows
     if not working:
         return None
     with_plan = sum(1 for r in working if r.plan_id is not None)

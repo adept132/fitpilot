@@ -94,6 +94,41 @@ async def test_window_with_too_few_prescribed_days_is_not_closed(
     assert row is None
 
 
+async def test_blackout_days_do_not_reject_the_window(
+    db, test_user, active_block, seeded_plan
+):
+    """Ревью Task 9: blackout-дни не несут предписания по построению.
+    Считать их днями без плана значит отвергнуть окно за отпуск."""
+    start = utc_today() - timedelta(days=6)
+
+    # Два рабочих дня с планом и два blackout — по старому знаменателю
+    # доля была бы 2/4 и окно бы уцелело только на грани; делаем
+    # blackout-дней больше, чтобы старая логика гарантированно отвергла.
+    for offset in range(2):
+        db.add(UserCalendarDay(
+            app_user_id=test_user.id, target_date=start + timedelta(days=offset),
+            block_id=active_block.id, plan_id=seeded_plan.id, day_tag="push",
+            micro_tag="medium", meso_tag="medium",
+            microcycle_day_number=offset + 1,
+            is_rest_day=False, is_blackout=False, status="completed",
+        ))
+    for offset in range(2, 5):
+        db.add(UserCalendarDay(
+            app_user_id=test_user.id, target_date=start + timedelta(days=offset),
+            block_id=active_block.id, plan_id=None, day_tag="push",
+            micro_tag="medium", meso_tag="medium",
+            microcycle_day_number=offset + 1,
+            is_rest_day=False, is_blackout=True, status="planned",
+        ))
+    await db.commit()
+
+    window = await current_window(db, test_user.id, start)
+    row = await close_window(db, test_user.id, window, {}, level="intermediate")
+    await db.commit()
+
+    assert row is not None, "окно отвергнуто из-за blackout-дней"
+
+
 async def test_closed_windows_returns_newest_first(db, test_user, active_block, seeded_plan):
     start = utc_today() - timedelta(days=12)
     await _seed_microcycle(db, test_user.id, active_block.id, start, seeded_plan.id)
