@@ -76,6 +76,18 @@ def plan_exercise(
     prescription = apply_readiness_cap(prescription, enriched)
     prescription = apply_volume_trim(prescription, enriched)
 
+    # P0-11 §6.4: плановый диапазон нужен клиенту как пол недобора после
+    # того, как внутрисессионная петля сдвинула вес. Через sets его не
+    # достать: в основной ветке double.py sets[n].rep_min это prior + 1,
+    # то есть цель роста, а не низ диапазона. Штампуем здесь, в одной
+    # точке на все схемы, — по образцу basis["exercise_id"] в
+    # persist_prescription. Пустое предписание не трогаем: его basis
+    # никто не читает, а лишний ключ сломал бы тесты на равенство.
+    if prescription.sets:
+        basis = dict(prescription.basis)
+        basis["rep_range"] = [ctx.rep_min, ctx.rep_max]
+        prescription = replace(prescription, basis=basis)
+
     if provisional:
         prescription = replace(prescription, provisional=True)
     return prescription

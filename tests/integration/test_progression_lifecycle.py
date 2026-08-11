@@ -331,3 +331,99 @@ async def test_second_plan_workout_exits_bootstrap_scheme(
     assert prescription is not None
     assert prescription["scheme"] != "e1rm_factor", prescription
     assert prescription["reason_code"] != "bootstrap_no_prescription", prescription
+
+
+def test_plan_exercise_stamps_rep_range_in_basis():
+    """Клиенту нужен низ планового диапазона: в ветке роста double.py
+    sets[n].rep_min это prior + 1, а не ctx.rep_min (P0-11 §6.4).
+
+    Отличие от брифа: там ctx собирался с ПУСТОЙ историей и
+    state=ProgressionState(last_top_weight=40.0) в надежде получить
+    непустое предписание. Но plan_exercise() безусловно пересчитывает
+    state из history через rebuild_state() и переданный state
+    отбрасывает целиком (см. test_state_is_rebuilt_even_if_caller_passed_an_empty_one
+    в tests/test_progression_engine.py) — а с пустой историей
+    resolve_scheme() всегда уходит в бутстрап e1rm_factor, которому
+    нужен ctx.state.working_e1rm, а его взять неоткуда, и результат —
+    no_basis с пустыми sets (test_empty_history_returns_no_basis, тот
+    же файл). Штамповать в пустом предписании нечего — см. второй тест
+    ниже. Чтобы этот тест проверял именно штамп, а не падал на пустом
+    sets по причине, не связанной со штампом, здесь собрана настоящая
+    история: одна сессия, где все подходы взяли потолок диапазона —
+    double.py уходит в ветку "прибавить вес", которая гарантированно
+    непустая.
+    """
+    from api.services.progression import params
+    from api.services.progression.engine import plan_exercise
+    from api.services.progression.types import (
+        ExerciseHistory,
+        Prescription,
+        ProgressionState,
+        SchemeContext,
+        SessionFact,
+        SetFact,
+        SetPrescription,
+    )
+
+    prior_prescription = Prescription(
+        scheme=params.SCHEME_DOUBLE,
+        sets=tuple(SetPrescription(n, 40.0, 8, 12, 2, "normal") for n in range(1, 4)),
+        reason_code="progressed",
+        reason_text="x",
+    )
+    history = ExerciseHistory(
+        exercise_id=1,
+        sessions=(
+            SessionFact(
+                session_id=1,
+                finished_at=None,
+                prescription=prior_prescription,
+                sets=tuple(SetFact(n, 40.0, 12, 2) for n in range(1, 4)),
+            ),
+        ),
+    )
+
+    ctx = SchemeContext(
+        history=history,
+        state=ProgressionState(),
+        last_outcome=None,
+        target_sets=3,
+        rep_min=8,
+        rep_max=12,
+        rep_range_source="microcycle",
+        target_rir=2,
+        equipment=("barbell",),
+    )
+
+    prescription = plan_exercise(ctx)
+
+    assert prescription.sets, "нужен непустой sets, иначе штамповать нечего"
+    assert prescription.basis["rep_range"] == [8, 12]
+
+
+def test_rep_range_stamp_does_not_touch_empty_prescription():
+    """Пустое предписание (no_basis) остаётся пустым и без штампа —
+    штамповать нечего, и basis пустого предписания читать некому."""
+    from api.services.progression.engine import plan_exercise
+    from api.services.progression.types import (
+        ExerciseHistory,
+        ProgressionState,
+        SchemeContext,
+    )
+
+    ctx = SchemeContext(
+        history=ExerciseHistory(exercise_id=1),
+        state=ProgressionState(),  # ни истории, ни якоря веса
+        last_outcome=None,
+        target_sets=3,
+        rep_min=8,
+        rep_max=12,
+        rep_range_source="microcycle",
+        target_rir=2,
+        equipment=("barbell",),
+    )
+
+    prescription = plan_exercise(ctx)
+
+    assert prescription.sets == ()
+    assert "rep_range" not in prescription.basis
