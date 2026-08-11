@@ -7,7 +7,10 @@ import api.routers.plans as plans_mod
 class FakeResult:
     def __init__(self, rows): self._rows = rows
     def scalar_one_or_none(self): return self._rows[0] if self._rows else None
-    def scalars(self): return SimpleNamespace(all=lambda: self._rows)
+    def scalars(self): return SimpleNamespace(
+        all=lambda: self._rows,
+        first=lambda: self._rows[0] if self._rows else None,
+    )
 
 
 class FakeSession:
@@ -50,3 +53,21 @@ def test_confirm_creates_plans_and_rebinds():
     plans_added = [o for o in sess.added if type(o).__name__ == "WorkoutPlan"]
     assert plans_added and plans_added[0].meso_tag == "adaptive"
     assert sess.committed is True
+
+
+def test_generated_plans_bind_every_matching_split_day():
+    upper = SimpleNamespace(id=101, day_tag="upper", meso_tag="adaptive", micro_tag="adaptive")
+    lower = SimpleNamespace(id=102, day_tag="lower", meso_tag="adaptive", micro_tag="adaptive")
+    split = SimpleNamespace(
+        selected_plans={"1": 7, "3": 999},
+        blueprint=SimpleNamespace(slots=[
+            SimpleNamespace(day_order=1, day=SimpleNamespace(name="Upper")),
+            SimpleNamespace(day_order=2, day=SimpleNamespace(name="Lower")),
+            SimpleNamespace(day_order=3, day=SimpleNamespace(name="Rest")),
+        ]),
+    )
+
+    updated = plans_mod._bind_generated_plans_to_split(split, [upper, lower])
+
+    assert updated == 3
+    assert split.selected_plans == {"1": 101, "2": 102}

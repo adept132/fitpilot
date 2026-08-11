@@ -57,7 +57,14 @@ class SchedulingEngine:
             elif plan.micro_tag == "adaptive":
                 score += 0.5
 
-            if score > max_score:
+            # Equal-score plans are versions of the same day prescription in
+            # practice. Prefer the newest one so confirming a regenerated plan
+            # immediately rebinds the calendar to the just-created version
+            # instead of keeping an older generated draft.
+            if score > max_score or (
+                score == max_score
+                and (best_plan_id is None or plan.id > best_plan_id)
+            ):
                 max_score = score
                 best_plan_id = plan.id
 

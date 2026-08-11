@@ -37,6 +37,39 @@ LOCATION_EQUIPMENT = {
 }
 
 
+def _bind_generated_plans_to_split(user_split: UserSplit, plans: list[WorkoutPlan]) -> int:
+    """Keep the legacy Workout context in sync with calendar plan binding.
+
+    Workout Center still resolves its selected plan through
+    ``UserSplit.selected_plans`` while the schedule resolves it through
+    ``UserCalendarDay.plan_id``. Confirmation must update both projections or
+    Workout shows "no plan" immediately after a successful generation.
+    """
+    if not user_split.blueprint:
+        return 0
+
+    selected = dict(user_split.selected_plans or {})
+    updated = 0
+    for slot in user_split.blueprint.slots:
+        plan_id = SchedulingEngine._score_and_find_best_plan(
+            plans=plans,
+            target_day_name=slot.day.name,
+            meso_tag="adaptive",
+            micro_tag="adaptive",
+        )
+        key = str(slot.day_order)
+        if plan_id is not None and selected.get(key) != plan_id:
+            selected[key] = plan_id
+            updated += 1
+        elif plan_id is None and key in selected:
+            del selected[key]
+            updated += 1
+
+    if updated:
+        user_split.selected_plans = selected
+    return updated
+
+
 def _allowed_equipment(locations) -> _Optional[set]:
     locs = locations or ["gym"]
     if any(l == "gym" for l in locs):
@@ -459,6 +492,7 @@ async def confirm_generated_plan(request: ConfirmPlanRequest,
     experience = profile.experience_level if profile else "beginner"
 
     created: list[int] = []
+    created_plans: list[WorkoutPlan] = []
     for day in request.days:
         AntiSuicideValidator.validate_workout_plan(
             experience,
@@ -471,16 +505,29 @@ async def confirm_generated_plan(request: ConfirmPlanRequest,
                            day_tag=day.day_tag.lower(), micro_tag="adaptive", meso_tag="adaptive")
         db.add(plan)
         await db.flush()
+        created_plans.append(plan)
         for e in day.exercises:
             db.add(WorkoutPlanExercise(
                 plan_id=plan.id, exercise_id=e.exercise_id, order_index=e.order_index,
                 superset_group_id=e.superset_group_id, target_sets=e.target_sets))
         created.append(plan.id)
-    await db.commit()
-
-    us_res = await db.execute(select(UserSplit).where(
-        UserSplit.app_user_id == current_user.id, UserSplit.is_active == True))  # noqa: E712
-    if us_res.scalar_one_or_none():
+    us_res = await db.execute(
+        select(UserSplit)
+        .where(
+            UserSplit.app_user_id == current_user.id,
+            UserSplit.is_active == True,  # noqa: E712
+        )
+        .options(
+            selectinload(UserSplit.blueprint)
+            .selectinload(SplitBlueprint.slots)
+            .selectinload(SplitDaySlot.day)
+        )
+    )
+    user_split = us_res.scalars().first()
+    if user_split:
+        _bind_generated_plans_to_split(user_split, created_plans)
         await SchedulingEngine.rebind_plans(db, current_user.id, _date.today())
+    else:
+        await db.commit()
 
     return ConfirmPlanResponse(status="success", created_plan_ids=created)
