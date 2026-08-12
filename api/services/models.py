@@ -380,6 +380,12 @@ class WorkoutSessionExercise(Base):
     # значение не переписывается ни пересчётом, ни merge при синхронизации —
     # иначе evaluate() сравнит факт с целью, которой пользователь не видел.
     prescription: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    # P0-11: что показывалось пользователю ПО ФАКТУ, после внутрисессионной
+    # петли. В отличие от prescription (write-once — «что обещали на
+    # старте») перезаписывается после каждого завершённого подхода.
+    # Разделение обязательно: evaluate() должен сравнивать факт с целью,
+    # которую человек видел, а write-once не даёт эту цель обновить.
+    live_prescription: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     target_sets: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(
