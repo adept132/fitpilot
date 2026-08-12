@@ -102,6 +102,11 @@ class SyncExerciseSnapshot(BaseModel):
     # P0-06 C3: типизировано SyncPrescriptionSnapshot вместо сырого dict —
     # мусор отвергается на границе с понятной 422, а не долетает до JSONB.
     prescription: SyncPrescriptionSnapshot | None = None
+    # P0-11. НЕ write-once, в отличие от prescription выше: это показанная
+    # по факту цель, которую внутрисессионная петля обновляет после
+    # каждого подхода. Значение производное — чистая функция от
+    # (предписание, факты, шаг), — поэтому last-write-wins безопасен.
+    live_prescription: SyncPrescriptionSnapshot | None = None
     deleted: bool = False
     updated_at: datetime | None = None
     sets: list[SyncSetSnapshot] = []

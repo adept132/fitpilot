@@ -257,6 +257,12 @@ async def _apply_snapshot(
         # в JSONB кладём готовый dict через model_dump, а не сырой payload.
         if not exercise.prescription and ex_snap.prescription:
             exercise.prescription = ex_snap.prescription.model_dump()
+        # P0-11: живая цель перезаписывается всегда — она производная и
+        # обязана отражать последний известный факт. Ветка `if not ...`,
+        # что стоит выше у prescription, здесь была бы багом: цель
+        # первого подхода застыла бы навсегда.
+        if ex_snap.live_prescription:
+            exercise.live_prescription = ex_snap.live_prescription.model_dump()
         await db.flush()
         id_map[ex_snap.client_uuid] = exercise.id
 
