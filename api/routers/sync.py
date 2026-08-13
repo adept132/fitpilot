@@ -403,11 +403,21 @@ async def _apply_snapshot(
         # и оборачиваем в один guarded(): без этих входов пересчёт прогрессии
         # всё равно невозможен, значит и падать они должны как один узел.
         async def _load_inputs():
+            # populate_existing=True обязателен: без него select() при повторном
+            # синке уже существующей тренировки вернёт ТОТ ЖЕ объект из identity
+            # map, а его коллекция exercises уже прогружена строкой выше
+            # (loaded_exercises = list(workout.exercises) для is_new=False) —
+            # и SQLAlchemy не перепрогружает уже загруженную relationship-коллекцию
+            # молча. Упражнения, добавленные этим же синком через сырой FK
+            # (WorkoutSessionExercise(workout_session_id=...) в db.add() выше, а
+            # не через relationship), в стухшей коллекции не появятся — рекорды
+            # и прогрессия для них молча не пересчитаются.
             refreshed = (
                 await db.execute(
                     select(WorkoutSession)
                     .where(WorkoutSession.id == workout.id)
                     .options(*_detail_options())
+                    .execution_options(populate_existing=True)
                 )
             ).scalar_one()
 

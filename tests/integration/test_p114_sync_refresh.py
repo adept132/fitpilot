@@ -14,37 +14,58 @@ from sqlalchemy import select
 from api.services.models import UserExerciseProgressionState, WorkoutSession
 
 
-def _payload(exercise_id: int, *, client_uuid: str, weight: float, reps: int) -> dict:
+def _exercise_snapshot(
+    exercise_id: int, *, ex_client_uuid: str, order_index: int, weight: float, reps: int
+) -> dict:
+    return {
+        "client_uuid": ex_client_uuid,
+        "exercise_id": exercise_id,
+        "order_index": order_index,
+        "superset_group": None,
+        "notes": None,
+        "prescription": None,
+        "sets": [
+            {
+                "client_uuid": f"{ex_client_uuid}-set-1",
+                "set_number": 1,
+                "set_type": "normal",
+                "weight": weight,
+                "reps": reps,
+                "effort_level": "medium",
+                "is_completed": True,
+            }
+        ],
+    }
+
+
+def _payload(
+    exercise_id: int,
+    *,
+    client_uuid: str,
+    weight: float,
+    reps: int,
+    status: str = "finished",
+    extra_exercises: list[dict] | None = None,
+) -> dict:
     return {
         "client_uuid": client_uuid,
         "source": "free",
-        "status": "finished",
+        "status": status,
         "split_day_id": None,
         "plan_id": None,
         "notes": None,
         "volume_targets": None,
         "started_at": "2026-08-12T10:00:00Z",
-        "finished_at": "2026-08-12T11:00:00Z",
+        "finished_at": "2026-08-12T11:00:00Z" if status == "finished" else None,
         "exercises": [
-            {
-                "client_uuid": f"{client_uuid}-ex-1",
-                "exercise_id": exercise_id,
-                "order_index": 0,
-                "superset_group": None,
-                "notes": None,
-                "prescription": None,
-                "sets": [
-                    {
-                        "client_uuid": f"{client_uuid}-set-1",
-                        "set_number": 1,
-                        "set_type": "normal",
-                        "weight": weight,
-                        "reps": reps,
-                        "effort_level": "medium",
-                        "is_completed": True,
-                    }
-                ],
-            }
+            _exercise_snapshot(
+                exercise_id,
+                ex_client_uuid=f"{client_uuid}-ex-1",
+                order_index=0,
+                weight=weight,
+                reps=reps,
+            ),
+            *(extra_exercises or []),
         ],
     }
 
@@ -161,3 +182,62 @@ async def test_sync_survives_failing_progression_recompute(
     row = await _finished_workout_row(db, "p114-boom-2")
     assert row is not None
     assert row.status == "finished"
+
+
+@pytest.mark.asyncio
+async def test_second_sync_recomputes_all_exercises_not_just_first(
+    client, auth_headers, db, seeded_history, fresh_exercise,
+):
+    """Второй синк той же тренировки обязан пересчитать ВСЕ упражнения снимка.
+
+    Регрессия ревью: реселект внутри `_load_inputs` без populate_existing=True
+    возвращал объект тренировки из identity map с уже прогруженной (на строке
+    `loaded_exercises = ... list(workout.exercises)` выше в этом же запросе)
+    коллекцией exercises. Второе упражнение, добавленное этим же (вторым)
+    синком, попадает в БД через сырой FK-инсерт, а не через relationship —
+    в стухшей коллекции его нет, и `refreshed.exercises` его не отдаёт.
+    Итог — рекорд/предписание для второго упражнения молча не пересчитывались.
+
+    Первый POST — активная тренировка с одним упражнением (seeded_history).
+    Второй POST по тому же client_uuid — та же тренировка, статус finished,
+    то же упражнение плюс новое (fresh_exercise). Оба должны получить
+    состояние прогрессии.
+    """
+    workout_client_uuid = "p114-refresh-2ex-1"
+
+    active_payload = _payload(
+        seeded_history.id,
+        client_uuid=workout_client_uuid,
+        weight=80.0,
+        reps=5,
+        status="active",
+    )
+    resp = await client.post("/sync/workouts", headers=auth_headers, json=active_payload)
+    assert resp.status_code == 200, resp.text
+    sync_version = resp.json()["sync_version"]
+
+    second_exercise = _exercise_snapshot(
+        fresh_exercise.id,
+        ex_client_uuid=f"{workout_client_uuid}-ex-2",
+        order_index=1,
+        weight=40.0,
+        reps=10,
+    )
+    finished_payload = _payload(
+        seeded_history.id,
+        client_uuid=workout_client_uuid,
+        weight=80.0,
+        reps=5,
+        status="finished",
+        extra_exercises=[second_exercise],
+    )
+    finished_payload["base_version"] = sync_version
+
+    resp = await client.post("/sync/workouts", headers=auth_headers, json=finished_payload)
+    assert resp.status_code == 200, resp.text
+
+    first_state = await _state_row(db, seeded_history.id)
+    second_state = await _state_row(db, fresh_exercise.id)
+
+    assert first_state is not None
+    assert second_state is not None
