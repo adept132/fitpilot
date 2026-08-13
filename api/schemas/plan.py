@@ -1,7 +1,7 @@
 from datetime import date
 
 from pydantic import BaseModel, Field
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Literal
 from uuid import UUID
 
 
@@ -83,6 +83,8 @@ class GeneratedExerciseOut(BaseModel):
     fatigue_tier: int
     primary_muscle: str
     secondary_muscle: Optional[str] = None
+    override_reps: Optional[str] = None
+    override_rir: Optional[int] = Field(default=None, ge=0, le=10)
 
 
 class GeneratedDayOut(BaseModel):
@@ -99,8 +101,12 @@ class GeneratePlanResponse(BaseModel):
 
 class ConfirmPlanRequest(BaseModel):
     days: List[GeneratedDayOut]
+    mode: Literal["full", "single_day"] = "full"
+    target_date: Optional[date] = None
 
 
 class ConfirmPlanResponse(BaseModel):
     status: str
     created_plan_ids: List[int]
+    applied_from: date
+    updated_day_tags: List[str] = Field(default_factory=list)

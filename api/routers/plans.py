@@ -11,7 +11,7 @@ from api.services.models import Mesocycle, MesocyclePhase, WorkoutPlan, AppUserP
     WorkoutSession, WorkoutSessionExercise, WorkoutSessionSet
 from api.services.validator import AntiSuicideValidator, PlanExerciseInput
 from api.services.scheduling_engine import SchedulingEngine
-from api.services.models import UserSplit, SplitBlueprint, SplitDaySlot, DayBlueprint, Exercise
+from api.services.models import UserSplit, SplitBlueprint, SplitDaySlot, DayBlueprint, Exercise, UserCalendarDay
 from api.services.volume_service import VolumeService
 from api.services.plan_generator_service import build_day
 from api.services.muscle_keys import key_for_muscle
@@ -61,9 +61,7 @@ def _bind_generated_plans_to_split(user_split: UserSplit, plans: list[WorkoutPla
         if plan_id is not None and selected.get(key) != plan_id:
             selected[key] = plan_id
             updated += 1
-        elif plan_id is None and key in selected:
-            del selected[key]
-            updated += 1
+        # Частичная генерация не имеет права стирать планы остальных дней.
 
     if updated:
         user_split.selected_plans = selected
@@ -123,6 +121,7 @@ async def generate_plan(request: GeneratePlanRequest,
     prehab = (profile.settings or {}).get("prehab_flags", [])
     cfg = SelectionConfig(use_supersets=request.config.use_supersets,
                           accent_muscle=request.config.accent_muscle,
+                          duration_minutes=request.config.duration_minutes,
                           seed=request.config.seed)
 
     seen: set = set()
@@ -155,7 +154,8 @@ async def generate_plan(request: GeneratePlanRequest,
                 exercise_id=e.exercise_id, name=e.name, target_sets=e.sets,
                 order_index=e.order_index, superset_group_id=e.superset_group_id,
                 fatigue_tier=e.fatigue_tier, primary_muscle=e.primary_muscle,
-                secondary_muscle=e.secondary_muscle) for e in gen.exercises]))
+                secondary_muscle=e.secondary_muscle,
+                override_reps=None, override_rir=None) for e in gen.exercises]))
     return GeneratePlanResponse(days=days_out)
 
 @router.get("/")
@@ -491,6 +491,15 @@ async def confirm_generated_plan(request: ConfirmPlanRequest,
     profile = prof_res.scalar_one_or_none()
     experience = profile.experience_level if profile else "beginner"
 
+    if not request.days:
+        raise HTTPException(400, "Нет тренировочных дней для сохранения")
+    if request.mode == "single_day" and len(request.days) != 1:
+        raise HTTPException(400, "Однодневный режим принимает ровно один день")
+
+    today = _date.today()
+    # Генератор меняет только текущие/будущие назначения. Переданная из
+    # старой ссылки дата не должна переписывать историю пользователя.
+    applied_from = max(request.target_date or today, today)
     created: list[int] = []
     created_plans: list[WorkoutPlan] = []
     for day in request.days:
@@ -509,7 +518,8 @@ async def confirm_generated_plan(request: ConfirmPlanRequest,
         for e in day.exercises:
             db.add(WorkoutPlanExercise(
                 plan_id=plan.id, exercise_id=e.exercise_id, order_index=e.order_index,
-                superset_group_id=e.superset_group_id, target_sets=e.target_sets))
+                superset_group_id=e.superset_group_id, target_sets=e.target_sets,
+                override_reps=e.override_reps, override_rir=e.override_rir))
         created.append(plan.id)
     us_res = await db.execute(
         select(UserSplit)
@@ -525,9 +535,34 @@ async def confirm_generated_plan(request: ConfirmPlanRequest,
     )
     user_split = us_res.scalars().first()
     if user_split:
-        _bind_generated_plans_to_split(user_split, created_plans)
-        await SchedulingEngine.rebind_plans(db, current_user.id, _date.today())
+        # selected_plans — недатированный legacy-контекст. Будущий план не
+        # должен становиться «текущим» раньше выбранной даты; календарь ниже
+        # уже хранит точное назначение на каждый будущий день.
+        if applied_from == today:
+            _bind_generated_plans_to_split(user_split, created_plans)
+        # Назначаем только созданные типы дней и только начиная с выбранной
+        # даты. Остальные планы и прошлые дни остаются нетронутыми.
+        by_tag = {plan.day_tag.lower(): plan.id for plan in created_plans}
+        calendar_days = list((await db.execute(
+            select(UserCalendarDay).where(
+                UserCalendarDay.app_user_id == current_user.id,
+                UserCalendarDay.target_date >= applied_from,
+                UserCalendarDay.is_rest_day == False,  # noqa: E712
+                UserCalendarDay.status == "planned",
+                UserCalendarDay.actual_workout_session_id.is_(None),
+            )
+        )).scalars().all())
+        for calendar_day in calendar_days:
+            plan_id = by_tag.get((calendar_day.day_tag or "").lower())
+            if plan_id is not None:
+                calendar_day.plan_id = plan_id
+        await db.commit()
     else:
         await db.commit()
 
-    return ConfirmPlanResponse(status="success", created_plan_ids=created)
+    return ConfirmPlanResponse(
+        status="success",
+        created_plan_ids=created,
+        applied_from=applied_from,
+        updated_day_tags=[day.day_tag for day in request.days],
+    )

@@ -5,7 +5,7 @@ from pydantic import BaseModel
 # [КОНФИГ] Версия формы ответа. Клиент читает офлайн-кэш ДО сети, и после
 # обновления приложения в кэше может лежать структура прошлой версии.
 # Несовпадение версии означает «выбросить кэш», а не «попытаться отрисовать».
-VOLUME_SHAPE_VERSION = 2
+VOLUME_SHAPE_VERSION = 3
 
 
 class WindowRead(BaseModel):
@@ -43,6 +43,10 @@ class VolumeOverviewRead(BaseModel):
     level: Optional[str] = None
     adherence: Optional[AdherenceRead] = None
     muscles: dict[str, MuscleVolumeRead] = {}
+    # Physical workout sets in this window. Unlike muscles[*], every set is
+    # counted once, irrespective of how many muscles it contributes to.
+    planned_work_sets: int = 0
+    completed_work_sets: int = 0
     # Сырой volume_budget профиля. Нужен редактору бюджета: окно отдаёт
     # ПРОИЗВОДНЫЕ величины по мышцам, а редактор правит сам бюджет.
     # Отдаётся здесь, а не отдельным запросом, потому что профиль на этом

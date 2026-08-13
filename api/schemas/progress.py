@@ -112,3 +112,15 @@ class DisciplineResponse(BaseModel):
     weeks: int
     days: List[DisciplineDay]
     density: DisciplineDensity
+
+
+class ProgressAchievement(BaseModel):
+    id: str
+    exercise_id: int
+    exercise_name: str
+    e1rm: float
+    previous_e1rm: float | None = None
+    weight: float
+    reps: int
+    achieved_at: datetime
+    workout_id: int

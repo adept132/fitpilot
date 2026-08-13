@@ -97,6 +97,7 @@ class SelectionPolicy:
 class SelectionConfig:
     use_supersets: bool = False
     accent_muscle: Optional[str] = None  # EN system key
+    duration_minutes: Optional[int] = None
     seed: Optional[int] = None
 
 
@@ -114,6 +115,31 @@ class SelectedExercise:
 
 MIN_SETS = 2
 MAX_SETS = 4
+
+
+def configured_targets(session_targets: dict, config: SelectionConfig) -> dict[str, int]:
+    targets = {k: int(round(v)) for k, v in session_targets.items() if v and v > 0}
+    if config.accent_muscle in targets:
+        targets[config.accent_muscle] = max(
+            targets[config.accent_muscle],
+            int(round(targets[config.accent_muscle] * 1.5)),
+        )
+    if config.duration_minutes and config.duration_minutes > 0:
+        set_budget = max(len(targets) * MIN_SETS, config.duration_minutes // 3)
+        total = sum(targets.values())
+        if total > set_budget:
+            scaled = {
+                key: max(MIN_SETS, int(value * set_budget / total))
+                for key, value in targets.items()
+            }
+            remainder = set_budget - sum(scaled.values())
+            for key in sorted(targets, key=lambda k: (-targets[k], k)):
+                if remainder <= 0:
+                    break
+                scaled[key] += 1
+                remainder -= 1
+            targets = scaled
+    return targets
 
 
 def is_compound(ex) -> bool:
@@ -155,7 +181,7 @@ def select_exercises(session_targets, pool, allowed_equipment_keys, prehab_flags
                      config: SelectionConfig,
                      policy: SelectionPolicy = SelectionPolicy()) -> list:
     rng = random.Random(config.seed)
-    targets: dict[str, int] = {k: int(round(v)) for k, v in session_targets.items() if v and v > 0}
+    targets = configured_targets(session_targets, config)
 
     # Split the filtered pool into compound / isolation candidate lists per muscle.
     filtered = filter_pool(pool, allowed_equipment_keys, prehab_flags)

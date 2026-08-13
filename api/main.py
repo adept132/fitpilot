@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+import asyncio
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, Depends, HTTPException
@@ -27,6 +29,7 @@ from api.routers.sync import router as sync_router
 from api.routers.account import router as account_router
 from api.routers.readiness import router as readiness_router
 from api.routers.periodization import router as periodization_router
+from api.routers.notifications import router as notifications_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -34,7 +37,19 @@ async def lifespan(app: FastAPI):
     # и достраиваем недостающие столбцы.
     await init_db()
     await _purge_expired_accounts()
-    yield
+    from api.services.push_service import push_worker
+    push_stop = asyncio.Event()
+    push_task = (
+        asyncio.create_task(push_worker(push_stop))
+        if os.getenv("PYTEST_CURRENT_TEST") is None
+        else None
+    )
+    try:
+        yield
+    finally:
+        push_stop.set()
+        if push_task is not None:
+            await push_task
 
 
 async def _purge_expired_accounts():
@@ -84,6 +99,7 @@ app.include_router(sync_router)
 app.include_router(account_router)
 app.include_router(readiness_router)
 app.include_router(periodization_router)
+app.include_router(notifications_router)
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check(db: AsyncSession = Depends(get_db)):

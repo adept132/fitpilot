@@ -30,7 +30,7 @@ async def test_overview_returns_window_shape(
     assert resp.status_code == 200
     body = resp.json()
 
-    assert body["shape_version"] == 2
+    assert body["shape_version"] == 3
     assert body["window"]["day"] == 3
     assert body["window"]["length"] == 6
     chest = body["muscles"]["chest"]
@@ -84,7 +84,7 @@ async def test_overview_without_calendar_returns_empty_window(
     resp = await client.get("/api/progress/volume-overview", headers=auth_headers)
     assert resp.status_code == 200
     body = resp.json()
-    assert body["shape_version"] == 2
+    assert body["shape_version"] == 3
     assert body["window"] is None
     assert body["muscles"] == {}
 

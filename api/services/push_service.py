@@ -1,0 +1,237 @@
+"""Expo transport for durable notifications, with privacy-safe templates."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from datetime import datetime, timedelta, timezone
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from api.services.models import AppNotification, PushDelivery, PushDevice
+from api.services.notification_service import materialize_domain_notifications
+from app.database import SessionLocal
+
+EXPO_SEND_URL = "https://exp.host/--/api/v2/push/send"
+EXPO_RECEIPTS_URL = "https://exp.host/--/api/v2/push/getReceipts"
+MAX_ATTEMPTS = 5
+
+SAFE_TEMPLATES = {
+    "periodization_proposal": ("План можно адаптировать", "Откройте Eurith, чтобы проверить предложение."),
+    "training_day_without_plan": ("На сегодня нет плана", "Выберите план или создайте его в генераторе."),
+    "goal_deadline": ("Приближается срок цели", "Откройте Eurith, чтобы проверить прогресс."),
+    "measurements_due": ("Пора обновить замеры", "Свежие данные сделают динамику точнее."),
+    "sync_conflict": ("Нужно проверить синхронизацию", "Откройте Eurith, чтобы сохранить актуальные данные."),
+}
+
+SAFE_ROUTES = {
+    "periodization_proposal": "/periodization",
+    "training_day_without_plan": "/workout",
+    "goal_deadline": "/progress",
+    "measurements_due": "/progress/body-composition",
+    "sync_conflict": "/home",
+}
+
+
+def safe_push_content(event_type: str) -> tuple[str, str] | None:
+    """Never forward entity names, measurements or arbitrary persisted copy."""
+    return SAFE_TEMPLATES.get(event_type)
+
+
+def safe_push_data(notification: AppNotification) -> dict:
+    return {
+        "notificationId": notification.id,
+        "eventType": notification.event_type,
+        **(
+            {"route": SAFE_ROUTES[notification.event_type]}
+            if notification.event_type in SAFE_ROUTES
+            else {}
+        ),
+    }
+
+
+def _expo_request(url: str, payload: object) -> dict:
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if access_token := os.getenv("EXPO_ACCESS_TOKEN"):
+        headers["Authorization"] = f"Bearer {access_token}"
+    request = Request(url, json.dumps(payload).encode(), headers, method="POST")
+    try:
+        with urlopen(request, timeout=15) as response:  # noqa: S310
+            return json.loads(response.read().decode())
+    except HTTPError as exc:
+        error = RuntimeError(f"Expo HTTP {exc.code}: {exc.read().decode(errors='replace')[:500]}")
+        error.transient = exc.code == 429 or exc.code >= 500  # type: ignore[attr-defined]
+        raise error from exc
+    except (URLError, TimeoutError) as exc:
+        error = RuntimeError(f"Expo network error: {exc}")
+        error.transient = True  # type: ignore[attr-defined]
+        raise error from exc
+
+
+def _retry_at(attempts: int) -> datetime:
+    return datetime.now(timezone.utc) + timedelta(seconds=min(3600, 30 * 2**attempts))
+
+
+async def register_device(db: AsyncSession, *, app_user_id: int, installation_id: str,
+                          expo_push_token: str, platform: str,
+                          timezone_offset_minutes: int) -> PushDevice:
+    now = datetime.now(timezone.utc)
+    installation = (await db.execute(select(PushDevice).where(
+        PushDevice.app_user_id == app_user_id,
+        PushDevice.installation_id == installation_id,
+    ))).scalar_one_or_none()
+    token_owner = (await db.execute(select(PushDevice).where(
+        PushDevice.expo_push_token == expo_push_token,
+    ))).scalar_one_or_none()
+    if installation and token_owner and installation.id != token_owner.id:
+        token_owner.push_enabled = False
+        token_owner.disabled_at = now
+    device = installation or token_owner
+    if device is None:
+        device = PushDevice(app_user_id=app_user_id, installation_id=installation_id)
+        db.add(device)
+    device.app_user_id = app_user_id
+    device.installation_id = installation_id
+    device.expo_push_token = expo_push_token
+    device.platform = platform
+    device.timezone_offset_minutes = timezone_offset_minutes
+    device.push_enabled = True
+    device.disabled_at = None
+    device.last_registered_at = now
+    await db.flush()
+    unread = (await db.execute(select(AppNotification.id).where(
+        AppNotification.app_user_id == app_user_id,
+        AppNotification.read_at.is_(None),
+    ))).scalars().all()
+    for notification_id in unread:
+        await db.execute(insert(PushDelivery).values(
+            notification_id=notification_id, device_id=device.id,
+        ).on_conflict_do_nothing(index_elements=[
+            PushDelivery.notification_id, PushDelivery.device_id,
+        ]))
+    return device
+
+
+async def disable_device(db: AsyncSession, app_user_id: int, installation_id: str) -> bool:
+    device = (await db.execute(select(PushDevice).where(
+        PushDevice.app_user_id == app_user_id,
+        PushDevice.installation_id == installation_id,
+    ))).scalar_one_or_none()
+    if not device:
+        return False
+    device.push_enabled = False
+    device.disabled_at = datetime.now(timezone.utc)
+    return True
+
+
+def _fail_or_retry(delivery: PushDelivery, message: str, transient: bool = True) -> None:
+    delivery.last_error = message[:1000]
+    if transient and delivery.attempts < MAX_ATTEMPTS:
+        delivery.status = "pending"
+        delivery.next_attempt_at = _retry_at(delivery.attempts)
+    else:
+        delivery.status = "failed"
+
+
+async def send_pending(db: AsyncSession, limit: int = 100) -> int:
+    now = datetime.now(timezone.utc)
+    rows = (await db.execute(
+        select(PushDelivery, PushDevice, AppNotification)
+        .join(PushDevice, PushDevice.id == PushDelivery.device_id)
+        .join(AppNotification, AppNotification.id == PushDelivery.notification_id)
+        .where(PushDelivery.status == "pending", PushDelivery.next_attempt_at <= now,
+               PushDevice.push_enabled.is_(True), PushDevice.disabled_at.is_(None),
+               AppNotification.read_at.is_(None))
+        .order_by(PushDelivery.id).limit(limit).with_for_update(skip_locked=True)
+    )).all()
+    sent = 0
+    for delivery, device, notification in rows:
+        content = safe_push_content(notification.event_type)
+        if not content or notification.event_type in (device.disabled_event_types or []):
+            delivery.status = "suppressed"
+            continue
+        delivery.attempts += 1
+        title, body = content
+        message = {"to": device.expo_push_token, "title": title, "body": body,
+                   "sound": "default", "channelId": "eurith-updates",
+                   "data": safe_push_data(notification)}
+        try:
+            ticket = (await asyncio.to_thread(_expo_request, EXPO_SEND_URL, message)).get("data") or {}
+            if ticket.get("status") == "ok" and ticket.get("id"):
+                delivery.status, delivery.expo_ticket_id, delivery.sent_at = "ticketed", ticket["id"], now
+                sent += 1
+            else:
+                code = (ticket.get("details") or {}).get("error")
+                if code == "DeviceNotRegistered":
+                    device.push_enabled, device.disabled_at = False, now
+                _fail_or_retry(delivery, ticket.get("message") or str(ticket), False)
+        except Exception as exc:  # noqa: BLE001
+            _fail_or_retry(delivery, str(exc), bool(getattr(exc, "transient", True)))
+    return sent
+
+
+async def check_receipts(db: AsyncSession, limit: int = 1000) -> int:
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
+    rows = (await db.execute(select(PushDelivery, PushDevice)
+        .join(PushDevice, PushDevice.id == PushDelivery.device_id)
+        .where(PushDelivery.status == "ticketed", PushDelivery.sent_at <= cutoff,
+               PushDelivery.expo_ticket_id.is_not(None)).limit(limit)
+        .with_for_update(skip_locked=True))).all()
+    if not rows:
+        return 0
+    try:
+        response = await asyncio.to_thread(_expo_request, EXPO_RECEIPTS_URL, {
+            "ids": [delivery.expo_ticket_id for delivery, _ in rows]
+        })
+    except Exception:
+        return 0
+    checked, now = 0, datetime.now(timezone.utc)
+    for delivery, device in rows:
+        receipt = (response.get("data") or {}).get(delivery.expo_ticket_id)
+        if not receipt:
+            continue
+        checked += 1
+        delivery.receipt_checked_at = now
+        if receipt.get("status") == "ok":
+            delivery.status = "delivered"
+            continue
+        code = (receipt.get("details") or {}).get("error")
+        delivery.last_error = (receipt.get("message") or code or "Receipt error")[:1000]
+        if code == "DeviceNotRegistered":
+            device.push_enabled, device.disabled_at, delivery.status = False, now, "failed"
+        elif delivery.attempts < MAX_ATTEMPTS:
+            delivery.status, delivery.next_attempt_at = "pending", _retry_at(delivery.attempts)
+        else:
+            delivery.status = "failed"
+    return checked
+
+
+async def materialize_for_registered_users(db: AsyncSession) -> int:
+    rows = (await db.execute(select(PushDevice.app_user_id, PushDevice.timezone_offset_minutes)
+        .where(PushDevice.push_enabled.is_(True), PushDevice.disabled_at.is_(None))
+        .distinct(PushDevice.app_user_id))).all()
+    for user_id, offset in rows:
+        today = (datetime.now(timezone.utc) - timedelta(minutes=offset)).date()
+        await materialize_domain_notifications(db, user_id, today)
+    return len(rows)
+
+
+async def push_worker(stop: asyncio.Event, interval_seconds: int = 60) -> None:
+    while not stop.is_set():
+        try:
+            async with SessionLocal() as db:
+                await materialize_for_registered_users(db)
+                await send_pending(db)
+                await check_receipts(db)
+                await db.commit()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[push] worker iteration failed: {exc}")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            pass

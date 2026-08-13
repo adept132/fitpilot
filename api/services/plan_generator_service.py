@@ -5,6 +5,7 @@ from typing import Optional
 
 from api.services.exercise_selection_engine import (
     select_exercises, SelectionConfig, SelectionPolicy, SelectedExercise,
+    configured_targets,
 )
 from api.services.muscle_keys import key_for_muscle
 from api.services.validator import AntiSuicideValidator, PlanExerciseInput
@@ -23,9 +24,10 @@ def build_day(day_tag: str, day_name: str, session_targets: dict, pool: list,
               allowed_equipment_keys: Optional[set], prehab_flags: list,
               experience_level: str, config: SelectionConfig,
               policy: SelectionPolicy = SelectionPolicy()) -> GeneratedDay:
-    targets_int = {k: int(v) for k, v in session_targets.items()}
+    targets_int = configured_targets(session_targets, config)
     exercises: list[SelectedExercise] = select_exercises(
-        targets_int, pool, allowed_equipment_keys, prehab_flags, config, policy
+        targets_int, pool, allowed_equipment_keys, prehab_flags,
+        SelectionConfig(use_supersets=config.use_supersets, seed=config.seed), policy
     )
 
     # Coverage: direct sets per EN key.

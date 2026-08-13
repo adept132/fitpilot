@@ -30,6 +30,7 @@ from api.services.models import (
     WorkoutSessionExercise,
     WorkoutSessionSet,
 )
+from api.services.notification_service import create_notification
 from api.services.readiness import repository as readiness_repo
 from api.services.readiness.types import CheckinSignals
 
@@ -157,6 +158,22 @@ async def _apply_snapshot(
         workout_id = workout.id
         await db.rollback()  # снимаем advisory-лок, ничего не записав
         detail = await _load_detail(db, workout_id)
+        await create_notification(
+            db,
+            app_user_id=app_user_id,
+            event_type="sync_conflict",
+            entity_type="workout",
+            entity_id=workout_id,
+            title="Нужно проверить синхронизацию",
+            body="Тренировка была изменена на другом устройстве.",
+            payload={
+                "route": "/workout",
+                "workoutId": workout_id,
+                "serverVersion": current_version,
+            },
+            dedupe_key=f"sync_conflict:{workout_id}:{current_version}",
+        )
+        await db.commit()
         conflict = SyncConflictResponse(
             sync_version=current_version,
             workout=WorkoutSessionDetailResponse.model_validate(detail),

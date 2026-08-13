@@ -468,6 +468,54 @@ async def performed_for(
     return total
 
 
+async def physical_set_totals(
+    session: AsyncSession, app_user_id: int, window: Window
+) -> tuple[int, int]:
+    """Planned and completed physical work sets; each set counts once."""
+    days = (await session.execute(
+        select(UserCalendarDay).where(
+            UserCalendarDay.app_user_id == app_user_id,
+            UserCalendarDay.target_date >= window.start_date,
+            UserCalendarDay.target_date <= window.end_date,
+            UserCalendarDay.plan_id.is_not(None),
+        )
+    )).scalars().all()
+    planned = 0
+    if days:
+        plan_ids = {day.plan_id for day in days}
+        rows = (await session.execute(
+            select(WorkoutPlanExercise).where(WorkoutPlanExercise.plan_id.in_(plan_ids))
+        )).scalars().all()
+        by_plan: dict[int, list] = {}
+        for row in rows:
+            by_plan.setdefault(row.plan_id, []).append(row)
+        for day in days:
+            compiled = [
+                {"exercise_id": row.exercise_id, "target_sets": row.target_sets}
+                for row in by_plan.get(day.plan_id, [])
+            ]
+            planned += sum(
+                int(item.get("target_sets") or 0)
+                for item in apply_adjustments(compiled, day.volume_adjustments)
+            )
+
+    completed = int((await session.execute(
+        select(func.count(WorkoutSessionSet.id))
+        .select_from(WorkoutSessionSet)
+        .join(WorkoutSessionExercise)
+        .join(WorkoutSession)
+        .where(
+            WorkoutSession.app_user_id == app_user_id,
+            func.date(WorkoutSession.started_at) >= window.start_date,
+            func.date(WorkoutSession.started_at) <= window.end_date,
+            WorkoutSessionSet.is_completed.is_(True),
+            WorkoutSessionSet.set_type.in_(["normal", "drop"]),
+            WorkoutSessionSet.is_anomalous.is_(False),
+        )
+    )).scalar_one() or 0)
+    return planned, completed
+
+
 def build_rows(
     target_by_muscle: dict[str, float],
     prescribed: dict[str, MuscleContribution],

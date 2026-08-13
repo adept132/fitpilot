@@ -1148,3 +1148,108 @@ class PeriodizationProposal(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class AppNotification(Base):
+    """Durable event shown in the in-app notification centre.
+
+    The row is the source of truth. Push notifications are only a transport and
+    will reference this entity when that layer is added.
+    """
+
+    __tablename__ = "app_notifications"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("app_users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    entity_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    entity_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    title: Mapped[str] = mapped_column(String(160), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    dedupe_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    read_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "app_user_id",
+            "dedupe_key",
+            name="uq_app_notifications_user_dedupe",
+        ),
+        Index(
+            "ix_app_notifications_user_created",
+            "app_user_id",
+            "created_at",
+            "id",
+        ),
+    )
+
+
+class PushDevice(Base):
+    """One physical app installation registered for Expo push delivery."""
+
+    __tablename__ = "push_devices"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    installation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    expo_push_token: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    platform: Mapped[str] = mapped_column(String(16), nullable=False)
+    timezone_offset_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    push_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    disabled_event_types: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    disabled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_registered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("app_user_id", "installation_id", name="uq_push_devices_user_installation"),
+    )
+
+
+class PushDelivery(Base):
+    """Durable delivery state for one notification on one device."""
+
+    __tablename__ = "push_deliveries"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    notification_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("app_notifications.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    device_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("push_devices.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending", server_default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    expo_ticket_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )
+    sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    receipt_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("notification_id", "device_id", name="uq_push_delivery_notification_device"),
+    )

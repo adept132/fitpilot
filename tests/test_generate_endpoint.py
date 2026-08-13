@@ -64,3 +64,15 @@ def test_generate_single_day_filters_by_name():
         resp = asyncio.run(plans_mod.generate_plan(req, db=object(), current_user=SimpleNamespace(id=1)))
     assert len(resp.days) == 1
     assert resp.days[0].day_tag == "Pull"
+
+
+def test_generation_config_changes_targets_and_duration_budget():
+    from api.services.exercise_selection_engine import SelectionConfig, configured_targets
+
+    configured = configured_targets(
+        {"chest": 8, "triceps": 4},
+        SelectionConfig(accent_muscle="chest", duration_minutes=30),
+    )
+
+    assert sum(configured.values()) == 10
+    assert configured["chest"] > configured["triceps"]
