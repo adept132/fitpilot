@@ -680,9 +680,12 @@ class UserExerciseNote(Base):
 class UserExerciseProgressionState(Base):
     """Кэш состояния прогрессии по упражнению.
 
-    СТРОГО ПРОИЗВОДНАЯ таблица: всё содержимое восстанавливается функцией
-    progression.state.rebuild_state(). Расхождение чинится пересчётом, а не
-    ручным фиксом; при бампе engine_version состояние не мигрируется.
+    СТРОГО ПРОИЗВОДНАЯ таблица: всё содержимое восстановимо из истории.
+    Восстанавливают её две функции: progression.state.rebuild_state() —
+    всё, кроме records, и progression.records_repository.rebuild_records()
+    — колонку records (см. комментарий у неё: разные источники данных, а
+    не разные стили). Расхождение чинится пересчётом, а не ручным фиксом;
+    при бампе engine_version состояние не мигрируется.
     """
 
     __tablename__ = "user_exercise_progression_state"
@@ -711,6 +714,13 @@ class UserExerciseProgressionState(Base):
     # Предварительное предписание на следующий раз: контекст будущей
     # тренировки неизвестен, поэтому считается по tier_fallback и текущей фазе.
     next_prescription: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+
+    # P1-14: личные рекорды по упражнению. Тоже производная, но НЕ от
+    # rebuild_state(): та работает по окну HISTORY_LIMIT=12 сессий, а
+    # рекорд «за всё время» из окна не выводится — результат двухлетней
+    # давности выпал бы и сработал повторно. Пересчёт — rebuild_records()
+    # по сырым подходам.
+    records: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     recomputed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
