@@ -373,6 +373,7 @@ async def add_set_to_session_exercise(
         parent_set_id=payload.parent_set_id,
         superset_round=payload.superset_round,
         is_completed=True,
+        is_max_reps=payload.is_max_reps,
         is_anomalous=is_anomalous,
     )
 

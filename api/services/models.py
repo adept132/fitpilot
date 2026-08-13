@@ -415,6 +415,15 @@ class WorkoutSessionSet(Base):
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     effort_level: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     is_completed: Mapped[bool] = mapped_column(default=True, server_default="true")
+    # P1-14: подход на максимум повторов. Ортогонально set_type намеренно:
+    # set_type описывает РОЛЬ подхода (разминка / рабочий / дроп), а это —
+    # его РЕЖИМ, и дроп-подход тоже бывает до максимума. Значение 'amrap'
+    # в set_type прошло бы молча сквозь фильтры set_type == 'normal' по
+    # всему проекту, и max-reps-подход выпал бы из расчёта рекордов —
+    # ровно наоборот тому, зачем флаг вводится.
+    is_max_reps: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     # Подход с неправдоподобными значениями. Остаётся видимым в истории, но
     # исключается из автопрогрессии, прогноза, бюджета объёма и усталостной
     # модели — один жим «500 кг» иначе отравляет аналитику на месяц вперёд.

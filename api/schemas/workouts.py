@@ -179,6 +179,8 @@ class AddWorkoutSetRequest(BaseModel):
     superset_round: int | None = Field(default=None, gt=0)
     # Клиент выставляет true, когда пользователь подтвердил подозрительное значение.
     anomaly_confirmed: bool = False
+    # P1-14: подход на максимум повторов — режим, ортогональный set_type.
+    is_max_reps: bool = False
 
 
 class AddWorkoutSetResponse(BaseModel):
@@ -195,6 +197,8 @@ class AddWorkoutSetResponse(BaseModel):
     superset_round: int | None = None
     is_completed: bool
     is_anomalous: bool = False
+    # P1-14: подход на максимум повторов — режим, ортогональный set_type.
+    is_max_reps: bool = False
     updated_at: datetime
 
 
@@ -211,6 +215,8 @@ class UpdateWorkoutSetRequest(BaseModel):
     is_completed: bool | None = None
     # Клиент выставляет true, когда пользователь подтвердил подозрительное значение.
     anomaly_confirmed: bool = False
+    # P1-14: подход на максимум повторов — режим, ортогональный set_type.
+    is_max_reps: bool | None = None
 
 
 class RepeatWorkoutSetRequest(BaseModel):

@@ -36,6 +36,8 @@ class SyncSetSnapshot(BaseModel):
     parent_client_uuid: str | None = None
     superset_round: int | None = None
     is_completed: bool = True
+    # P1-14: подход на максимум повторов — режим, ортогональный set_type.
+    is_max_reps: bool = False
     # Клиент выставляет true, когда пользователь подтвердил подозрительное значение.
     anomaly_confirmed: bool = False
     deleted: bool = False
