@@ -635,12 +635,18 @@ async def sync_changes(
     # Предварительные предписания по всем упражнениям пользователя. Их немного
     # (по одному на упражнение с историей), и они нужны целиком: локальный
     # кэш обслуживает добавление любого упражнения офлайн.
+    # Дизъюнкция, а не только next_prescription: упражнение с рекордами, но
+    # без предписания (например, только что рассчитанными rebuild_records),
+    # иначе выпало бы из выборки и потеряло бы свои рекорды в дельте.
     state_rows = (
         (
             await db.execute(
                 select(UserExerciseProgressionState).where(
                     UserExerciseProgressionState.app_user_id == app_user_id,
-                    UserExerciseProgressionState.next_prescription.isnot(None),
+                    or_(
+                        UserExerciseProgressionState.next_prescription.isnot(None),
+                        UserExerciseProgressionState.records.isnot(None),
+                    ),
                 )
             )
         )
@@ -656,6 +662,12 @@ async def sync_changes(
         str(row.exercise_id): float(row.last_top_weight)
         for row in state_rows
         if row.last_top_weight is not None
+    }
+    # P1-14: личные рекорды. Та же выборка state_rows, лишнего запроса нет.
+    exercise_records = {
+        str(row.exercise_id): row.records
+        for row in state_rows
+        if row.records is not None
     }
 
     return SyncChangesResponse(
@@ -673,6 +685,7 @@ async def sync_changes(
         ],
         prescriptions=prescriptions,
         last_top_weights=last_top_weights,
+        exercise_records=exercise_records,
         server_time=cursor,
         has_more=has_more,
     )

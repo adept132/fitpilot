@@ -241,3 +241,20 @@ async def test_second_sync_recomputes_all_exercises_not_just_first(
 
     assert first_state is not None
     assert second_state is not None
+
+
+@pytest.mark.asyncio
+async def test_changes_delta_carries_exercise_records(
+    client, auth_headers, seeded_history,
+):
+    await client.post(
+        "/sync/workouts",
+        headers=auth_headers,
+        json=_payload(seeded_history.id, client_uuid="p114-delta-1", weight=82.5, reps=5),
+    )
+
+    resp = await client.get("/sync/changes", headers=auth_headers)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    records = body["exercise_records"][str(seeded_history.id)]
+    assert records["weight_at_reps"]["5"]["weight"] == 82.5
