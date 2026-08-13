@@ -395,51 +395,80 @@ async def _apply_snapshot(
         # greenlet-контекста (MissingGreenlet). Перечитываем тренировку тем же
         # набором selectinload, что и _load_detail: автофлаш AsyncSession перед
         # execute() уже сделал видимыми все правки этого запроса.
-        refreshed = (
-            await db.execute(
-                select(WorkoutSession)
-                .where(WorkoutSession.id == workout.id)
-                .options(*_detail_options())
-            )
-        ).scalar_one()
-        exercise_ids = [se.exercise_id for se in refreshed.exercises]
+        #
+        # Ревью (Finding 1): реселект + профиль + резолв фазы раньше шли
+        # бэрами (без guarded()) — падение любого из них рвало бы весь
+        # sync_workout мимо except IntegrityError, и db.commit() ниже не
+        # выполнялся бы — тренировку теряли. Собираем их в один inner-корутину
+        # и оборачиваем в один guarded(): без этих входов пересчёт прогрессии
+        # всё равно невозможен, значит и падать они должны как один узел.
+        async def _load_inputs():
+            refreshed = (
+                await db.execute(
+                    select(WorkoutSession)
+                    .where(WorkoutSession.id == workout.id)
+                    .options(*_detail_options())
+                )
+            ).scalar_one()
 
-        await guarded(
+            # Входы движка добываются ровно так же, как в workout_center.py:709-721
+            # (отдельного хелпера там нет — это инлайн, и разводить два способа
+            # получения одних и тех же полей незачем).
+            profile = (await db.execute(
+                select(AppUserProfile).where(AppUserProfile.app_user_id == app_user_id)
+            )).scalars().first()
+            experience_level = profile.experience_level if profile else None
+            settings = profile.settings if profile else None
+
+            # Фаза мезоцикла одна на всю сессию — резолвим ОДИН раз до цикла,
+            # иначе к уже существующему N+1 по load_history добавится ещё один.
+            phase_effort_tier = await progression_repo.resolve_phase_effort_tier(
+                db, workout.app_user_mesocycle_id, workout.mesocycle_phase,
+                training_block_id=workout.training_block_id,
+            )
+            return refreshed, experience_level, settings, phase_effort_tier
+
+        inputs = await guarded(
             db,
-            "пересчёт личных рекордов",
-            rebuild_records(db, app_user_id, exercise_ids),
+            "загрузка входов пересчёта прогрессии",
+            _load_inputs(),
         )
 
-        # Входы движка добываются ровно так же, как в workout_center.py:709-721
-        # (отдельного хелпера там нет — это инлайн, и разводить два способа
-        # получения одних и тех же полей незачем).
-        profile = (await db.execute(
-            select(AppUserProfile).where(AppUserProfile.app_user_id == app_user_id)
-        )).scalars().first()
-        experience_level = profile.experience_level if profile else None
-        settings = profile.settings if profile else None
+        if inputs is not None:
+            refreshed, experience_level, settings, phase_effort_tier = inputs
+            exercise_ids = [se.exercise_id for se in refreshed.exercises]
 
-        # Фаза мезоцикла одна на всю сессию — резолвим ОДИН раз до цикла,
-        # иначе к уже существующему N+1 по load_history добавится ещё один.
-        phase_effort_tier = await progression_repo.resolve_phase_effort_tier(
-            db, workout.app_user_mesocycle_id, workout.mesocycle_phase,
-            training_block_id=workout.training_block_id,
-        )
-        for se in refreshed.exercises:
-            ctx = await progression_repo.build_context(
-                db, se, app_user_id, experience_level, settings,
-                phase_effort_tier=phase_effort_tier,
-            )
-            nxt = plan_exercise(
-                ctx,
-                override=override_for(settings, se.exercise_id),
-                provisional=True,
-            )
             await guarded(
                 db,
-                "пересчёт состояния прогрессии",
-                progression_repo.refresh_state(db, app_user_id, se.exercise_id, nxt),
+                "пересчёт личных рекордов",
+                rebuild_records(db, app_user_id, exercise_ids),
             )
+
+            # Гранулярность — по упражнению (осознанное решение): одно кривое
+            # упражнение (например, build_context упал на битой истории) не
+            # должно останавливать пересчёт остальных. se=se — обязательное
+            # значение по умолчанию: без него замыкание ловит переменную
+            # цикла по ссылке, и все итерации отработали бы над последним se.
+            for se in refreshed.exercises:
+                async def _refresh_one(se=se):
+                    ctx = await progression_repo.build_context(
+                        db, se, app_user_id, experience_level, settings,
+                        phase_effort_tier=phase_effort_tier,
+                    )
+                    nxt = plan_exercise(
+                        ctx,
+                        override=override_for(settings, se.exercise_id),
+                        provisional=True,
+                    )
+                    await progression_repo.refresh_state(
+                        db, app_user_id, se.exercise_id, nxt
+                    )
+
+                await guarded(
+                    db,
+                    "пересчёт состояния прогрессии",
+                    _refresh_one(se=se),
+                )
 
     await db.commit()
     workout_id = workout.id

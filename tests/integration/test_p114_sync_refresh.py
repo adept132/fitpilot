@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from api.services.models import UserExerciseProgressionState
+from api.services.models import UserExerciseProgressionState, WorkoutSession
 
 
 def _payload(exercise_id: int, *, client_uuid: str, weight: float, reps: int) -> dict:
@@ -91,11 +91,24 @@ async def test_sync_finished_workout_refreshes_next_prescription(
     assert row.next_prescription is not None
 
 
+async def _finished_workout_row(db, client_uuid: str):
+    return (await db.execute(
+        select(WorkoutSession).where(WorkoutSession.client_uuid == client_uuid)
+    )).scalar_one_or_none()
+
+
 @pytest.mark.asyncio
 async def test_sync_survives_failing_recompute(
-    client, auth_headers, seeded_history, monkeypatch,
+    client, auth_headers, db, seeded_history, monkeypatch,
 ):
-    """Падение пересчёта не рвёт приём тренировки — её нельзя потерять."""
+    """Падение пересчёта не рвёт приём тренировки — её нельзя потерять.
+
+    Патчим `rebuild_records` в пространстве имён `api.routers.sync`: ручка
+    импортировала функцию себе по имени (`from ... import rebuild_records`),
+    поэтому только патч атрибута НА МОДУЛЕ РУЧКИ реально перехватывает вызов
+    — патч на исходном модуле (records_repository) ничего бы не поменял,
+    так как sync.py уже держит свою собственную ссылку на объект функции.
+    """
     import api.routers.sync as sync_module
 
     async def boom(*args, **kwargs):
@@ -109,3 +122,42 @@ async def test_sync_survives_failing_recompute(
         json=_payload(seeded_history.id, client_uuid="p114-boom-1", weight=50.0, reps=8),
     )
     assert resp.status_code == 200, resp.text
+
+    # Не только код ответа — сама тренировка обязана лечь в БД целиком.
+    row = await _finished_workout_row(db, "p114-boom-1")
+    assert row is not None
+    assert row.status == "finished"
+
+
+@pytest.mark.asyncio
+async def test_sync_survives_failing_progression_recompute(
+    client, auth_headers, db, seeded_history, monkeypatch,
+):
+    """Падение внутри самого движка прогрессии (build_context) — то же самое.
+
+    В отличие от предыдущего теста, здесь падает не rebuild_records, а шаг
+    ПОСЛЕ него — build_context на пути build_context -> plan_exercise ->
+    refresh_state, который до фикса Finding 1 выполнялся вне guarded().
+    Патчим `progression_repo.build_context` через сам модуль
+    (`api.services.progression.repository`), а не через `sync_module`:
+    sync.py вызывает `progression_repo.build_context(...)` как атрибут
+    модуля на каждый вызов, а не через прямой импорт имени — патч на
+    объекте модуля виден ручке, потому что это тот же объект в sys.modules.
+    """
+    from api.services.progression import repository as progression_repo
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("build_context упал")
+
+    monkeypatch.setattr(progression_repo, "build_context", boom)
+
+    resp = await client.post(
+        "/sync/workouts",
+        headers=auth_headers,
+        json=_payload(seeded_history.id, client_uuid="p114-boom-2", weight=55.0, reps=6),
+    )
+    assert resp.status_code == 200, resp.text
+
+    row = await _finished_workout_row(db, "p114-boom-2")
+    assert row is not None
+    assert row.status == "finished"
