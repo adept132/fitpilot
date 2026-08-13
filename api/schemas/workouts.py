@@ -105,6 +105,10 @@ class WorkoutSessionSetResponse(BaseModel):
     parent_set_id: int | None = None
     superset_round: int | None = None
     is_completed: bool
+    # P1-14: без этого поля флаг виден только в ответе на создание подхода
+    # и пропадает при любой перезагрузке — GET /workouts/active, GET по id,
+    # подтверждении sync и пул-дельте.
+    is_max_reps: bool = False
     updated_at: datetime
 
 

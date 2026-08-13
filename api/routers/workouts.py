@@ -665,6 +665,9 @@ async def repeat_workout_session_set(
         # заново нельзя — это стёрло бы подтверждение, которое пользователь
         # уже дал по оригиналу.
         is_anomalous=source_set.is_anomalous,
+        # P1-14: режим «на максимум повторов» наследуется так же — повтор
+        # подхода-максимума должен остаться подходом-максимумом.
+        is_max_reps=source_set.is_max_reps,
     )
 
     db.add(repeated_set)
