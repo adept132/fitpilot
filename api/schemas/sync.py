@@ -37,7 +37,13 @@ class SyncSetSnapshot(BaseModel):
     superset_round: int | None = None
     is_completed: bool = True
     # P1-14: подход на максимум повторов — режим, ортогональный set_type.
-    is_max_reps: bool = False
+    # НЕ bool = False: ревью, находка 1 — старый снимок (легаси-клиент или
+    # клиент, который поле не знает) отправлял тело БЕЗ этого ключа, и
+    # False-по-умолчанию безусловно перезаписывал уже выставленный флаг на
+    # каждом синке. None отличим от явного false — см. присвоение в
+    # _apply_snapshot (api/routers/sync.py), которое трогает поле только
+    # когда оно реально пришло.
+    is_max_reps: bool | None = None
     # Клиент выставляет true, когда пользователь подтвердил подозрительное значение.
     anomaly_confirmed: bool = False
     deleted: bool = False

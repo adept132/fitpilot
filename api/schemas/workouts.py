@@ -109,6 +109,14 @@ class WorkoutSessionSetResponse(BaseModel):
     # и пропадает при любой перезагрузке — GET /workouts/active, GET по id,
     # подтверждении sync и пул-дельте.
     is_max_reps: bool = False
+    # Ревью, находка 2: серверный вердикт аномальности (90 дней истории +
+    # e1RM-джамп, api/services/anomaly_guard.py) — клиенту нужен именно он,
+    # а не собственный checkSet по медиане текущей сессии, иначе экран и
+    # rebuild_records расходятся в том, что считать «фактом» подхода.
+    # Тот же урок, что у is_max_reps выше: без поля здесь вердикт был бы
+    # виден только в AddWorkoutSetResponse (ответе на создание) и пропадал
+    # бы при перечитывании — GET /workouts/active, GET по id, sync, pull.
+    is_anomalous: bool = False
     updated_at: datetime
 
 

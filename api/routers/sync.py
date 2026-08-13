@@ -331,7 +331,11 @@ async def _apply_snapshot(
             workout_set.notes = set_snap.notes
             workout_set.superset_round = set_snap.superset_round
             workout_set.is_completed = set_snap.is_completed
-            workout_set.is_max_reps = set_snap.is_max_reps
+            # Ревью, находка 1: только когда поле реально пришло в снимке —
+            # None (легаси-клиент/частичный снимок) не должен стирать
+            # уже выставленный флаг записью False поверх него.
+            if set_snap.is_max_reps is not None:
+                workout_set.is_max_reps = set_snap.is_max_reps
             workout_set.parent_set_id = None  # разрешим во втором проходе
 
             # Синк только помечает аномалию — не поднимаем HTTPException ни при
