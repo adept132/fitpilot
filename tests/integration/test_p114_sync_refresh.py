@@ -244,6 +244,48 @@ async def test_second_sync_recomputes_all_exercises_not_just_first(
 
 
 @pytest.mark.asyncio
+async def test_changes_survives_records_without_prescription(
+    client, auth_headers, db, seeded_history, monkeypatch,
+):
+    """Ревью (Finding 1): рекорды без предписания не должны валить /sync/changes.
+
+    Воспроизводим то же состояние, что и test_sync_survives_failing_progression_recompute:
+    rebuild_records отрабатывает (records проставлены), а build_context падает
+    под guarded() — next_prescription остаётся null. Строка попадает в
+    state_rows из-за дизъюнкции по records, и до фикса
+    `prescriptions = {... : row.next_prescription for row in state_rows}`
+    клала бы туда None — SyncChangesResponse.prescriptions типизирован как
+    dict[str, dict], и pydantic валил бы конструктор ValidationError'ом
+    (500 наружу). Фикс — тот же None-guard, что уже есть у last_top_weights
+    и exercise_records: пропускать строку, а не подставлять null.
+    """
+    from api.services.progression import repository as progression_repo
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("build_context упал")
+
+    monkeypatch.setattr(progression_repo, "build_context", boom)
+
+    resp = await client.post(
+        "/sync/workouts",
+        headers=auth_headers,
+        json=_payload(seeded_history.id, client_uuid="p114-changes-boom-1", weight=60.0, reps=7),
+    )
+    assert resp.status_code == 200, resp.text
+
+    row = await _state_row(db, seeded_history.id)
+    assert row is not None
+    assert row.records is not None
+    assert row.next_prescription is None
+
+    resp = await client.get("/sync/changes", headers=auth_headers)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert str(seeded_history.id) in body["exercise_records"]
+    assert str(seeded_history.id) not in body["prescriptions"]
+
+
+@pytest.mark.asyncio
 async def test_changes_delta_carries_exercise_records(
     client, auth_headers, seeded_history,
 ):

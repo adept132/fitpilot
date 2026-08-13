@@ -654,7 +654,9 @@ async def sync_changes(
         .all()
     )
     prescriptions = {
-        str(row.exercise_id): row.next_prescription for row in state_rows
+        str(row.exercise_id): row.next_prescription
+        for row in state_rows
+        if row.next_prescription is not None
     }
     # P0-07 §9.2: якорь для офлайн-потолка. Едет рядом с предписанием и
     # из той же выборки — лишнего запроса не появляется.
