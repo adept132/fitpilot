@@ -24,6 +24,7 @@ from api.services.anomaly_stats import load_exercise_stats
 from api.services.app_user_service import get_current_app_user
 from api.services.models import (
     AppUser,
+    AppUserProfile,
     SyncTombstone,
     UserExerciseProgressionState,
     WorkoutSession,
@@ -31,6 +32,10 @@ from api.services.models import (
     WorkoutSessionSet,
 )
 from api.services.notification_service import create_notification
+from api.services.progression import repository as progression_repo
+from api.services.progression.engine import plan_exercise
+from api.services.progression.records_repository import rebuild_records
+from api.services.progression.resolve import override_for
 from api.services.readiness import repository as readiness_repo
 from api.services.readiness.types import CheckinSignals
 
@@ -374,6 +379,67 @@ async def _apply_snapshot(
             "привязка синхронизированной сессии к дню календаря",
             attach_session_to_day(db, app_user_id, workout),
         )
+
+        # P1-14: реальный путь завершения тренировки идёт через эту ручку
+        # (см. комментарий выше про календарь), поэтому пересчёт состояния
+        # прогрессии и рекордов обязан жить здесь же. refresh_state в
+        # workout_center.finish_workout остаётся нетронутым: ручка легаси,
+        # но живая, и разводить два поведения незачем.
+        #
+        # workout.exercises здесь брать НЕЛЬЗЯ напрямую: для новой тренировки
+        # (is_new=True) эта коллекция никогда не была прогружена selectinload'ом
+        # (см. комментарий у loaded_exercises выше), а дочерние строки этого
+        # запроса добавлены через сырой FK (workout_session_id=...), а не через
+        # relationship — back_populates их в коллекцию не подмешивает. Доступ
+        # к workout.exercises в этой точке — ленивая загрузка вне
+        # greenlet-контекста (MissingGreenlet). Перечитываем тренировку тем же
+        # набором selectinload, что и _load_detail: автофлаш AsyncSession перед
+        # execute() уже сделал видимыми все правки этого запроса.
+        refreshed = (
+            await db.execute(
+                select(WorkoutSession)
+                .where(WorkoutSession.id == workout.id)
+                .options(*_detail_options())
+            )
+        ).scalar_one()
+        exercise_ids = [se.exercise_id for se in refreshed.exercises]
+
+        await guarded(
+            db,
+            "пересчёт личных рекордов",
+            rebuild_records(db, app_user_id, exercise_ids),
+        )
+
+        # Входы движка добываются ровно так же, как в workout_center.py:709-721
+        # (отдельного хелпера там нет — это инлайн, и разводить два способа
+        # получения одних и тех же полей незачем).
+        profile = (await db.execute(
+            select(AppUserProfile).where(AppUserProfile.app_user_id == app_user_id)
+        )).scalars().first()
+        experience_level = profile.experience_level if profile else None
+        settings = profile.settings if profile else None
+
+        # Фаза мезоцикла одна на всю сессию — резолвим ОДИН раз до цикла,
+        # иначе к уже существующему N+1 по load_history добавится ещё один.
+        phase_effort_tier = await progression_repo.resolve_phase_effort_tier(
+            db, workout.app_user_mesocycle_id, workout.mesocycle_phase,
+            training_block_id=workout.training_block_id,
+        )
+        for se in refreshed.exercises:
+            ctx = await progression_repo.build_context(
+                db, se, app_user_id, experience_level, settings,
+                phase_effort_tier=phase_effort_tier,
+            )
+            nxt = plan_exercise(
+                ctx,
+                override=override_for(settings, se.exercise_id),
+                provisional=True,
+            )
+            await guarded(
+                db,
+                "пересчёт состояния прогрессии",
+                progression_repo.refresh_state(db, app_user_id, se.exercise_id, nxt),
+            )
 
     await db.commit()
     workout_id = workout.id
