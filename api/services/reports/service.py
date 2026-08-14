@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.services.models import AppUserProfile, PeriodizationProposal, PeriodReport
+from api.services.progression.params import DEFAULT_RIR
 from api.services.reports.metrics import ReportMetrics, compute_metrics, has_activity
 from api.services.reports.periods import PERIOD_TYPES, closed_periods
 from api.services.reports.rules import RULES_VERSION, Action, RuleContext, build_actions
@@ -52,7 +53,7 @@ async def _rule_context(session: AsyncSession, app_user_id: int) -> RuleContext:
     return RuleContext(
         pending_proposal_id=proposal.id if proposal else None,
         pending_proposal_kind=proposal.kind if proposal else None,
-        target_rir=2,
+        target_rir=DEFAULT_RIR,
     )
 
 

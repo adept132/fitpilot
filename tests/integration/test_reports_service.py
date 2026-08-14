@@ -1,13 +1,13 @@
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 
 from api.services.models import (
     AppNotification,
     PeriodReport,
     UserCalendarDay,
-    WorkoutSession,
 )
 from api.services.reports.service import ensure_reports
 
@@ -124,3 +124,60 @@ async def test_catchup_depth_limits_old_periods(db, test_user):
         )
     )).scalars().all()
     assert len(weeks) == 4
+
+
+def _insert_report_statement(app_user_id: int, period_start: date):
+    """Тот же самый statement, что строит ensure_reports (service.py)."""
+    return (
+        insert(PeriodReport)
+        .values(
+            app_user_id=app_user_id,
+            period_type="week",
+            period_start=period_start,
+            period_end=period_start + timedelta(days=6),
+            payload={},
+            rules_version=1,
+            shape_version=1,
+        )
+        .on_conflict_do_nothing(
+            index_elements=[
+                PeriodReport.app_user_id,
+                PeriodReport.period_type,
+                PeriodReport.period_start,
+            ]
+        )
+        .returning(PeriodReport.id)
+    )
+
+
+@pytest.mark.asyncio
+async def test_conflict_insert_discriminates_the_winning_writer(db, test_user):
+    """Проверяет не ветку ensure_reports (она недостижима в один процесс:
+    pre-check SELECT отсекает повтор раньше, чем строится этот statement),
+    а сам механизм ON CONFLICT ... RETURNING, на чью семантику эта ветка
+    опирается: первая вставка возвращает id, повторная — None, и в таблице
+    остаётся ровно одна строка. Именно по этому признаку ensure_reports
+    решает, какой процесс создаёт уведомление."""
+    period_start = date(2026, 8, 10)
+
+    first_id = (await db.execute(
+        _insert_report_statement(test_user.id, period_start)
+    )).scalar_one_or_none()
+    await db.commit()
+
+    second_id = (await db.execute(
+        _insert_report_statement(test_user.id, period_start)
+    )).scalar_one_or_none()
+    await db.commit()
+
+    assert first_id is not None
+    assert second_id is None
+
+    rows = (await db.execute(
+        select(PeriodReport).where(
+            PeriodReport.app_user_id == test_user.id,
+            PeriodReport.period_type == "week",
+            PeriodReport.period_start == period_start,
+        )
+    )).scalars().all()
+    assert len(rows) == 1
