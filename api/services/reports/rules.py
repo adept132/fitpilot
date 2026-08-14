@@ -164,24 +164,12 @@ RULES = (
 
 
 def build_actions(metrics: ReportMetrics, context: RuleContext) -> list[Action]:
-    """Не больше MAX_ACTIONS действий. Пустой список — валидный отчёт.
-
-    Последнее правило в RULES (_effort_unlabelled) — не просто низший
-    приоритет внутри лимита, а настоящий last resort: способ, а не
-    результат. Он предлагается, только если больше предложить нечего —
-    иначе совет "отмечайте усилие" вытеснял бы содержательное действие,
-    даже когда в списке ещё есть свободное место до MAX_ACTIONS.
-    """
-    *primary_rules, last_resort_rule = RULES
+    """Не больше MAX_ACTIONS действий. Пустой список — валидный отчёт."""
     actions: list[Action] = []
-    for rule in primary_rules:
+    for rule in RULES:
         action = rule(metrics, context)
         if action is not None:
             actions.append(action)
         if len(actions) == MAX_ACTIONS:
-            return actions
-    if not actions:
-        action = last_resort_rule(metrics, context)
-        if action is not None:
-            actions.append(action)
+            break
     return actions

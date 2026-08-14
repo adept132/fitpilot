@@ -82,15 +82,39 @@ def test_high_rir_suggests_raising_weights():
     assert any(action.id == "rir_too_easy" for action in actions)
 
 
-def test_effort_labelling_advice_is_last_resort():
-    """Совет про метод не должен вытеснять содержательные действия."""
-    muscles = {"chest": MuscleVolume(direct=2.0, indirect=0.0, mev=8, mav=16, mrv=22)}
-
-    crowded = build_actions(
-        _metrics(adherence=0.33, muscles=muscles, labeled=0.1), EMPTY_CONTEXT
+def test_effort_labelling_advice_fills_leftover_slot():
+    """Совет про метод — низший приоритет, а не строгий last resort: он
+    занимает свободное место, если под тремя действиями остался зазор, и
+    закономерно вытесняется, когда три содержательных правила уже сработали."""
+    # Три содержательных правила срабатывают: pending_proposal (есть
+    # предложение), adherence_low (0.33 < ADHERENCE_FLOOR), volume_over_mrv
+    # (спина: 30 подходов при потолке 25). Список заполнен до крышки ещё до
+    # того, как очередь дойдёт до effort_unlabelled.
+    over_mrv_muscle = {"back": MuscleVolume(direct=30.0, indirect=0.0, mev=10, mav=18, mrv=25)}
+    proposal_context = RuleContext(
+        pending_proposal_id=1, pending_proposal_kind="volume_review", target_rir=2
     )
-    assert all(action.id != "effort_unlabelled" for action in crowded)
+    crowded = build_actions(
+        _metrics(adherence=0.33, muscles=over_mrv_muscle, labeled=0.1), proposal_context
+    )
+    assert [action.id for action in crowded] == [
+        "pending_proposal", "adherence_low", "volume_over_mrv",
+    ]
+    assert len(crowded) == MAX_ACTIONS
+    assert "effort_unlabelled" not in [action.id for action in crowded]
 
+    # Только два содержательных правила срабатывают (adherence_low,
+    # volume_below_mev) — есть одно свободное место, и метод-совет его
+    # занимает, оставаясь последним по приоритету.
+    below_mev_muscle = {"chest": MuscleVolume(direct=2.0, indirect=0.0, mev=8, mav=16, mrv=22)}
+    two_fired = build_actions(
+        _metrics(adherence=0.33, muscles=below_mev_muscle, labeled=0.1), EMPTY_CONTEXT
+    )
+    assert [action.id for action in two_fired] == [
+        "adherence_low", "volume_below_mev", "effort_unlabelled",
+    ]
+
+    # Ничего содержательного не сработало — метод-совет остаётся один.
     alone = build_actions(_metrics(labeled=0.1), EMPTY_CONTEXT)
     assert [action.id for action in alone] == ["effort_unlabelled"]
 
