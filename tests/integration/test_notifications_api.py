@@ -225,3 +225,44 @@ async def test_push_ticket_receipt_and_invalid_device(client, db, test_user, mon
     await db.refresh(delivery)
     assert device.push_enabled is False
     assert delivery.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_register_device_persists_and_uses_reported_channel_ids(client, db, test_user, monkeypatch):
+    registration = {
+        "installation_id": "channel-installation",
+        "expo_push_token": "ExponentPushToken[channel-device-token-123456]",
+        "platform": "android",
+        "timezone_offset_minutes": 0,
+        "notification_channel_id": "eurith-actions-v2",
+        "quiet_channel_id": "eurith-digest-v2",
+    }
+    response = await client.put("/notifications/devices", json=registration)
+    assert response.status_code == 200
+
+    device = (await db.execute(select(PushDevice).where(
+        PushDevice.installation_id == "channel-installation"
+    ))).scalar_one()
+    assert device.notification_channel_id == "eurith-actions-v2"
+    assert device.quiet_channel_id == "eurith-digest-v2"
+
+    notification = await create_notification(
+        db,
+        app_user_id=test_user.id,
+        event_type="goal_deadline",
+        title="Sensitive persisted title",
+        body="Sensitive persisted body",
+        dedupe_key="push-channel-test",
+        payload={"route": "/progress"},
+    )
+    await db.commit()
+
+    sent_payloads = []
+    monkeypatch.setattr(push_service, "_expo_request", lambda _url, payload: (
+        sent_payloads.append(payload) or {"data": {"status": "ok", "id": "ticket-2"}}
+    ))
+    assert await push_service.send_pending(db) == 1
+    await db.commit()
+    assert sent_payloads[0]["channelId"] == "eurith-actions-v2"
+    assert sent_payloads[0]["priority"] == "high"
+    assert sent_payloads[0]["data"]["notificationId"] == notification.id

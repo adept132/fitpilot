@@ -1231,6 +1231,13 @@ class PushDevice(Base):
     timezone_offset_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     push_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     disabled_event_types: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    # P1-06: id каналов Android, сообщённые самим устройством. Параметры
+    # канала неизменяемы после создания, поэтому смена важности требует
+    # НОВОГО id — и сервер не имеет права его хардкодить, иначе обновившись
+    # раньше клиента отправит пуш в несуществующий канал. NULL = сборка до
+    # P1-06, ей шлём LEGACY_CHANNEL_ID.
+    notification_channel_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    quiet_channel_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     disabled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     last_registered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

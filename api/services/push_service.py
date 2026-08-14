@@ -37,6 +37,30 @@ SAFE_ROUTES = {
     "sync_conflict": "/home",
 }
 
+# Канал, который создавали сборки до P1-06. Устройства, которые ещё не
+# сообщили свои id, обязаны получать именно его: пуш в несуществующий канал
+# Android кладёт в фолбэк со своими настройками, а не в наш.
+LEGACY_CHANNEL_ID = "eurith-updates"
+
+# Информационные события идут в тихий канал и без high-priority: недельный
+# отчёт не срочен, всплывать баннером наравне с конфликтом синхронизации ему
+# незачем.
+QUIET_EVENT_TYPES = frozenset({"period_report"})
+
+
+def channel_for(device, event_type: str) -> str:
+    quiet = event_type in QUIET_EVENT_TYPES
+    reported = (
+        getattr(device, "quiet_channel_id", None)
+        if quiet
+        else getattr(device, "notification_channel_id", None)
+    )
+    return reported or LEGACY_CHANNEL_ID
+
+
+def priority_for(event_type: str) -> str:
+    return "normal" if event_type in QUIET_EVENT_TYPES else "high"
+
 
 def safe_push_content(event_type: str) -> tuple[str, str] | None:
     """Never forward entity names, measurements or arbitrary persisted copy."""
@@ -79,7 +103,9 @@ def _retry_at(attempts: int) -> datetime:
 
 async def register_device(db: AsyncSession, *, app_user_id: int, installation_id: str,
                           expo_push_token: str, platform: str,
-                          timezone_offset_minutes: int) -> PushDevice:
+                          timezone_offset_minutes: int,
+                          notification_channel_id: str | None = None,
+                          quiet_channel_id: str | None = None) -> PushDevice:
     now = datetime.now(timezone.utc)
     installation = (await db.execute(select(PushDevice).where(
         PushDevice.app_user_id == app_user_id,
@@ -100,6 +126,8 @@ async def register_device(db: AsyncSession, *, app_user_id: int, installation_id
     device.expo_push_token = expo_push_token
     device.platform = platform
     device.timezone_offset_minutes = timezone_offset_minutes
+    device.notification_channel_id = notification_channel_id
+    device.quiet_channel_id = quiet_channel_id
     device.push_enabled = True
     device.disabled_at = None
     device.last_registered_at = now
@@ -158,7 +186,9 @@ async def send_pending(db: AsyncSession, limit: int = 100) -> int:
         delivery.attempts += 1
         title, body = content
         message = {"to": device.expo_push_token, "title": title, "body": body,
-                   "sound": "default", "channelId": "eurith-updates",
+                   "sound": "default",
+                   "channelId": channel_for(device, notification.event_type),
+                   "priority": priority_for(notification.event_type),
                    "data": safe_push_data(notification)}
         try:
             ticket = (await asyncio.to_thread(_expo_request, EXPO_SEND_URL, message)).get("data") or {}
