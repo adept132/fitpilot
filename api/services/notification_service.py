@@ -214,6 +214,12 @@ async def materialize_domain_notifications(
                 dedupe_key=f"measurements_due:{source_date}",
             )
 
+    # P1-06: отчёты материализуются здесь же, чтобы появляться у всех, а не
+    # только у тех, кто дошёл до экрана отчётов.
+    from api.services.reports.service import ensure_reports
+
+    await ensure_reports(db, app_user_id, today)
+
 
 async def unread_count(db: AsyncSession, app_user_id: int) -> int:
     return int(

@@ -28,6 +28,7 @@ SAFE_TEMPLATES = {
     "goal_deadline": ("Приближается срок цели", "Откройте Eurith, чтобы проверить прогресс."),
     "measurements_due": ("Пора обновить замеры", "Свежие данные сделают динамику точнее."),
     "sync_conflict": ("Нужно проверить синхронизацию", "Откройте Eurith, чтобы сохранить актуальные данные."),
+    "period_report": ("Отчёт готов", "Откройте Eurith, чтобы посмотреть итоги периода."),
 }
 
 SAFE_ROUTES = {
@@ -36,6 +37,7 @@ SAFE_ROUTES = {
     "goal_deadline": "/progress",
     "measurements_due": "/progress/body-composition",
     "sync_conflict": "/home",
+    "period_report": "/reports",
 }
 
 # Канал, который создавали сборки до P1-06. Устройства, которые ещё не
