@@ -211,6 +211,46 @@ async def test_intensity_is_none_when_no_baseline_exists(db, test_user, seeded_h
 
 
 @pytest.mark.asyncio
+async def test_baseline_window_agrees_with_period_window_on_finished_at(
+    db, test_user, seeded_history
+):
+    """Обе половины отношения должны опираться на один и тот же критерий
+    'сессия завершена'. status == 'finished' с null finished_at не в счёт
+    ни там, ни там — иначе базовое окно училось бы на сессиях, которые
+    _finished_sessions_in() выкинуло бы из окна периода."""
+    dangling = WorkoutSession(
+        app_user_id=test_user.id, source="free", status="finished",
+        started_at=datetime(2026, 7, 1, 10, tzinfo=timezone.utc), finished_at=None,
+    )
+    db.add(dangling)
+    await db.flush()
+    se = WorkoutSessionExercise(
+        workout_session_id=dangling.id, exercise_id=seeded_history.id, order_index=0,
+    )
+    db.add(se)
+    await db.flush()
+    db.add(WorkoutSessionSet(
+        workout_session_exercise_id=se.id, set_number=1, set_type="normal",
+        weight=100.0, reps=1, is_completed=True, is_anomalous=False,
+    ))
+    await db.flush()
+
+    await _session_with_sets(
+        db, test_user.id,
+        started=datetime(2026, 8, 4, 10, tzinfo=timezone.utc),
+        exercise_id=seeded_history.id,
+        sets=[{"weight": 80.0, "reps": 3}],
+    )
+    await db.commit()
+
+    metric = await compute_intensity_metric(
+        db, test_user.id, PERIOD_START, PERIOD_END, BASELINE_START
+    )
+
+    assert metric.avg_relative is None
+
+
+@pytest.mark.asyncio
 async def test_records_are_limited_to_the_period(db, test_user, seeded_history):
     from api.services.models import UserRecord
 

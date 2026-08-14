@@ -276,10 +276,7 @@ async def compute_intensity_metric(
         )
         .join(WorkoutSession, WorkoutSessionExercise.workout_session_id == WorkoutSession.id)
         .where(
-            WorkoutSession.app_user_id == app_user_id,
-            WorkoutSession.status == "finished",
-            func.date(WorkoutSession.started_at) >= baseline_start,
-            func.date(WorkoutSession.started_at) < start,
+            *_finished_sessions_in(app_user_id, baseline_start, start - timedelta(days=1)),
             *_work_set_filters(),
         )
     )).all()
