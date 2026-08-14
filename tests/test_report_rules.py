@@ -50,15 +50,41 @@ def test_full_adherence_produces_no_schedule_action():
 
 def test_pending_proposal_outranks_volume_advice():
     """Существующее предложение нельзя дублировать своим советом — отчёт
-    ведёт в уже готовое решение."""
-    muscles = {"chest": MuscleVolume(direct=2.0, indirect=0.0, mev=8, mav=16, mrv=22)}
+    ведёт в уже готовое решение, а не предлагает тот же выбор вторым путём.
+    Проверяем весь список действий, а не только первый элемент: иначе
+    объёмный совет мог бы молча проехать вторым/третьим пунктом."""
+    muscles = {
+        "chest": MuscleVolume(direct=2.0, indirect=0.0, mev=8, mav=16, mrv=22),
+        "back": MuscleVolume(direct=30.0, indirect=0.0, mev=10, mav=18, mrv=25),
+    }
     context = RuleContext(pending_proposal_id=42, pending_proposal_kind="volume_review",
                           target_rir=2)
 
     actions = build_actions(_metrics(muscles=muscles), context)
+    ids = [action.id for action in actions]
 
     assert actions[0].id == "pending_proposal"
     assert actions[0].route == "/periodization/window-summary"
+    assert "volume_over_mrv" not in ids
+    assert "volume_below_mev" not in ids
+
+
+def test_pending_proposal_of_other_kind_does_not_suppress_volume_advice():
+    """Подавление узкое: только volume_review — про объём. Предложение
+    другого рода (например, block_review) не владеет объёмным решением и не
+    должен глушить объёмный совет."""
+    muscles = {
+        "chest": MuscleVolume(direct=2.0, indirect=0.0, mev=8, mav=16, mrv=22),
+        "back": MuscleVolume(direct=30.0, indirect=0.0, mev=10, mav=18, mrv=25),
+    }
+    context = RuleContext(pending_proposal_id=42, pending_proposal_kind="block_review",
+                          target_rir=2)
+
+    actions = build_actions(_metrics(muscles=muscles), context)
+    ids = [action.id for action in actions]
+
+    assert "volume_over_mrv" in ids
+    assert "volume_below_mev" in ids
 
 
 def test_muscle_below_mev_and_above_mrv_both_reported():
@@ -86,19 +112,21 @@ def test_effort_labelling_advice_fills_leftover_slot():
     """Совет про метод — низший приоритет, а не строгий last resort: он
     занимает свободное место, если под тремя действиями остался зазор, и
     закономерно вытесняется, когда три содержательных правила уже сработали."""
-    # Три содержательных правила срабатывают: pending_proposal (есть
-    # предложение), adherence_low (0.33 < ADHERENCE_FLOOR), volume_over_mrv
-    # (спина: 30 подходов при потолке 25). Список заполнен до крышки ещё до
-    # того, как очередь дойдёт до effort_unlabelled.
-    over_mrv_muscle = {"back": MuscleVolume(direct=30.0, indirect=0.0, mev=10, mav=18, mrv=25)}
-    proposal_context = RuleContext(
-        pending_proposal_id=1, pending_proposal_kind="volume_review", target_rir=2
-    )
+    # Три содержательных правила срабатывают: adherence_low (0.33 <
+    # ADHERENCE_FLOOR), volume_over_mrv (спина: 30 подходов при потолке 25),
+    # volume_below_mev (грудь: 2 подхода при минимуме 8). Без ожидающего
+    # предложения — иначе volume_review заглушил бы оба объёмных правила и
+    # тест перестал бы проверять то, что заявлен проверять. Список заполнен
+    # до крышки ещё до того, как очередь дойдёт до effort_unlabelled.
+    both_muscles = {
+        "chest": MuscleVolume(direct=2.0, indirect=0.0, mev=8, mav=16, mrv=22),
+        "back": MuscleVolume(direct=30.0, indirect=0.0, mev=10, mav=18, mrv=25),
+    }
     crowded = build_actions(
-        _metrics(adherence=0.33, muscles=over_mrv_muscle, labeled=0.1), proposal_context
+        _metrics(adherence=0.33, muscles=both_muscles, labeled=0.1), EMPTY_CONTEXT
     )
     assert [action.id for action in crowded] == [
-        "pending_proposal", "adherence_low", "volume_over_mrv",
+        "adherence_low", "volume_over_mrv", "volume_below_mev",
     ]
     assert len(crowded) == MAX_ACTIONS
     assert "effort_unlabelled" not in [action.id for action in crowded]

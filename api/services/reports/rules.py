@@ -75,7 +75,11 @@ def _pending_proposal(_: ReportMetrics, context: RuleContext) -> Action | None:
     )
 
 
-def _volume_over_mrv(metrics: ReportMetrics, _: RuleContext) -> Action | None:
+def _volume_over_mrv(metrics: ReportMetrics, context: RuleContext) -> Action | None:
+    # Предложение по итогам микроцикла уже владеет этим решением — отчёт не
+    # должен предлагать свой вариант того же вопроса вторым путём.
+    if context.pending_proposal_kind == "volume_review":
+        return None
     over = [
         (muscle, row) for muscle, row in metrics.volume.by_muscle.items()
         if row.direct + row.indirect > row.mrv
@@ -91,7 +95,11 @@ def _volume_over_mrv(metrics: ReportMetrics, _: RuleContext) -> Action | None:
     )
 
 
-def _volume_below_mev(metrics: ReportMetrics, _: RuleContext) -> Action | None:
+def _volume_below_mev(metrics: ReportMetrics, context: RuleContext) -> Action | None:
+    # Предложение по итогам микроцикла уже владеет этим решением — отчёт не
+    # должен предлагать свой вариант того же вопроса вторым путём.
+    if context.pending_proposal_kind == "volume_review":
+        return None
     below = [
         (muscle, row) for muscle, row in metrics.volume.by_muscle.items()
         if row.direct + row.indirect < row.mev
