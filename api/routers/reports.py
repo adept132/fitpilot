@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db
@@ -66,9 +66,19 @@ async def list_reports(
         )
         for row in rows
     ]
-    return ReportListRead(
-        items=items, unseen_count=sum(1 for item in items if not item.seen)
-    )
+
+    # Счётчик непрочитанных — по ВСЕМ отчётам пользователя, а не по странице:
+    # иначе бейдж расходится с уведомлениями, как только непрочитанных больше
+    # limit (неделя даёт 20 строк примерно за пять месяцев — это не редкий
+    # случай).
+    unseen_count = (await db.execute(
+        select(func.count()).select_from(PeriodReport).where(
+            PeriodReport.app_user_id == current_user.id,
+            PeriodReport.seen_at.is_(None),
+        )
+    )).scalar_one()
+
+    return ReportListRead(items=items, unseen_count=unseen_count)
 
 
 async def _load(db: AsyncSession, app_user_id: int, period_type: str,
@@ -85,14 +95,7 @@ async def _load(db: AsyncSession, app_user_id: int, period_type: str,
     return report
 
 
-@router.get("/reports/{period_type}/{period_start}", response_model=ReportRead)
-async def get_report(
-    period_type: PeriodType,
-    period_start: date,
-    current_user=Depends(get_current_app_user),
-    db: AsyncSession = Depends(get_db),
-) -> ReportRead:
-    report = await _load(db, current_user.id, period_type, period_start)
+def _to_read(report: PeriodReport) -> ReportRead:
     return ReportRead(
         shape_version=report.shape_version,
         rules_version=report.rules_version,
@@ -104,6 +107,17 @@ async def get_report(
         metrics=report.payload.get("metrics", {}),
         actions=report.payload.get("actions", []),
     )
+
+
+@router.get("/reports/{period_type}/{period_start}", response_model=ReportRead)
+async def get_report(
+    period_type: PeriodType,
+    period_start: date,
+    current_user=Depends(get_current_app_user),
+    db: AsyncSession = Depends(get_db),
+) -> ReportRead:
+    report = await _load(db, current_user.id, period_type, period_start)
+    return _to_read(report)
 
 
 @router.post("/reports/{period_type}/{period_start}/seen", response_model=ReportRead)
@@ -120,4 +134,4 @@ async def mark_report_seen(
         report.seen_at = datetime.now(timezone.utc)
         await db.commit()
         await db.refresh(report)
-    return await get_report(period_type, period_start, current_user, db)
+    return _to_read(report)
