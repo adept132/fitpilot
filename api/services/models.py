@@ -1216,6 +1216,43 @@ class AppNotification(Base):
     )
 
 
+class PeriodReport(Base):
+    """Неизменный снапшот отчёта за закрытый период.
+
+    Не пересчитывается ни при правке старой тренировки, ни при выкатке новых
+    правил: иначе история отчётов перестаёт быть историей — вернувшись к
+    июньскому отчёту, человек увидел бы другие цифры. Актуальный пересчёт
+    живёт на вкладке Прогресс, это разные инструменты.
+    """
+
+    __tablename__ = "period_reports"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    period_type: Mapped[str] = mapped_column(String(8), nullable=False)
+    period_start: Mapped[date_type] = mapped_column(Date, nullable=False)
+    period_end: Mapped[date_type] = mapped_column(Date, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    # Версия набора правил на момент генерации. Записывается, но задним
+    # числом ничего не переписывает — по ней видно, какой логикой собран
+    # старый отчёт.
+    rules_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    shape_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )
+    seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "app_user_id", "period_type", "period_start",
+            name="uq_period_reports_user_type_start",
+        ),
+    )
+
+
 class PushDevice(Base):
     """One physical app installation registered for Expo push delivery."""
 
