@@ -277,7 +277,14 @@ def local_date_for(user_timezone: str | None, device_offset_minutes: int | None,
     return now.date()
 
 
-def should_materialize(app_user_id: int, now: datetime) -> bool:
+def claim_materialization_slot(app_user_id: int, now: datetime) -> bool:
+    """Забронировать право на материализацию для пользователя прямо сейчас.
+
+    Не чистый предикат: возврат True записывает `now` как момент последней
+    материализации. Вызов дважды подряд для одного пользователя молча
+    съедает окно дросселирования — по имени видно, что функция что-то
+    забирает, а не просто спрашивает.
+    """
     previous = _LAST_MATERIALIZED.get(app_user_id)
     if previous is not None and now - previous < timedelta(minutes=MATERIALIZE_INTERVAL_MINUTES):
         return False
@@ -312,7 +319,7 @@ async def materialize_for_active_users(db: AsyncSession, *, now: datetime | None
 
     processed = 0
     for user_id, user_timezone in users:
-        if not should_materialize(user_id, moment):
+        if not claim_materialization_slot(user_id, moment):
             continue
         today = local_date_for(user_timezone, offsets.get(user_id), moment)
         await materialize_domain_notifications(db, user_id, today)

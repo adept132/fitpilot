@@ -1,17 +1,28 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from api.services.push_service import (
     MATERIALIZE_INTERVAL_MINUTES,
     QUIET_EVENT_TYPES,
     _LAST_MATERIALIZED,
     channel_for,
+    claim_materialization_slot,
     local_date_for,
     priority_for,
     safe_push_content,
     safe_push_data,
-    should_materialize,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_materialization_throttle():
+    """`_LAST_MATERIALIZED` — память процесса, общая на весь тестовый прогон:
+    без сброса тесты дросселирования были бы связаны через один и тот же
+    словарь и зависели бы от порядка запуска."""
+    _LAST_MATERIALIZED.clear()
+    yield
 
 
 def test_push_content_is_allowlisted_and_never_uses_persisted_copy():
@@ -91,30 +102,26 @@ def test_local_date_defaults_to_utc_when_nothing_is_known():
 
 
 def test_first_visit_always_materializes():
-    _LAST_MATERIALIZED.clear()
-    assert should_materialize(1, datetime(2026, 8, 17, 9, tzinfo=timezone.utc)) is True
+    assert claim_materialization_slot(1, datetime(2026, 8, 17, 9, tzinfo=timezone.utc)) is True
 
 
 def test_repeat_within_interval_is_skipped():
-    _LAST_MATERIALIZED.clear()
     now = datetime(2026, 8, 17, 9, tzinfo=timezone.utc)
-    should_materialize(1, now)
+    claim_materialization_slot(1, now)
 
-    assert should_materialize(1, now + timedelta(minutes=5)) is False
+    assert claim_materialization_slot(1, now + timedelta(minutes=5)) is False
 
 
 def test_next_interval_materializes_again():
-    _LAST_MATERIALIZED.clear()
     now = datetime(2026, 8, 17, 9, tzinfo=timezone.utc)
-    should_materialize(1, now)
+    claim_materialization_slot(1, now)
 
     later = now + timedelta(minutes=MATERIALIZE_INTERVAL_MINUTES + 1)
-    assert should_materialize(1, later) is True
+    assert claim_materialization_slot(1, later) is True
 
 
 def test_throttle_is_per_user():
-    _LAST_MATERIALIZED.clear()
     now = datetime(2026, 8, 17, 9, tzinfo=timezone.utc)
-    should_materialize(1, now)
+    claim_materialization_slot(1, now)
 
-    assert should_materialize(2, now) is True
+    assert claim_materialization_slot(2, now) is True
