@@ -9,13 +9,19 @@ from api.services.models import (
     WorkoutSessionSet,
 )
 from api.services.reports.metrics import (
+    collect_records,
     compute_adherence_metric,
+    compute_effort_metric,
+    compute_intensity_metric,
+    compute_metrics,
     compute_time_metric,
     compute_volume_metric,
+    has_activity,
 )
 
 PERIOD_START = date(2026, 8, 3)
 PERIOD_END = date(2026, 8, 9)
+BASELINE_START = date(2026, 6, 1)
 
 
 async def _session_with_sets(db, user_id, *, started: datetime, exercise_id: int,
@@ -122,3 +128,110 @@ async def test_time_metric_ignores_unfinished_sessions(db, test_user, seeded_his
 
     assert metric.sessions == 0
     assert metric.avg_session_minutes is None
+
+
+@pytest.mark.asyncio
+async def test_avg_rir_ignores_unlabelled_sets(db, test_user, seeded_history):
+    """effort_to_rir(None) отдаёт DEFAULT_RIR = 2 — неразмеченные подходы
+    обязаны выпадать из среднего, а не тихо голосовать двойкой."""
+    await _session_with_sets(
+        db, test_user.id,
+        started=datetime(2026, 8, 4, 10, tzinfo=timezone.utc),
+        exercise_id=seeded_history.id,
+        sets=[
+            {"effort_level": "failure"},      # RIR 0
+            {"effort_level": "prefailure"},   # RIR 1
+            {"effort_level": None},
+            {"effort_level": None},
+        ],
+    )
+    await db.commit()
+
+    metric = await compute_effort_metric(db, test_user.id, PERIOD_START, PERIOD_END)
+
+    assert metric.avg_rir == pytest.approx(0.5)
+    assert metric.labeled_share == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_effort_metric_without_any_labels_reports_none(db, test_user, seeded_history):
+    await _session_with_sets(
+        db, test_user.id,
+        started=datetime(2026, 8, 4, 10, tzinfo=timezone.utc),
+        exercise_id=seeded_history.id, sets=[{"effort_level": None}] * 3,
+    )
+    await db.commit()
+
+    metric = await compute_effort_metric(db, test_user.id, PERIOD_START, PERIOD_END)
+
+    assert metric.avg_rir is None
+    assert metric.labeled_share == 0.0
+
+
+@pytest.mark.asyncio
+async def test_relative_intensity_uses_baseline_before_the_period(db, test_user, seeded_history):
+    """База e1RM — лучший результат ДО периода. Делить на сегодняшний e1RM
+    нельзя: прошлые периоды занижались бы ровно на величину прогресса."""
+    await _session_with_sets(
+        db, test_user.id,
+        started=datetime(2026, 7, 1, 10, tzinfo=timezone.utc),
+        exercise_id=seeded_history.id,
+        sets=[{"weight": 100.0, "reps": 1}],       # e1RM = 100
+    )
+    await _session_with_sets(
+        db, test_user.id,
+        started=datetime(2026, 8, 4, 10, tzinfo=timezone.utc),
+        exercise_id=seeded_history.id,
+        sets=[{"weight": 80.0, "reps": 3}],        # 80 % от базы
+    )
+    await db.commit()
+
+    metric = await compute_intensity_metric(
+        db, test_user.id, PERIOD_START, PERIOD_END, BASELINE_START
+    )
+
+    assert metric.avg_relative == pytest.approx(0.8)
+    assert metric.heavy_set_share == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_intensity_is_none_when_no_baseline_exists(db, test_user, seeded_history):
+    await _session_with_sets(
+        db, test_user.id,
+        started=datetime(2026, 8, 4, 10, tzinfo=timezone.utc),
+        exercise_id=seeded_history.id, sets=[{"weight": 80.0, "reps": 3}],
+    )
+    await db.commit()
+
+    metric = await compute_intensity_metric(
+        db, test_user.id, PERIOD_START, PERIOD_END, BASELINE_START
+    )
+
+    assert metric.avg_relative is None
+
+
+@pytest.mark.asyncio
+async def test_records_are_limited_to_the_period(db, test_user, seeded_history):
+    from api.services.models import UserRecord
+
+    db.add(UserRecord(
+        app_user_id=test_user.id, exercise_id=seeded_history.id,
+        exercise_name=seeded_history.name, record_type="max_weight",
+        value=100.0, date_achieved=date(2026, 8, 5),
+    ))
+    db.add(UserRecord(
+        app_user_id=test_user.id, exercise_id=seeded_history.id,
+        exercise_name=seeded_history.name, record_type="max_weight",
+        value=95.0, date_achieved=date(2026, 7, 5),
+    ))
+    await db.commit()
+
+    records = await collect_records(db, test_user.id, PERIOD_START, PERIOD_END)
+
+    assert [r.value for r in records] == [100.0]
+
+
+@pytest.mark.asyncio
+async def test_has_activity_is_false_for_empty_period(db, test_user):
+    metrics = await compute_metrics(db, test_user.id, "week", PERIOD_START, PERIOD_END, None)
+    assert has_activity(metrics) is False

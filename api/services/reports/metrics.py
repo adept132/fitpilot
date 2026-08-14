@@ -7,17 +7,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.services.models import (
     Exercise,
+    UserRecord,
     WorkoutSession,
     WorkoutSessionExercise,
     WorkoutSessionSet,
 )
+from api.services.progression.metrics import effort_to_rir
 from api.services.volume import repository as volume_repo
 from api.services.volume.landmarks import landmarks_for
 
@@ -44,6 +46,16 @@ def _finished_sessions_in(app_user_id: int, start: date, end: date):
         func.date(WorkoutSession.started_at) >= start,
         func.date(WorkoutSession.started_at) <= end,
     )
+
+
+# Подход считается тяжёлым при пяти и менее повторах — граница силового
+# диапазона, принятая в движке прогрессии.
+HEAVY_REPS_MAX = 5
+
+# Сколько недель истории берём под базу e1RM. Восемь недель — компромисс:
+# достаточно, чтобы база нашлась у редко тренирующегося, и мало, чтобы
+# устаревший результат не занижал интенсивность.
+BASELINE_WEEKS = 8
 
 
 @dataclass(frozen=True)
@@ -76,6 +88,40 @@ class TimeMetric:
     total_minutes: int
     avg_session_minutes: float | None
     sets_per_hour: float | None
+
+
+@dataclass(frozen=True)
+class IntensityMetric:
+    avg_relative: float | None
+    heavy_set_share: float | None
+
+
+@dataclass(frozen=True)
+class EffortMetric:
+    avg_rir: float | None
+    labeled_share: float
+
+
+@dataclass(frozen=True)
+class RecordItem:
+    exercise_id: int | None
+    exercise_name: str
+    record_type: str
+    value: float
+    achieved_on: date
+
+
+@dataclass(frozen=True)
+class ReportMetrics:
+    period_type: str
+    period_start: date
+    period_end: date
+    adherence: AdherenceMetric
+    volume: VolumeMetric
+    intensity: IntensityMetric
+    effort: EffortMetric
+    time: TimeMetric
+    records: list[RecordItem] = field(default_factory=list)
 
 
 async def compute_adherence_metric(
@@ -175,3 +221,149 @@ async def compute_time_metric(
         avg_session_minutes=total_minutes / len(rows),
         sets_per_hour=(work_sets * 60 / total_minutes) if total_minutes else None,
     )
+
+
+def _e1rm(weight: float, reps: int) -> float | None:
+    """Бржицки. Не определена при 37 повторах и отрицательна выше."""
+    if reps >= 37:
+        return None
+    return weight * 36.0 / (37.0 - reps)
+
+
+async def compute_effort_metric(
+    session: AsyncSession, app_user_id: int, start: date, end: date
+) -> EffortMetric:
+    rows = (await session.execute(
+        select(WorkoutSessionSet.effort_level)
+        .select_from(WorkoutSessionSet)
+        .join(
+            WorkoutSessionExercise,
+            WorkoutSessionSet.workout_session_exercise_id == WorkoutSessionExercise.id,
+        )
+        .join(WorkoutSession, WorkoutSessionExercise.workout_session_id == WorkoutSession.id)
+        .where(*_finished_sessions_in(app_user_id, start, end), *_work_set_filters())
+    )).scalars().all()
+    if not rows:
+        return EffortMetric(avg_rir=None, labeled_share=0.0)
+
+    labeled = [value for value in rows if value]
+    avg_rir = (
+        sum(effort_to_rir(value) for value in labeled) / len(labeled) if labeled else None
+    )
+    return EffortMetric(avg_rir=avg_rir, labeled_share=len(labeled) / len(rows))
+
+
+async def compute_intensity_metric(
+    session: AsyncSession, app_user_id: int, start: date, end: date,
+    baseline_start: date,
+) -> IntensityMetric:
+    """Относительная интенсивность: вес подхода к e1RM ДО периода.
+
+    Упражнения без базы в среднее не попадают — делить не на что, а
+    подставлять текущий e1RM значило бы занижать прошлые периоды ровно на
+    величину случившегося с тех пор прогресса.
+    """
+    baseline_rows = (await session.execute(
+        select(
+            WorkoutSessionExercise.exercise_id,
+            WorkoutSessionSet.weight,
+            WorkoutSessionSet.reps,
+        )
+        .select_from(WorkoutSessionSet)
+        .join(
+            WorkoutSessionExercise,
+            WorkoutSessionSet.workout_session_exercise_id == WorkoutSessionExercise.id,
+        )
+        .join(WorkoutSession, WorkoutSessionExercise.workout_session_id == WorkoutSession.id)
+        .where(
+            WorkoutSession.app_user_id == app_user_id,
+            WorkoutSession.status == "finished",
+            func.date(WorkoutSession.started_at) >= baseline_start,
+            func.date(WorkoutSession.started_at) < start,
+            *_work_set_filters(),
+        )
+    )).all()
+
+    baseline: dict[int, float] = {}
+    for exercise_id, weight, reps in baseline_rows:
+        value = _e1rm(float(weight), int(reps))
+        if value is not None and value > baseline.get(exercise_id, 0.0):
+            baseline[exercise_id] = value
+
+    period_rows = (await session.execute(
+        select(
+            WorkoutSessionExercise.exercise_id,
+            WorkoutSessionSet.weight,
+            WorkoutSessionSet.reps,
+        )
+        .select_from(WorkoutSessionSet)
+        .join(
+            WorkoutSessionExercise,
+            WorkoutSessionSet.workout_session_exercise_id == WorkoutSessionExercise.id,
+        )
+        .join(WorkoutSession, WorkoutSessionExercise.workout_session_id == WorkoutSession.id)
+        .where(*_finished_sessions_in(app_user_id, start, end), *_work_set_filters())
+    )).all()
+    if not period_rows:
+        return IntensityMetric(avg_relative=None, heavy_set_share=None)
+
+    ratios = [
+        float(weight) / baseline[exercise_id]
+        for exercise_id, weight, _ in period_rows
+        if baseline.get(exercise_id)
+    ]
+    heavy = sum(1 for _, _, reps in period_rows if int(reps) <= HEAVY_REPS_MAX)
+
+    return IntensityMetric(
+        avg_relative=(sum(ratios) / len(ratios)) if ratios else None,
+        heavy_set_share=heavy / len(period_rows),
+    )
+
+
+async def collect_records(
+    session: AsyncSession, app_user_id: int, start: date, end: date
+) -> list[RecordItem]:
+    rows = (await session.execute(
+        select(UserRecord)
+        .where(
+            UserRecord.app_user_id == app_user_id,
+            UserRecord.date_achieved >= start,
+            UserRecord.date_achieved <= end,
+        )
+        .order_by(UserRecord.date_achieved, UserRecord.id)
+    )).scalars().all()
+    return [
+        RecordItem(
+            exercise_id=row.exercise_id,
+            exercise_name=row.exercise_name,
+            record_type=row.record_type,
+            value=float(row.value),
+            achieved_on=row.date_achieved,
+        )
+        for row in rows
+    ]
+
+
+async def compute_metrics(
+    session: AsyncSession, app_user_id: int, period_type: str,
+    start: date, end: date, level: str | None,
+) -> ReportMetrics:
+    baseline_start = start - timedelta(weeks=BASELINE_WEEKS)
+    return ReportMetrics(
+        period_type=period_type,
+        period_start=start,
+        period_end=end,
+        adherence=await compute_adherence_metric(session, app_user_id, start, end),
+        volume=await compute_volume_metric(session, app_user_id, start, end, level),
+        intensity=await compute_intensity_metric(
+            session, app_user_id, start, end, baseline_start
+        ),
+        effort=await compute_effort_metric(session, app_user_id, start, end),
+        time=await compute_time_metric(session, app_user_id, start, end),
+        records=await collect_records(session, app_user_id, start, end),
+    )
+
+
+def has_activity(metrics: ReportMetrics) -> bool:
+    """Был ли период вообще прожит: хоть один плановый день или тренировка."""
+    return metrics.adherence.planned_days > 0 or metrics.time.sessions > 0

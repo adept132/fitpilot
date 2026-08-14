@@ -37,6 +37,7 @@ from api.services.models import (  # noqa: E402
     Exercise,
     Mesocycle,
     MesocyclePhase,
+    UserRecord,
     WorkoutPlan,
     WorkoutPlanExercise,
     WorkoutSession,
@@ -124,6 +125,13 @@ async def test_user():
                 delete(WorkoutSession).where(WorkoutSession.id.in_(workout_ids))
             )
 
+        # user_records.exercise_id → exercises в реальной БД — NO ACTION (модель
+        # объявляет CASCADE, но init_db не умеет ALTER-ить существующие FK —
+        # см. memory/backend-schema-create-all.md), поэтому сносим записи явно,
+        # иначе удаление Exercise падает с ForeignKeyViolationError.
+        await session.execute(
+            delete(UserRecord).where(UserRecord.app_user_id == user_id)
+        )
         await session.execute(
             delete(Exercise).where(Exercise.app_user_id == user_id)
         )
