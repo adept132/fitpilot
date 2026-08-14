@@ -5,15 +5,16 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.services.models import AppNotification, PushDelivery, PushDevice
+from api.services.models import AppNotification, AppUser, AppUserProfile, PushDelivery, PushDevice
 from api.services.notification_service import materialize_domain_notifications
 from app.database import SessionLocal
 
@@ -241,21 +242,89 @@ async def check_receipts(db: AsyncSession, limit: int = 1000) -> int:
     return checked
 
 
-async def materialize_for_registered_users(db: AsyncSession) -> int:
-    rows = (await db.execute(select(PushDevice.app_user_id, PushDevice.timezone_offset_minutes)
-        .where(PushDevice.push_enabled.is_(True), PushDevice.disabled_at.is_(None))
-        .distinct(PushDevice.app_user_id))).all()
-    for user_id, offset in rows:
-        today = (datetime.now(timezone.utc) - timedelta(minutes=offset)).date()
+# [КОНФИГ] Насколько давно пользователь должен был заходить, чтобы фоновая
+# материализация продолжала его обслуживать. Заброшенным аккаунтам события не
+# нужны, а обход всех пользователей раз в минуту на единственном процессе
+# Render — бессмысленная работа.
+ACTIVE_WINDOW_DAYS = 30
+
+# [КОНФИГ] Как часто фоновая проекция трогает одного пользователя. Воркер
+# просыпается раз в минуту ради отправки пушей, но пересчитывать доменное
+# состояние так же часто незачем: сутки не меняются шестьдесят раз в час.
+MATERIALIZE_INTERVAL_MINUTES = 60
+
+# Память процесса, а не БД: колонка ради оптимизации не нужна. Несколько
+# инстансов Render просто продросселируют независимо, а материализация
+# идемпотентна — худшее последствие расхождения это лишний дешёвый проход.
+_LAST_MATERIALIZED: dict[int, datetime] = {}
+
+
+def local_date_for(user_timezone: str | None, device_offset_minutes: int | None,
+                   now: datetime) -> date:
+    """Локальная дата пользователя.
+
+    Профиль важнее устройства: часовой пояс переживает переустановку и
+    переезд между устройствами. Офсет устройства — фолбэк в знаке
+    JS-getTimezoneOffset (для МСК это -180).
+    """
+    if user_timezone:
+        try:
+            return now.astimezone(ZoneInfo(user_timezone)).date()
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    if device_offset_minutes is not None:
+        return (now - timedelta(minutes=device_offset_minutes)).date()
+    return now.date()
+
+
+def should_materialize(app_user_id: int, now: datetime) -> bool:
+    previous = _LAST_MATERIALIZED.get(app_user_id)
+    if previous is not None and now - previous < timedelta(minutes=MATERIALIZE_INTERVAL_MINUTES):
+        return False
+    _LAST_MATERIALIZED[app_user_id] = now
+    return True
+
+
+async def materialize_for_active_users(db: AsyncSession, *, now: datetime | None = None) -> int:
+    """Спроецировать доменное состояние всем недавно активным пользователям.
+
+    Раньше обход шёл по PushDevice, из-за чего у пользователя без пушей не
+    появлялось ни записи в центре уведомлений, ни бейджа: создание события
+    было связано с каналом доставки. Это разные вещи.
+    """
+    moment = now or datetime.now(timezone.utc)
+    cutoff = moment - timedelta(days=ACTIVE_WINDOW_DAYS)
+
+    offsets = dict((await db.execute(
+        select(PushDevice.app_user_id, PushDevice.timezone_offset_minutes)
+        .where(PushDevice.disabled_at.is_(None))
+        .distinct(PushDevice.app_user_id)
+    )).all())
+
+    # Часовой пояс живёт в профиле, а не на самом AppUser — профиль
+    # заводится не сразу при регистрации, поэтому outerjoin: без него
+    # пользователь без профиля выпадал бы из обхода целиком.
+    users = (await db.execute(
+        select(AppUser.id, AppUserProfile.timezone)
+        .outerjoin(AppUserProfile, AppUserProfile.app_user_id == AppUser.id)
+        .where(AppUser.last_seen_at >= cutoff)
+    )).all()
+
+    processed = 0
+    for user_id, user_timezone in users:
+        if not should_materialize(user_id, moment):
+            continue
+        today = local_date_for(user_timezone, offsets.get(user_id), moment)
         await materialize_domain_notifications(db, user_id, today)
-    return len(rows)
+        processed += 1
+    return processed
 
 
 async def push_worker(stop: asyncio.Event, interval_seconds: int = 60) -> None:
     while not stop.is_set():
         try:
             async with SessionLocal() as db:
-                await materialize_for_registered_users(db)
+                await materialize_for_active_users(db)
                 await send_pending(db)
                 await check_receipts(db)
                 await db.commit()

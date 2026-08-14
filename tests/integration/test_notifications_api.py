@@ -1,10 +1,11 @@
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from api.services.models import (
     AppNotification,
+    AppUser,
     BodyMeasurement,
     PushDelivery,
     PushDevice,
@@ -109,6 +110,41 @@ async def test_materializes_initial_domain_events(client, db, test_user):
     response = await client.post("/notifications/read-all")
     assert response.status_code == 200
     assert response.json() == {"updated_count": 3, "unread_count": 0}
+
+
+@pytest.mark.asyncio
+async def test_materializes_for_user_without_push_device(db, test_user):
+    """Пользователь без единого PushDevice обязан получить доменное событие:
+    запись в центре уведомлений не зависит от канала доставки."""
+    from datetime import datetime, timezone as tz
+
+    from api.services.push_service import materialize_for_active_users
+
+    await db.execute(
+        update(AppUser).where(AppUser.id == test_user.id)
+        .values(last_seen_at=datetime.now(tz.utc))
+    )
+    db.add(
+        UserCalendarDay(
+            app_user_id=test_user.id,
+            target_date=date.today(),
+            plan_id=None,
+            is_rest_day=False,
+            is_blackout=False,
+            status="planned",
+        )
+    )
+    await db.commit()
+
+    await materialize_for_active_users(db)
+    await db.commit()
+
+    events = (await db.execute(
+        select(AppNotification.event_type).where(
+            AppNotification.app_user_id == test_user.id
+        )
+    )).scalars().all()
+    assert "training_day_without_plan" in events
 
 
 @pytest.mark.asyncio

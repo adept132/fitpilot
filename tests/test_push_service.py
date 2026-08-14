@@ -1,11 +1,16 @@
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from api.services.push_service import (
+    MATERIALIZE_INTERVAL_MINUTES,
     QUIET_EVENT_TYPES,
+    _LAST_MATERIALIZED,
     channel_for,
+    local_date_for,
     priority_for,
     safe_push_content,
     safe_push_data,
+    should_materialize,
 )
 
 
@@ -66,3 +71,50 @@ def test_priority_is_high_only_for_actionable_events():
     assert priority_for("periodization_proposal") == "high"
     assert priority_for("period_report") == "normal"
     assert "period_report" in QUIET_EVENT_TYPES
+
+
+def test_local_date_prefers_profile_timezone():
+    """23:30 UTC 14 августа в Москве — уже 15-е."""
+    now = datetime(2026, 8, 14, 23, 30, tzinfo=timezone.utc)
+    assert local_date_for("Europe/Moscow", None, now).isoformat() == "2026-08-15"
+
+
+def test_local_date_falls_back_to_device_offset():
+    """getTimezoneOffset() на клиенте отдаёт МИНУС смещение (МСК = -180)."""
+    now = datetime(2026, 8, 14, 23, 30, tzinfo=timezone.utc)
+    assert local_date_for(None, -180, now).isoformat() == "2026-08-15"
+
+
+def test_local_date_defaults_to_utc_when_nothing_is_known():
+    now = datetime(2026, 8, 14, 23, 30, tzinfo=timezone.utc)
+    assert local_date_for(None, None, now).isoformat() == "2026-08-14"
+
+
+def test_first_visit_always_materializes():
+    _LAST_MATERIALIZED.clear()
+    assert should_materialize(1, datetime(2026, 8, 17, 9, tzinfo=timezone.utc)) is True
+
+
+def test_repeat_within_interval_is_skipped():
+    _LAST_MATERIALIZED.clear()
+    now = datetime(2026, 8, 17, 9, tzinfo=timezone.utc)
+    should_materialize(1, now)
+
+    assert should_materialize(1, now + timedelta(minutes=5)) is False
+
+
+def test_next_interval_materializes_again():
+    _LAST_MATERIALIZED.clear()
+    now = datetime(2026, 8, 17, 9, tzinfo=timezone.utc)
+    should_materialize(1, now)
+
+    later = now + timedelta(minutes=MATERIALIZE_INTERVAL_MINUTES + 1)
+    assert should_materialize(1, later) is True
+
+
+def test_throttle_is_per_user():
+    _LAST_MATERIALIZED.clear()
+    now = datetime(2026, 8, 17, 9, tzinfo=timezone.utc)
+    should_materialize(1, now)
+
+    assert should_materialize(2, now) is True
