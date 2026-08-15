@@ -13,7 +13,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.services.models import (
-    Exercise,
     UserRecord,
     WorkoutSession,
     WorkoutSessionExercise,
@@ -38,7 +37,23 @@ def _work_set_filters():
 
 
 def _finished_sessions_in(app_user_id: int, start: date, end: date):
-    """Отбор по ДАТЕ СТАРТА сессии — как в volume_repo.performed_for."""
+    """Отбор по ДАТЕ СТАРТА сессии — как в volume_repo.performed_for.
+
+    Часовой пояс: func.date() разворачивает started_at в TIMEZONE сервера
+    Postgres (UTC), а границы start/end приходят от вызывающего кода как
+    ЛОКАЛЬНЫЕ даты пользователя. Для пользователя, чей часовой пояс далёк
+    от UTC, тренировка в первый или последний локальный день периода может
+    попасть в дату соседнего периода по UTC-сдвигу.
+
+    Это НЕ решается здесь намеренно: соглашение унаследовано от
+    volume_repo.performed_for (см. её докстринг) и держит отчёт
+    согласованным с остальной кодовой базой, а не только внутри себя.
+    Аккуратный часовой-пояс-осведомлённый фикс потянул бы за собой общее
+    поведение далеко за пределы отчётов. Для ЖИВОГО окна объёма пересчёт
+    при следующем открытии экрана сгладил бы редкую пограничную ошибку, но
+    отчёт — иммутабельный снапшот: записанное один раз уже никогда не
+    пересчитается, поэтому расхождение стоит держать на виду, а не
+    молчаливым."""
     return (
         WorkoutSession.app_user_id == app_user_id,
         WorkoutSession.status == "finished",
@@ -149,6 +164,26 @@ async def compute_volume_metric(
 
     Разбивка переиспользует volume_repo.performed_for — окно там нужно только
     ради пары дат, поэтому конструируем синтетическое.
+
+    У `work_sets`/`tonnage_kg` и `by_muscle` НАМЕРЕННО разные фильтры
+    подходов — это две разные величины, а не одна и та же, посчитанная
+    дважды:
+
+    - `work_sets`/`tonnage_kg` — физические рабочие подходы: _work_set_filters()
+      (is_completed, not is_anomalous, set_type == "normal", weight > 0,
+      reps > 0) поверх _finished_sessions_in(). Дроп-сеты и подходы с
+      нулевым/пустым весом или повторами сюда не идут — это не полноценный
+      рабочий подход.
+    - `by_muscle` — стимул для мышцы: performed_for() с
+      require_finished_session=True. Условие завершённости сессии здесь то
+      же самое (иначе подходы ещё активной тренировки просачивались бы в
+      закрытый период мимо headline-цифр), но состав подходов шире —
+      set_type IN ('normal', 'drop') без проверки веса/повторов. Дроп-сет
+      физически не независимый рабочий подход (поэтому не считается в
+      work_sets), но нагрузку на мышцу он даёт и обязан идти в объём — так
+      же, как на живом экране объёма (volume_repo.performed_for). Делать
+      by_muscle зеркалом work_sets значило бы разойтись с продуктовой
+      моделью объёма ради фальшивой внутренней симметрии.
     """
     totals = (await session.execute(
         select(
@@ -168,7 +203,9 @@ async def compute_volume_metric(
         block_id=None, window_index=0, phase_number=None,
         start_date=start, end_date=end, is_deload=False,
     )
-    performed = await volume_repo.performed_for(session, app_user_id, window)
+    performed = await volume_repo.performed_for(
+        session, app_user_id, window, require_finished_session=True,
+    )
 
     by_muscle: dict[str, MuscleVolume] = {}
     for muscle, contribution in performed.items():

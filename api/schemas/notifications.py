@@ -38,8 +38,8 @@ class PushDeviceRegistration(BaseModel):
     expo_push_token: str = Field(min_length=20, max_length=255)
     platform: str = Field(pattern="^(android|ios)$")
     timezone_offset_minutes: int = Field(default=0, ge=-840, le=840)
-    notification_channel_id: str | None = None
-    quiet_channel_id: str | None = None
+    notification_channel_id: str | None = Field(default=None, max_length=64)
+    quiet_channel_id: str | None = Field(default=None, max_length=64)
 
 
 class PushPreferencesUpdate(BaseModel):

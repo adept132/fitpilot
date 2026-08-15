@@ -5,6 +5,7 @@ from api.services.reports.metrics import (
     EffortMetric,
     IntensityMetric,
     MuscleVolume,
+    RecordItem,
     ReportMetrics,
     TimeMetric,
     VolumeMetric,
@@ -165,6 +166,34 @@ def test_never_more_than_three_actions():
 
 def test_quiet_period_produces_no_actions():
     assert build_actions(_metrics(), EMPTY_CONTEXT) == []
+
+
+def test_no_records_fires_when_enough_sessions_without_records():
+    actions = build_actions(_metrics(sessions=4, records=[]), EMPTY_CONTEXT)
+
+    assert any(action.id == "no_records" for action in actions)
+    fired = next(action for action in actions if action.id == "no_records")
+    assert fired.route == "/progress"
+    assert "4" in fired.reason
+
+
+def test_no_records_does_not_fire_with_a_record_present():
+    """Хоть один рекорд в периоде — прогресс не встал, правило не должно
+    срабатывать, даже если тренировок достаточно."""
+    record = RecordItem(
+        exercise_id=1, exercise_name="Жим лёжа", record_type="max_weight",
+        value=100.0, achieved_on=date(2026, 8, 12),
+    )
+    actions = build_actions(_metrics(sessions=4, records=[record]), EMPTY_CONTEXT)
+
+    assert all(action.id != "no_records" for action in actions)
+
+
+def test_no_records_does_not_fire_with_too_few_sessions():
+    """Меньше 4 тренировок — отсутствие рекордов ожидаемо, не сигнал."""
+    actions = build_actions(_metrics(sessions=3, records=[]), EMPTY_CONTEXT)
+
+    assert all(action.id != "no_records" for action in actions)
 
 
 def test_action_is_hashable_dataclass():

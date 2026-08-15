@@ -426,7 +426,8 @@ async def prescribed_for(
 
 
 async def performed_for(
-    session: AsyncSession, app_user_id: int, window: Window
+    session: AsyncSession, app_user_id: int, window: Window,
+    *, require_finished_session: bool = False,
 ) -> dict[str, MuscleContribution]:
     """Фактический объём окна.
 
@@ -434,7 +435,26 @@ async def performed_for(
     правка старого подхода задним числом не имеет права залетать в текущее
     окно. Свободная тренировка в день отдыха тоже считается — объём сделан,
     и мышца об этом знает.
+
+    require_finished_session=True (используется только отчётами P1-06,
+    см. compute_volume_metric) дополнительно требует WorkoutSession.status
+    == "finished" и finished_at IS NOT NULL — иммутабельный снапшот не
+    имеет права зависеть от подходов ещё активной сессии. Живое окно
+    объёма (аргумент по умолчанию) сознательно считает и незавершённые
+    сессии — см. докстринг выше.
     """
+    conditions = [
+        WorkoutSession.app_user_id == app_user_id,
+        func.date(WorkoutSession.started_at) >= window.start_date,
+        func.date(WorkoutSession.started_at) <= window.end_date,
+        WorkoutSessionSet.is_completed.is_(True),
+        WorkoutSessionSet.set_type.in_(["normal", "drop"]),
+        WorkoutSessionSet.is_anomalous.is_(False),
+    ]
+    if require_finished_session:
+        conditions.append(WorkoutSession.status == "finished")
+        conditions.append(WorkoutSession.finished_at.is_not(None))
+
     rows = (await session.execute(
         select(
             Exercise.main_muscle_group,
@@ -451,14 +471,7 @@ async def performed_for(
             WorkoutSessionExercise.workout_session_id == WorkoutSession.id,
         )
         .join(Exercise, WorkoutSessionExercise.exercise_id == Exercise.id)
-        .where(
-            WorkoutSession.app_user_id == app_user_id,
-            func.date(WorkoutSession.started_at) >= window.start_date,
-            func.date(WorkoutSession.started_at) <= window.end_date,
-            WorkoutSessionSet.is_completed.is_(True),
-            WorkoutSessionSet.set_type.in_(["normal", "drop"]),
-            WorkoutSessionSet.is_anomalous.is_(False),
-        )
+        .where(*conditions)
         .group_by(Exercise.main_muscle_group, Exercise.secondary_muscle_groups)
     )).all()
 

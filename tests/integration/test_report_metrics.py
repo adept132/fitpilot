@@ -97,6 +97,45 @@ async def test_volume_excludes_anomalous_and_warmup_sets(db, test_user, seeded_h
 
 
 @pytest.mark.asyncio
+async def test_volume_by_muscle_excludes_active_session(db, test_user, seeded_history):
+    """Разбивка по мышцам обязана согласовываться с headline-цифрами: подходы
+    ещё не завершённой сессии не должны просачиваться ни в work_sets/tonnage,
+    ни в by_muscle. До фикса by_muscle шёл через volume_repo.performed_for()
+    без проверки завершённости сессии и ловил бы оба подхода активной
+    сессии (5 вместо 2) — эта дискриминация и есть предмет проверки."""
+    await _session_with_sets(
+        db, test_user.id,
+        started=datetime(2026, 8, 4, 10, tzinfo=timezone.utc),
+        exercise_id=seeded_history.id,
+        sets=[{"weight": 60.0, "reps": 8}, {"weight": 60.0, "reps": 8}],
+    )
+    active = WorkoutSession(
+        app_user_id=test_user.id, source="free", status="active",
+        started_at=datetime(2026, 8, 5, 10, tzinfo=timezone.utc), finished_at=None,
+    )
+    db.add(active)
+    await db.flush()
+    active_se = WorkoutSessionExercise(
+        workout_session_id=active.id, exercise_id=seeded_history.id, order_index=0,
+    )
+    db.add(active_se)
+    await db.flush()
+    for number in range(1, 4):
+        db.add(WorkoutSessionSet(
+            workout_session_exercise_id=active_se.id, set_number=number,
+            set_type="normal", weight=60.0, reps=8,
+            is_completed=True, is_anomalous=False,
+        ))
+    await db.commit()
+
+    metric = await compute_volume_metric(db, test_user.id, PERIOD_START, PERIOD_END, None)
+
+    assert metric.work_sets == 2
+    assert metric.tonnage_kg == pytest.approx(960.0)  # 2 * 60 * 8
+    assert metric.by_muscle["chest"].direct == pytest.approx(2.0)
+
+
+@pytest.mark.asyncio
 async def test_time_metric_uses_session_duration(db, test_user, seeded_history):
     await _session_with_sets(
         db, test_user.id,
