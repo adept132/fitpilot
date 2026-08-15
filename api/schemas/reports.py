@@ -11,6 +11,7 @@ class ReportActionRead(BaseModel):
     title: str
     reason: str
     route: str
+    muscle: str | None = None
 
 
 class ReportHeadlineRead(BaseModel):

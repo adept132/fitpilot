@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from api.services.reports.metrics import ReportMetrics
 
 # Версия набора. Пишется в снапшот; задним числом ничего не переписывает.
-RULES_VERSION = 1
+RULES_VERSION = 2
 
 # Больше трёх советов человек не выполняет — он их пролистывает.
 MAX_ACTIONS = 3
@@ -35,6 +35,10 @@ class Action:
     title: str
     reason: str
     route: str
+    # Системный ключ мышцы (то же значение, что и в metrics.volume.by_muscle).
+    # Отображаемое имя строит клиент — см. api/services/volume_calculator.py
+    # про то, почему сервер не переводит его сам.
+    muscle: str | None = None
 
 
 @dataclass(frozen=True)
@@ -89,9 +93,10 @@ def _volume_over_mrv(metrics: ReportMetrics, context: RuleContext) -> Action | N
     muscle, row = max(over, key=lambda item: item[1].direct + item[1].indirect)
     return Action(
         id="volume_over_mrv",
-        title=f"Снизить объём: {muscle}",
+        title="Снизить объём",
         reason=f"{row.direct + row.indirect:.0f} подходов при потолке {row.mrv}",
         route="/progress",
+        muscle=muscle,
     )
 
 
@@ -109,9 +114,10 @@ def _volume_below_mev(metrics: ReportMetrics, context: RuleContext) -> Action | 
     muscle, row = min(below, key=lambda item: item[1].direct + item[1].indirect)
     return Action(
         id="volume_below_mev",
-        title=f"Добавить объём: {muscle}",
+        title="Добавить объём",
         reason=f"{row.direct + row.indirect:.0f} подходов при минимуме {row.mev}",
         route="/progress",
+        muscle=muscle,
     )
 
 

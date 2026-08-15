@@ -20,7 +20,7 @@ from api.services.reports.metrics import ReportMetrics, compute_metrics, has_act
 from api.services.reports.periods import PERIOD_TYPES, closed_periods
 from api.services.reports.rules import RULES_VERSION, Action, RuleContext, build_actions
 
-REPORT_SHAPE_VERSION = 1
+REPORT_SHAPE_VERSION = 2
 
 PERIOD_TITLE = {"week": "неделю", "month": "месяц", "year": "год"}
 

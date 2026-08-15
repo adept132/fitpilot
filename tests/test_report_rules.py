@@ -102,6 +102,16 @@ def test_muscle_below_mev_and_above_mrv_both_reported():
     # Перебор объёма опаснее недобора и обязан идти выше.
     assert ids.index("volume_over_mrv") < ids.index("volume_below_mev")
 
+    # Заголовок — только действие, без сырого ключа мышцы; ключ едет
+    # отдельным полем, отображаемое имя строит клиент.
+    over_action = next(action for action in actions if action.id == "volume_over_mrv")
+    assert over_action.title == "Снизить объём"
+    assert over_action.muscle == "back"
+
+    below_action = next(action for action in actions if action.id == "volume_below_mev")
+    assert below_action.title == "Добавить объём"
+    assert below_action.muscle == "chest"
+
 
 def test_high_rir_suggests_raising_weights():
     actions = build_actions(_metrics(avg_rir=3.5), EMPTY_CONTEXT)
