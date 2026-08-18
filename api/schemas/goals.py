@@ -24,6 +24,9 @@ class GoalUpdate(BaseModel):
     target_reps: Optional[int] = Field(default=None, ge=1, le=100)
     deadline: Optional[date] = None
     is_completed: Optional[bool] = None
+    # P0-12: назначение ведущей цели. Снятие флага с прежней ведущей
+    # происходит в той же транзакции (api/routers/goals.py).
+    is_primary: Optional[bool] = None
 
 
 class GoalStatus(BaseModel):
@@ -50,4 +53,5 @@ class GoalResponse(BaseModel):
     metric_key: Optional[str] = None
     deadline: Optional[str] = None
     is_completed: bool
+    is_primary: bool = False
     status: GoalStatus

@@ -612,6 +612,11 @@ class UserGoal(Base):
     metric_key: Mapped[Optional[str]] = mapped_column(String(30))
     deadline: Mapped[Optional[date_type]] = mapped_column(Date)
     is_completed: Mapped[bool] = mapped_column(default=False, server_default='false')
+    # P0-12: ведущая цель — та, которую обслуживает автопилот. Одна на
+    # пользователя; уникальность держит частичный индекс
+    # uq_user_goals_primary (app/database.py, _SYNC_INDEXES): init_db не
+    # создаёт ограничений для ALTER-колонок.
+    is_primary: Mapped[bool] = mapped_column(default=False, server_default='false')
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     app_user: Mapped["AppUser"] = relationship('AppUser', back_populates='goals')

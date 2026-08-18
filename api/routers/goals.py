@@ -3,7 +3,7 @@
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -47,6 +47,7 @@ def _to_response(goal: UserGoal, exercise_name: Optional[str], status_obj: GoalS
         metric_key=goal.metric_key,
         deadline=goal.deadline.isoformat() if goal.deadline else None,
         is_completed=goal.is_completed,
+        is_primary=goal.is_primary,
         status=status_obj,
     )
 
@@ -135,6 +136,31 @@ async def update_goal(
         goal.deadline = payload.deadline
     if payload.is_completed is not None:
         goal.is_completed = payload.is_completed
+    if payload.is_primary is not None:
+        if payload.is_primary:
+            if goal.goal_type != GOAL_STRENGTH:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "Ведущей может быть только силовая цель: план влияет на e1RM лифта, "
+                    "а не на вес тела или обхваты",
+                )
+            if goal.deadline is None:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "У ведущей цели должен быть срок: без него автопилоту нечему не успевать",
+                )
+            # Снимаем флаг с прежней ведущей в этой же транзакции — иначе
+            # частичный уникальный индекс отвергнет вставку второй.
+            await db.execute(
+                sa_update(UserGoal)
+                .where(
+                    UserGoal.app_user_id == current_user.id,
+                    UserGoal.is_primary == True,  # noqa: E712
+                    UserGoal.id != goal.id,
+                )
+                .values(is_primary=False)
+            )
+        goal.is_primary = payload.is_primary
 
     await db.commit()
     await db.refresh(goal)
