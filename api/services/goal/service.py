@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
+from sqlalchemy import or_ as sa_or
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -765,3 +766,132 @@ async def _apply_structural(
     await session.flush()
 
     return True, skipped
+
+
+async def undo_goal_decision(
+    session: AsyncSession, app_user_id: int, proposal: PeriodizationProposal
+) -> dict:
+    """Вернуть то, что автопилот сделал, — и только то.
+
+    Ворота: ни один затронутый день не сменил статус и не получил
+    привязанной сессии. После появления факта откат означал бы
+    переписывание истории — вместо него честнее новое предложение.
+    """
+    snapshot = (proposal.payload or {}).get("applied_snapshot")
+    if not snapshot:
+        return {"status": "conflict", "proposal_id": proposal.id,
+                "reason": "Нечего отменять: предложение не применялось"}
+
+    exercise_id = (proposal.payload or {}).get("exercise_id")
+    dates = [
+        date.fromisoformat(d["target_date"]) for d in (snapshot.get("days") or [])
+    ]
+    if dates:
+        blocked = (await session.execute(
+            select(UserCalendarDay.id).where(
+                UserCalendarDay.app_user_id == app_user_id,
+                UserCalendarDay.target_date.in_(dates),
+                sa_or(
+                    UserCalendarDay.status != "planned",
+                    UserCalendarDay.actual_workout_session_id.isnot(None),
+                ),
+            )
+        )).scalars().first()
+        if blocked is not None:
+            return {
+                "status": "conflict", "proposal_id": proposal.id,
+                "reason": "По изменённым дням уже есть факт — откат переписал бы историю",
+            }
+
+    kept: list[str] = []
+
+    # 1. Подходы: адресно по proposal_id — чужие правки (volume_review)
+    #    остаются на месте.
+    days = (await session.execute(
+        select(UserCalendarDay).where(
+            UserCalendarDay.app_user_id == app_user_id,
+            UserCalendarDay.volume_adjustments.isnot(None),
+        )
+    )).scalars().all()
+    for day in days:
+        remaining = [
+            a for a in (day.volume_adjustments or [])
+            if a.get("proposal_id") != proposal.id
+        ]
+        if len(remaining) != len(day.volume_adjustments or []):
+            day.volume_adjustments = remaining
+            flag_modified(day, "volume_adjustments")
+
+    # 2. Преференция.
+    if exercise_id is not None:
+        pref = (await session.execute(
+            select(UserExercisePreference).where(
+                UserExercisePreference.app_user_id == app_user_id,
+                UserExercisePreference.exercise_id == exercise_id,
+            )
+        )).scalar_one_or_none()
+        if pref is not None:
+            if pref.preference != "favorite":
+                kept.append("preference")       # пользователь поменял сам
+            elif snapshot.get("preference") is None:
+                await session.delete(pref)
+            else:
+                pref.preference = snapshot["preference"]
+
+        # 3. Диапазон повторов.
+        override = (await session.execute(
+            select(UserExerciseRepOverride).where(
+                UserExerciseRepOverride.app_user_id == app_user_id,
+                UserExerciseRepOverride.exercise_id == exercise_id,
+            )
+        )).scalar_one_or_none()
+        previous = snapshot.get("rep_override")
+        if override is not None:
+            if previous is None:
+                await session.delete(override)
+            else:
+                override.rep_min, override.rep_max = previous["rep_min"], previous["rep_max"]
+
+    # 4. Схема прогрессии.
+    profile = (await session.execute(
+        select(AppUserProfile).where(AppUserProfile.app_user_id == app_user_id)
+    )).scalar_one_or_none()
+    if profile is not None and exercise_id is not None:
+        settings = dict(profile.settings or {})
+        progression = dict(settings.get("progression") or {})
+        overrides = dict(progression.get("overrides") or {})
+        if str(exercise_id) in overrides:
+            if snapshot.get("scheme") is None:
+                overrides.pop(str(exercise_id), None)
+            else:
+                overrides[str(exercise_id)] = snapshot["scheme"]
+            progression["overrides"] = overrides
+            settings["progression"] = progression
+            profile.settings = settings
+            flag_modified(profile, "settings")
+
+    # 5. Дни календаря — вернуть снятые координаты.
+    for row in snapshot.get("days") or []:
+        target = date.fromisoformat(row["target_date"])
+        day = (await session.execute(
+            select(UserCalendarDay).where(
+                UserCalendarDay.app_user_id == app_user_id,
+                UserCalendarDay.target_date == target,
+            )
+        )).scalars().first()
+        if day is None:
+            day = UserCalendarDay(app_user_id=app_user_id, target_date=target)
+            session.add(day)
+        day.plan_id = row["plan_id"]
+        day.day_tag = row["day_tag"]
+        day.micro_tag = row["micro_tag"]
+        day.meso_tag = row["meso_tag"]
+        day.mesocycle_phase_number = row["mesocycle_phase_number"]
+        day.is_rest_day = row["is_rest_day"]
+        day.block_id = proposal.block_id
+
+    proposal.status = periodization_params.STATUS_UNDONE
+    proposal.decided_action = periodization_params.ACTION_UNDO_GOAL
+    proposal.decided_at = datetime.now(timezone.utc)
+    await session.flush()
+    return {"status": "undone", "proposal_id": proposal.id, "kept": kept}

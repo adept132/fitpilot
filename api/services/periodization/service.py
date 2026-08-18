@@ -809,18 +809,54 @@ async def apply_decision(
         return {"status": "not_found"}
 
     if proposal.status != params.STATUS_PENDING:
-        if client_uuid and proposal.client_uuid == client_uuid:
+        # P0-12: отмена по определению приходит к УЖЕ применённому
+        # предложению — единственное действие, которому статус accepted не
+        # помеха.
+        if not (
+            proposal.kind == params.KIND_GOAL_PLAN
+            and action == params.ACTION_UNDO_GOAL
+            and proposal.status == params.STATUS_ACCEPTED
+        ):
+            if client_uuid and proposal.client_uuid == client_uuid:
+                return {
+                    "status": "already_applied",
+                    "proposal_id": proposal.id,
+                    "block_id": proposal.block_id,
+                }
             return {
-                "status": "already_applied",
+                "status": "conflict",
                 "proposal_id": proposal.id,
-                "block_id": proposal.block_id,
+                "current_status": proposal.status,
+                "decided_action": proposal.decided_action,
             }
-        return {
-            "status": "conflict",
-            "proposal_id": proposal.id,
-            "current_status": proposal.status,
-            "decided_action": proposal.decided_action,
-        }
+
+    if proposal.kind == params.KIND_GOAL_PLAN:
+        # P0-12: автопилот цели — третий вид решения в той же таблице.
+        # Стоит до загрузки TrainingBlock и до проверки
+        # _BLOCK_MUTATING_ACTIONS по той же причине, что и volume_review:
+        # блок здесь координата, а не объект правки.
+        from api.services.goal.service import apply_goal_decision, undo_goal_decision
+
+        if action == params.ACTION_UNDO_GOAL:
+            outcome = await undo_goal_decision(session, app_user_id, proposal)
+            await session.commit()
+            return outcome
+
+        if action == params.ACTION_APPLY_GOAL:
+            outcome = await apply_goal_decision(
+                session, app_user_id, proposal, action, options or {}
+            )
+        else:
+            outcome = {"status": "declined", "proposal_id": proposal.id, "applied": []}
+
+        proposal.status = (
+            params.STATUS_ACCEPTED if outcome["applied"] else params.STATUS_DECLINED
+        )
+        proposal.decided_action = action
+        proposal.client_uuid = client_uuid
+        proposal.decided_at = datetime.now(timezone.utc)
+        await session.commit()
+        return outcome
 
     if proposal.kind == params.KIND_VOLUME_REVIEW:
         # P0-09, Задача 11: обзор объёма — свой вид решения в той же таблице
