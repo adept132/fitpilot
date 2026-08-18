@@ -442,6 +442,17 @@ async def apply_goal_decision(
                 applied.append(lever["index"])
 
     if applied:
+        # ИСПРАВЛЕНО (ревью Задачи 9, следствие Critical 1): читаем
+        # proposal.payload ЗАНОВО, а не берём `payload`, захваченный в
+        # начале функции (строка выше цикла рычагов) — если среди applied
+        # был структурный рычаг, _apply_structural уже записал и
+        # закоммитил(-flush'ил) applied_snapshot в САМ proposal.payload
+        # (см. её докстринг). Запись поверх устаревшего `payload` из начала
+        # функции откатила бы это до состояния "как было до цикла" на
+        # ключах, которых тот словарь ещё не видел. `snapshot` — тот же
+        # объект, что и внутри _apply_structural, поэтому переприсвоение
+        # applied_snapshot здесь идемпотентно, а не второй, отдельный факт.
+        payload = dict(proposal.payload or {})
         payload["applied_snapshot"] = snapshot
         proposal.payload = payload
         flag_modified(proposal, "payload")
@@ -658,24 +669,36 @@ async def _apply_structural(
     восстановить "прежний" plan_id для отката можно прямо из
     snapshot["days"][i]["plan_id"], который уже сохранён ниже.
 
-    ОПАСНОСТЬ ДЛЯ ВЫЗЫВАЮЩЕГО (Задача 10): apply_goal_decision документирует
-    себя как "не коммитит сессию", но эта функция идёт через
-    _generate_future_calendar -> SchedulingEngine.generate_block_days, а та
-    КОММИТИТ САМА (см. её докстринг и последнюю строку тела). Это значит,
-    что при структурном рычаге промежуточный commit происходит ДО того, как
-    apply_goal_decision допишет snapshot в proposal.payload и ДО того, как
-    вызывающая сторона проставит proposal.status/decided_action и сделает
-    свой финальный commit() — та же ловушка, что periodization.service.
-    apply_decision уже разбирает у себя (см. её комментарий "Critical 3" у
-    вызова _perform): там её закрывают, проставляя решение по предложению
-    ДО вызова кода, который коммитит сам. Тому же самому вызывающему здесь
-    придётся сделать так же: проставить proposal.status/decided_action/
-    client_uuid/decided_at ДО apply_goal_decision, если среди принятых
-    рычагов может быть структурный — иначе обрыв процесса между
-    внутренним commit'ом регенерации и финальным commit'ом вызывающего
-    оставит календарь уже перегенерированным, а предложение — всё ещё
-    pending, и повтор запроса войдёт в _apply_structural второй раз по
-    уже перегенерированному календарю.
+    ИСПРАВЛЕНО (ревью Задачи 9, Critical 1 — снимок мог потеряться
+    безвозвратно): эта функция идёт через _generate_future_calendar ->
+    SchedulingEngine.generate_block_days, а та КОММИТИТ СЕССИЮ САМА (см. её
+    докстринг и последнюю строку тела) — это не в нашей власти и не
+    предмет этой задачи. Раньше snapshot оставался только в локальном
+    словаре до конца ВСЕГО цикла рычагов в apply_goal_decision, и попадал
+    в proposal.payload только её финальным flush() — уже ПОСЛЕ того как
+    wipe+регенерация были необратимо закоммичены тем внутренним commit'ом.
+    Обрыв процесса в этом окне удалял старый календарь безвозвратно, не
+    оставляя от него ни строки в БД, ни снимка — Задаче 10 нечего было бы
+    восстанавливать, а status предложения снаружи всё ещё выглядел бы
+    pending, никак не сигналя о повреждении.
+    Чиним, переставляя запись: снимок (включая маркер structural_applied)
+    пишется в proposal.payload и flush()-ится ЗДЕСЬ, ДО вызова
+    _wipe_future_calendar/_generate_future_calendar. Поскольку flush() не
+    открывает отдельную транзакцию, а лишь готовит УЖЕ ОТКРЫТУЮ, наш снимок
+    едет в ТОЙ ЖЕ транзакции, что и сам wipe — когда generate_block_days
+    вызовет commit(), закоммитятся оба разом. Если процесс оборвётся ДО
+    этого внутреннего commit'а — не закоммитится ничего из этой транзакции
+    вовсе (ни снимок, ни удаление), и повтор начнёт с нетронутых дней.
+    Если оборвётся ПОСЛЕ — календарь и снимок, описывающий его прежнее
+    состояние, окажутся в БД вместе, консистентно.
+    Отдельно: вызывающему (Задача 10) по-прежнему нужно проставлять
+    proposal.status/decided_action ДО apply_goal_decision, если среди
+    принятых рычагов может быть структурный, — то же самое поле promise
+    "не коммитит сессию сама" здесь не держится (тот же разбор, что и
+    periodization.service.apply_decision делает у себя, "Critical 3" у
+    вызова _perform) — это НЕ то же самое, что риск потери snapshot,
+    который эта правка закрывает: снимок теперь переживёт обрыв, а
+    proposal.status/decided_action вне payload — нет.
     """
     if snapshot.get("structural_applied"):
         return False, 0
@@ -726,9 +749,19 @@ async def _apply_structural(
         if d.status != "planned" or bool(d.volume_adjustments)
     )
 
+    # Маркер выставляем ДО разрушения календаря — см. разбор в докстринге
+    # выше: он обязан уехать в БД в ТОЙ ЖЕ транзакции, что и сам wipe, иначе
+    # повтор после обрыва посреди регенерации увидит "ещё не применялось" и
+    # пересчитает snapshot["days"] уже по НОВЫМ, только что созданным дням.
+    snapshot["structural_applied"] = True
+    current_payload = dict(proposal.payload or {})
+    current_payload["applied_snapshot"] = snapshot
+    proposal.payload = current_payload
+    flag_modified(proposal, "payload")
+    await session.flush()
+
     await _wipe_future_calendar(session, app_user_id, block, first_future)
     await _generate_future_calendar(session, app_user_id, block, first_future)
     await session.flush()
 
-    snapshot["structural_applied"] = True
     return True, skipped
