@@ -389,8 +389,27 @@ async def apply_goal_decision(
     levers = payload.get("levers") or []
     exercise_id = payload.get("exercise_id")
 
-    snapshot: dict = {"preference": None, "rep_override": None, "scheme": None,
-                      "days": [], "created_plan_ids": []}
+    # ИСПРАВЛЕНО (ревью Задачи 8, Important): снимок обязан фиксировать
+    # состояние ДО того, как это предложение хоть раз что-то применило, и
+    # не должен переписываться повторно. Повтор apply_goal_decision на ещё
+    # pending предложении (офлайн-очередь мобильного клиента, двойной тап)
+    # раньше строил snapshot заново на каждый вызов — вторая попытка читала
+    # текущее состояние носителя, которое уже несло правку ПЕРВОЙ попытки,
+    # и записывала её как «то, что было до» (ревью воспроизвело буквально:
+    # после первого вызова snapshot держал {'preference': None}, после
+    # повтора — {'preference': 'favorite'}; последующий откат Задачи 10
+    # тогда навсегда оставлял лифт избранным, как будто это выбрал сам
+    # пользователь). Чиним начиная не с пустого «с нуля» на каждый вызов, а
+    # с уже сохранённого снимка, если он есть.
+    #
+    # Пустой dict, а не заполненный None-ами: None — валидное записанное
+    # значение («носителя не было»), и хелперам ниже нужно различать «ключ
+    # ещё не записан» от «ключ записан как None» — на заполненном словаре
+    # оба случая неотличимы, и проверка «уже записано?» ничего не защищает.
+    existing_snapshot = payload.get("applied_snapshot")
+    snapshot: dict = dict(existing_snapshot) if isinstance(existing_snapshot, dict) else {}
+    snapshot.setdefault("days", [])
+    snapshot.setdefault("created_plan_ids", [])
     applied: list[int] = []
     skipped_days = 0
 
@@ -443,7 +462,11 @@ async def _apply_favorite(
             UserExercisePreference.exercise_id == exercise_id,
         )
     )).scalar_one_or_none()
-    snapshot["preference"] = existing.preference if existing else None
+    # Пишем ТОЛЬКО если ключ ещё не записан (см. докстринг apply_goal_
+    # decision про повтор) — на повторном проходе `existing` уже несёт
+    # правку первого вызова, и её нельзя принять за состояние «до».
+    if "preference" not in snapshot:
+        snapshot["preference"] = existing.preference if existing else None
     if existing is None:
         # exercise_name обязателен в модели (см. api/routers/exercises.py,
         # set_exercise_preference) — тянем его из Exercise; если упражнения
@@ -479,9 +502,12 @@ async def _apply_rep_range(
             UserExerciseRepOverride.exercise_id == exercise_id,
         )
     )).scalar_one_or_none()
-    snapshot["rep_override"] = (
-        {"rep_min": existing.rep_min, "rep_max": existing.rep_max} if existing else None
-    )
+    # Пишем ТОЛЬКО если ключ ещё не записан — та же причина, что и в
+    # _apply_favorite (см. её комментарий и докстринг apply_goal_decision).
+    if "rep_override" not in snapshot:
+        snapshot["rep_override"] = (
+            {"rep_min": existing.rep_min, "rep_max": existing.rep_max} if existing else None
+        )
     if existing is None:
         session.add(UserExerciseRepOverride(
             app_user_id=app_user_id, exercise_id=exercise_id,
@@ -512,7 +538,10 @@ async def _apply_scheme(
     settings = dict(profile.settings or {})
     progression = dict(settings.get("progression") or {})
     overrides = dict(progression.get("overrides") or {})
-    snapshot["scheme"] = overrides.get(str(exercise_id))
+    # Пишем ТОЛЬКО если ключ ещё не записан — та же причина, что и в
+    # _apply_favorite (см. её комментарий и докстринг apply_goal_decision).
+    if "scheme" not in snapshot:
+        snapshot["scheme"] = overrides.get(str(exercise_id))
     overrides[str(exercise_id)] = to_scheme
     progression["overrides"] = overrides
     settings["progression"] = progression

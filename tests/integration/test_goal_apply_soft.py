@@ -348,6 +348,100 @@ async def test_sets_lever_skips_non_planned_day_and_counts_it(
     assert not (missed_day.volume_adjustments or [])
 
 
+async def test_replay_on_pending_proposal_keeps_original_snapshot_no_prior_carrier(
+    test_user, fresh_exercise, active_block
+):
+    """Повтор apply_goal_decision на ещё pending предложении (офлайн-очередь,
+    двойной тап) не должен переписывать snapshot — ветка «носителя не было».
+
+    До исправления (ревью Задачи 8, Important) второй вызов читал уже
+    применённое избранное первого вызова и записывал 'favorite' как будто
+    это и было исходное состояние — см. докстринг apply_goal_decision."""
+    pid = await _proposal(test_user.id, active_block.id, fresh_exercise.id)
+
+    async with SessionLocal() as db:
+        proposal = await db.get(PeriodizationProposal, pid)
+        await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0, 1]},
+        )
+        await db.commit()
+
+    async with SessionLocal() as db:
+        row = await db.get(PeriodizationProposal, pid)
+    snapshot_after_first = row.payload["applied_snapshot"]
+    assert snapshot_after_first["preference"] is None
+    assert snapshot_after_first["rep_override"] is None
+
+    # Предложение остаётся pending (Задача 10 её ещё не подключила) — повтор
+    # того же decision имитирует ретрай из офлайн-очереди / двойной тап.
+    async with SessionLocal() as db:
+        proposal = await db.get(PeriodizationProposal, pid)
+        result_2 = await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0, 1]},
+        )
+        await db.commit()
+    assert result_2["applied"] == [0, 1]
+
+    async with SessionLocal() as db:
+        row = await db.get(PeriodizationProposal, pid)
+    snapshot_after_replay = row.payload["applied_snapshot"]
+    assert snapshot_after_replay["preference"] is None      # НЕ 'favorite'
+    assert snapshot_after_replay["rep_override"] is None    # НЕ перезаписан
+
+
+async def test_replay_on_pending_proposal_keeps_original_snapshot_with_prior_carrier(
+    test_user, fresh_exercise, active_block
+):
+    """Та же защита от повтора, но для ветки «носитель уже существовал» —
+    снимок обязан удержать ИСХОДНОЕ значение, а не то, что записал первый
+    вызов."""
+    async with SessionLocal() as db:
+        db.add(UserExercisePreference(
+            app_user_id=test_user.id, exercise_id=fresh_exercise.id,
+            exercise_name=fresh_exercise.name, preference="disliked",
+        ))
+        db.add(UserExerciseRepOverride(
+            app_user_id=test_user.id, exercise_id=fresh_exercise.id,
+            rep_min=6, rep_max=10,
+        ))
+        await db.commit()
+
+    pid = await _proposal(test_user.id, active_block.id, fresh_exercise.id)
+
+    async with SessionLocal() as db:
+        proposal = await db.get(PeriodizationProposal, pid)
+        await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0, 1]},
+        )
+        await db.commit()
+
+    async with SessionLocal() as db:
+        row = await db.get(PeriodizationProposal, pid)
+    snapshot_after_first = row.payload["applied_snapshot"]
+    assert snapshot_after_first["preference"] == "disliked"
+    assert snapshot_after_first["rep_override"] == {"rep_min": 6, "rep_max": 10}
+
+    async with SessionLocal() as db:
+        proposal = await db.get(PeriodizationProposal, pid)
+        result_2 = await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0, 1]},
+        )
+        await db.commit()
+    assert result_2["applied"] == [0, 1]
+
+    async with SessionLocal() as db:
+        row = await db.get(PeriodizationProposal, pid)
+    snapshot_after_replay = row.payload["applied_snapshot"]
+    # Всё ещё исходное 'disliked' / (6, 10) — НЕ 'favorite' / (2, 5), которые
+    # первый вызов записал в носители.
+    assert snapshot_after_replay["preference"] == "disliked"
+    assert snapshot_after_replay["rep_override"] == {"rep_min": 6, "rep_max": 10}
+
+
 async def test_sets_lever_applied_twice_does_not_double(
     test_user, fresh_exercise, active_block
 ):
