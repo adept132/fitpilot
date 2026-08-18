@@ -92,3 +92,33 @@ def test_both_thresholds_must_fire():
 def test_levers_are_indexed_from_zero():
     levers, _ = decide.decide(_inp(rates=Rates(required=1.9, plan=0.4, ceiling=2.0)))
     assert [l.index for l in levers] == list(range(len(levers)))
+
+
+def test_ladder_exhausted_but_short_is_partial_catchup():
+    """Разрыв огромный (gap=1.5), сумма долей применимых ступеней ~1.22:
+    лестница отрабатывает целиком и всё равно не закрывает разрыв — это
+    не то же самое, что "рычаги закрывают гап" (REASON_PACE_BEHIND)."""
+    levers, reason = decide.decide(
+        _inp(rates=Rates(required=1.9, plan=0.4, ceiling=2.0))
+    )
+    assert levers != []
+    assert reason == params.REASON_PARTIAL_CATCHUP
+
+
+def test_no_applicable_lever_reports_no_lever_left():
+    """Объёма нет, схема уже оптимальная (не тяжёлый компаунд), диапазон
+    повторов уже максимален, горизонт короткий для структурных ступеней —
+    ни одна ступень не применима, лифт в плане уже есть."""
+    levers, reason = decide.decide(
+        _inp(
+            rates=Rates(required=1.9, plan=0.4, ceiling=2.0),
+            headroom_sets=0,
+            is_heavy_compound=False,
+            scheme="fixed_increment",
+            target_reps=12,
+            rep_max=12,
+            microcycles_left=1,
+        )
+    )
+    assert levers == []
+    assert reason == params.REASON_NO_LEVER_LEFT

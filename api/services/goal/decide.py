@@ -70,13 +70,15 @@ def decide(inp: DecisionInput) -> tuple[list[Lever], str]:
         ))
 
     if not levers:
-        return [], params.REASON_VOLUME_AT_CAP
+        return [], params.REASON_NO_LEVER_LEFT
 
-    reason = (
-        params.REASON_LIFT_MISSING
-        if levers[0].kind == params.LEVER_ENSURE_PRESENT
-        else params.REASON_PACE_BEHIND
-    )
+    # Причина верхнего уровня берётся из первого рычага, а не выводится
+    # заново — иначе два места легко разъедутся (см. ревью).
+    reason = levers[0].reason_code
+    if reason == params.REASON_PACE_BEHIND and covered < gap:
+        # Лестница кончилась, а рычаги всё равно не закрывают разрыв целиком —
+        # это честно другое состояние, чем "рычаги закрывают гап".
+        reason = params.REASON_PARTIAL_CATCHUP
     return levers, reason
 
 
@@ -119,7 +121,9 @@ def _effect_days(inp: DecisionInput, share: float) -> int:
 
 def _detail(kind: str, inp: DecisionInput) -> dict:
     if kind == params.LEVER_SCHEME:
-        return {"to_scheme": "percent_1rm" if inp.is_heavy_compound else "fixed_increment"}
+        # _applicable допускает LEVER_SCHEME только при is_heavy_compound —
+        # второй исход недостижим, поэтому веток здесь одна.
+        return {"to_scheme": "percent_1rm"}
     if kind == params.LEVER_REP_RANGE:
         return {"rep_min": max(1, inp.target_reps - 1), "rep_max": inp.target_reps + 2}
     if kind == params.LEVER_SETS:

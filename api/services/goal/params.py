@@ -51,12 +51,19 @@ REASON_LIFT_MISSING = "lift_missing"
 REASON_PACE_BEHIND = "pace_behind"
 REASON_ABOVE_CEILING = "above_ceiling"
 REASON_TREND_DOWN = "trend_down"
-REASON_VOLUME_AT_CAP = "volume_at_cap"
+# Лестница дошла до конца, но найденные рычаги всё равно не закрывают разрыв
+# целиком — честно отличаем это от REASON_PACE_BEHIND, где рычаги гап закрывают.
+REASON_PARTIAL_CATCHUP = "partial_catchup"
+# Ни одна ступень лестницы не применима (нет объёма, схема уже лучшая или не
+# тяжёлый компаунд, диапазон повторов уже максимален, горизонт слишком
+# короткий для структурных ступеней) — рычагов нет вовсе, не только текста.
+REASON_NO_LEVER_LEFT = "no_lever_left"
 
 REASON_TEXTS: dict[str, str] = {
     REASON_LIFT_MISSING: "Целевого упражнения нет в ближайших неделях плана.",
     REASON_PACE_BEHIND: "В текущем темпе к сроку не успеваем.",
     REASON_ABOVE_CEILING: "Нужный темп выше того, что даёт тренированность.",
     REASON_TREND_DOWN: "Результат снижается — сейчас вопрос не в скорости.",
-    REASON_VOLUME_AT_CAP: "Объём уже на потолке: ускоряться можно только качеством.",
+    REASON_PARTIAL_CATCHUP: "Даже все правки не закрывают разрыв — стоит пересмотреть срок или целевой вес.",
+    REASON_NO_LEVER_LEFT: "Сейчас нет доступного рычага ускорения — стоит пересмотреть срок или целевой вес.",
 }
