@@ -85,6 +85,11 @@ async def _retire_finished_primary_goal(
             PeriodizationProposal.app_user_id == app_user_id,
             PeriodizationProposal.kind == periodization_params.KIND_GOAL_PLAN,
             PeriodizationProposal.status == periodization_params.STATUS_PENDING,
+            # ИСПРАВЛЕНО (ревью Задачи 6, Minor 3): гасим только предложения
+            # ИМЕННО этой цели, а не все goal_plan-предложения пользователя —
+            # у пользователя может быть больше одной цели за её жизнь (смена
+            # ведущей), и путь создания уже скопирован по goal_id (см. ниже).
+            PeriodizationProposal.payload["goal_id"].astext == str(goal.id),
         )
         .values(status=periodization_params.STATUS_EXPIRED)
     )
@@ -241,6 +246,29 @@ async def refresh_goal_proposals(
         target_reps=goal.target_reps or 1,
     ))
     if not levers:
+        # ИСПРАВЛЕНО (ревью Задачи 6, Important 2): это УДАВШАЯСЯ переоценка
+        # (evaluate() что-то посчитал, активный блок нашёлся) с содержательным
+        # выводом «сейчас предлагать нечего» — пользователь мог нагнать темп,
+        # тренд уйти в минус или требуемый темп выйти выше потолка. Прежнее
+        # pending-предложение по ЭТОЙ цели после такого вывода несёт устаревшие
+        # цифры и совет, который уже неверен (ревью воспроизвело это буквально:
+        # предложение по "лифта нет в плане" осталось висеть после того, как
+        # ситуация стала ABOVE_CEILING) — гасим его здесь же.
+        # Важна граница: этот блок недостижим, если evaluate() вернул None или
+        # активного блока нет (оба return выше) — временная невозможность
+        # посчитать НЕ повод гасить предложение, которое пользователь как раз
+        # мог собираться применить.
+        await session.execute(
+            sa_update(PeriodizationProposal)
+            .where(
+                PeriodizationProposal.app_user_id == app_user_id,
+                PeriodizationProposal.kind == periodization_params.KIND_GOAL_PLAN,
+                PeriodizationProposal.status == periodization_params.STATUS_PENDING,
+                PeriodizationProposal.payload["goal_id"].astext == str(goal.id),
+            )
+            .values(status=periodization_params.STATUS_EXPIRED)
+        )
+        await session.commit()
         return None
 
     existing = (await session.execute(
