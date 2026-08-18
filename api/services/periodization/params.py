@@ -22,6 +22,12 @@ KIND_VOLUME_REVIEW = "volume_review"
 # Действия по обзору объёма.
 ACTION_APPLY_VOLUME = "apply_volume"
 
+# P0-12: предложение автопилота цели. Третий вид в той же таблице —
+# рельса решений одна на проект (см. спеку P0-12, решение 9).
+KIND_GOAL_PLAN = "goal_plan"
+ACTION_APPLY_GOAL = "apply_goal"
+ACTION_UNDO_GOAL = "undo_goal"
+
 # --- Варианты структурной правки ---
 # Порядок значим: первый вариант подсвечен в интерфейсе по умолчанию.
 # Сдвиг диапазона обратим и сохраняет историю упражнения, замена уводит
@@ -38,6 +44,10 @@ STATUS_PENDING = "pending"
 STATUS_ACCEPTED = "accepted"
 STATUS_DECLINED = "declined"
 STATUS_EXPIRED = "expired"
+# Применённое и затем откатанное предложение. Отдельный статус, а не
+# declined: пользователь СОГЛАСИЛСЯ, а потом передумал, и история решений
+# обязана эти два случая различать.
+STATUS_UNDONE = "undone"
 
 # --- Причины закрытия блока ---
 CLOSE_COMPLETED = "completed"
