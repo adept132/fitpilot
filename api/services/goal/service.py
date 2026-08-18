@@ -433,8 +433,13 @@ async def apply_goal_decision(
             skipped_days += skipped
             if done:
                 applied.append(lever["index"])
-        # LEVER_LIFT_FREQUENCY / LEVER_STRUCTURAL: структурные рычаги,
-        # применяет Задача 9 — здесь индекс молча пропускается.
+        elif kind in params.STRUCTURAL_LEVERS:
+            done, skipped = await _apply_structural(
+                session, app_user_id, proposal, snapshot
+            )
+            skipped_days += skipped
+            if done:
+                applied.append(lever["index"])
 
     if applied:
         payload["applied_snapshot"] = snapshot
@@ -616,3 +621,114 @@ async def _apply_sets(
 
     await session.flush()
     return touched > 0, skipped
+
+
+async def _apply_structural(
+    session: AsyncSession, app_user_id: int, proposal: PeriodizationProposal,
+    snapshot: dict,
+) -> tuple[bool, int]:
+    """Перегенерировать будущие дни блока (LEVER_LIFT_FREQUENCY / LEVER_STRUCTURAL).
+
+    Идём через _wipe_future_calendar/_generate_future_calendar периодизации,
+    а не своим DELETE: там уже закрыт долг P0-08 — дни со status != 'planned'
+    и дни с принятыми правками объёма не удаляются (см. её докстринг). Второй
+    такой обход заводить нельзя: он неизбежно разойдётся с первым, и тогда
+    правка автопилота начнёт стирать факт.
+
+    Дисциплина снимка (фикс-проход Задачи 8, см. докстринг apply_goal_
+    decision): snapshot["days"]/["created_plan_ids"] уже пришли сюда из
+    setdefault выше пустыми СПИСКАМИ, а не отсутствующими ключами — этим они
+    отличаются от "preference"/"rep_override"/"scheme", где отсутствие ключа
+    и есть сигнал "ещё не применялось". Пустой список после setdefault
+    неотличим от "структурный рычаг уже применялся, и будущих дней тогда не
+    нашлось" — проверка "если список пуст, пишем" защитила бы неправильный
+    случай. Поэтому используем отдельный маркер structural_applied: второй
+    заход в эту функцию (два структурных рычага в одном accepted, повтор
+    apply_goal_decision из офлайн-очереди) не имеет права переписать уже
+    сохранённые координаты "прежних" дней данными, которые сам же и создал
+    предыдущим запуском.
+
+    created_plan_ids сознательно НЕ заполняется (Задача 9): регенерация не
+    создаёт новых WorkoutPlan — SchedulingEngine._score_and_find_best_plan
+    выбирает id из уже существующих планов пользователя (см. её тело:
+    `plans = list((await session.execute(select(WorkoutPlan)...))`, ни
+    одного `session.add(WorkoutPlan(...))` в generate_block_days нет), она
+    лишь перепривязывает UserCalendarDay.plan_id к уже существующему
+    шаблону. Откату (Задача 10) нечего было бы удалять по этому ключу —
+    восстановить "прежний" plan_id для отката можно прямо из
+    snapshot["days"][i]["plan_id"], который уже сохранён ниже.
+
+    ОПАСНОСТЬ ДЛЯ ВЫЗЫВАЮЩЕГО (Задача 10): apply_goal_decision документирует
+    себя как "не коммитит сессию", но эта функция идёт через
+    _generate_future_calendar -> SchedulingEngine.generate_block_days, а та
+    КОММИТИТ САМА (см. её докстринг и последнюю строку тела). Это значит,
+    что при структурном рычаге промежуточный commit происходит ДО того, как
+    apply_goal_decision допишет snapshot в proposal.payload и ДО того, как
+    вызывающая сторона проставит proposal.status/decided_action и сделает
+    свой финальный commit() — та же ловушка, что periodization.service.
+    apply_decision уже разбирает у себя (см. её комментарий "Critical 3" у
+    вызова _perform): там её закрывают, проставляя решение по предложению
+    ДО вызова кода, который коммитит сам. Тому же самому вызывающему здесь
+    придётся сделать так же: проставить proposal.status/decided_action/
+    client_uuid/decided_at ДО apply_goal_decision, если среди принятых
+    рычагов может быть структурный — иначе обрыв процесса между
+    внутренним commit'ом регенерации и финальным commit'ом вызывающего
+    оставит календарь уже перегенерированным, а предложение — всё ещё
+    pending, и повтор запроса войдёт в _apply_structural второй раз по
+    уже перегенерированному календарю.
+    """
+    if snapshot.get("structural_applied"):
+        return False, 0
+
+    from api.services.periodization.service import (
+        _generate_future_calendar,
+        _wipe_future_calendar,
+    )
+
+    block = await session.get(TrainingBlock, proposal.block_id)
+    if block is None:
+        return False, 0
+
+    first_future = date.today() + timedelta(days=1)
+    days = (await session.execute(
+        select(UserCalendarDay).where(
+            UserCalendarDay.app_user_id == app_user_id,
+            UserCalendarDay.block_id == block.id,
+            UserCalendarDay.target_date >= first_future,
+        ).order_by(UserCalendarDay.target_date)
+    )).scalars().all()
+
+    snapshot["days"] = [
+        {
+            "target_date": d.target_date.isoformat(),
+            "plan_id": d.plan_id,
+            "day_tag": d.day_tag,
+            "micro_tag": d.micro_tag,
+            "meso_tag": d.meso_tag,
+            "mesocycle_phase_number": d.mesocycle_phase_number,
+            "is_rest_day": d.is_rest_day,
+        }
+        for d in days
+    ]
+    # skipped_days считает дни СРЕДИ БУДУЩИХ дней блока, которые перегенерация
+    # не тронула, потому что они уже несут факт или принятую правку — то же
+    # самое множество, что молча обходит _wipe_future_calendar (см. её
+    # докстринг); здесь просто считаем его явно для ответа наружу. Условие
+    # ОБЯЗАНО зеркалить предикат её DELETE ровно: status != 'planned' —
+    # это факт (см. проверку самой _wipe_future_calendar), а непустой
+    # volume_adjustments на ЕЩЁ planned дне — это принятая пользователем
+    # правка объёма (LEVER_SETS), которая тоже переживает wipe. Считать
+    # только status != 'planned', как было раньше, занижало бы счётчик:
+    # planned-день с принятой правкой объёма реально уцелел бы (см. sa_or
+    # в _wipe_future_calendar), но в ответ ушёл бы как "не пропущен".
+    skipped = sum(
+        1 for d in days
+        if d.status != "planned" or bool(d.volume_adjustments)
+    )
+
+    await _wipe_future_calendar(session, app_user_id, block, first_future)
+    await _generate_future_calendar(session, app_user_id, block, first_future)
+    await session.flush()
+
+    snapshot["structural_applied"] = True
+    return True, skipped
