@@ -141,23 +141,21 @@ async def adherence_ratios(
 ) -> list[float]:
     """Доли выполненных дней по последним закрытым окнам P0-09, новые первыми.
 
-    РАСХОЖДЕНИЕ С БРИФОМ: заготовка импортировала volume.service._adherence_ratio
-    напрямую — приватный (с подчёркивания) символ чужого модуля, которого в
-    этом проекте больше никто извне не импортирует. Формула тривиальна
-    (доля выполненных дней окна, 1.0 при отсутствии предписанных дней) и не
-    относится к границам объёма (тем landmarks/MRV, которые Global
-    Constraint запрещает дублировать) — дублируем её здесь одной строкой, а
-    не тянем приватное имя через границу пакета.
+    ИСПРАВЛЕНО (ревью Задачи 5, Important 2): заготовка дублировала тело
+    volume.service._adherence_ratio вместо импорта — обоснование «в проекте
+    нет прецедента импорта символа с подчёркивания через границу пакета»
+    было ошибочным: api/routers/workout_center.py:918 импортирует
+    _regenerate_future из periodization.service, а api/services/goal_service.py:33 —
+    _DEFAULT_CAP_PCT из forecast_service. Adherence — определение P0-09, и
+    от него зависит калибровка ETA автопилота; копия молча разойдётся с
+    оригиналом, если тот обзаведётся округлением, потолком или частичным
+    зачётом. Импортируем формулу, а не переизобретаем её здесь.
     """
     from api.services.volume.repository import closed_windows
+    from api.services.volume.service import _adherence_ratio
 
     windows = await closed_windows(session, app_user_id, limit)
-    ratios = []
-    for w in windows:
-        data = w.adherence or {}
-        planned = int(data.get("planned_days") or 0)
-        ratios.append(1.0 if planned <= 0 else int(data.get("completed_days") or 0) / planned)
-    return ratios
+    return [_adherence_ratio(w) for w in windows]
 
 
 async def headroom_sets(
@@ -174,14 +172,23 @@ async def headroom_sets(
     Границы берём те же, что P0-09, и масштабируем той же формулой — иначе
     десятидневная цель судилась бы семидневным потолком.
     """
-    from api.services.muscle_keys import key_for_muscle
+    from api.services.muscle_keys import to_system_key
     from api.services.volume import repository as volume_repository
     from api.services.volume.landmarks import landmarks_for, scale_landmarks
 
     muscle_raw = (await session.execute(
         select(Exercise.main_muscle_group).where(Exercise.id == exercise_id)
     )).scalar_one_or_none()
-    muscle = key_for_muscle(muscle_raw)
+    # ИСПРАВЛЕНО (ревью Задачи 5, Important 1): key_for_muscle понимает
+    # только русские отображаемые имена. main_muscle_group хранит и уже
+    # нормализованные EN системные ключи ("chest", "back" и т.п.) — их
+    # пишет api/routers/exercises.py verbatim при создании пользователем
+    # своего упражнения, это не только легаси-данные. На таких строках
+    # key_for_muscle тихо возвращал None, headroom схлопывался в 0, и рычаг
+    # «добавь подходы» навсегда гас без единого видимого симптома.
+    # to_system_key — единая точка нормализации (EN-ключ / RU-имя /
+    # UPPERCASE UI-код), ровно для этого и заведённая в muscle_keys.py.
+    muscle = to_system_key(muscle_raw)
     if muscle is None:
         return 0
 
@@ -211,7 +218,7 @@ async def exercise_context(
     применил в последний раз, а не то, что он выбрал бы в вакууме.
     """
     from api.services.equipment import BARBELL, SMITH, normalize_equipment_list
-    from api.services.muscle_keys import key_for_muscle
+    from api.services.muscle_keys import to_system_key
 
     row = (await session.execute(
         select(Exercise.main_muscle_group, Exercise.fatigue_tier, Exercise.equipment_needed)
@@ -242,7 +249,9 @@ async def exercise_context(
         "scheme": (state.last_scheme if state is not None else None) or "e1rm_factor",
         "rep_max": rep_max,
         "is_heavy_compound": row.fatigue_tier == 1 and bool(equipment & {BARBELL, SMITH}),
-        "muscle": key_for_muscle(row.main_muscle_group),
+        # ИСПРАВЛЕНО (ревью Задачи 5, Important 1): см. докстринг-комментарий
+        # в headroom_sets — та же замена key_for_muscle -> to_system_key.
+        "muscle": to_system_key(row.main_muscle_group),
     }
 
 
