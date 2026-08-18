@@ -23,14 +23,19 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from api.services.forecast_service import WEEKLY_GROWTH_CAP_PCT, _DEFAULT_CAP_PCT
-from api.services.goal import decide, repository, simulate
+from api.services.goal import decide, params, repository, simulate
 from api.services.goal.types import DecisionInput, Rates
 from api.services.models import (
     AppUserProfile,
+    Exercise,
     PeriodizationProposal,
     TrainingBlock,
+    UserCalendarDay,
+    UserExercisePreference,
+    UserExerciseRepOverride,
     UserGoal,
 )
 from api.services.periodization import params as periodization_params
@@ -338,3 +343,207 @@ async def refresh_goal_proposals(
     await session.commit()
     await session.refresh(proposal)
     return proposal
+
+
+async def apply_goal_decision(
+    session: AsyncSession,
+    app_user_id: int,
+    proposal: PeriodizationProposal,
+    action: str,
+    options: dict,
+) -> dict:
+    """Применить отмеченные пользователем рычаги.
+
+    Контракт совпадает с volume.apply_volume_decision: options["accepted"] —
+    список индексов рычагов, пустой означает «ничего не применять». Экран не
+    блокирующий, и бездействие равно «идём по плану».
+
+    Нетипизированный accepted (тело HTTP-запроса приходит как есть)
+    трактуем как пустой — то же осознанное «ничего», а не 500.
+
+    Структурный рычаг (lift_frequency/structural) сюда не относится — его
+    применение решает Задача 9; индекс такого рычага в accepted сейчас
+    просто ничего не делает.
+    """
+    raw = options.get("accepted")
+    accepted = set(raw) if isinstance(raw, list) else set()
+    payload = dict(proposal.payload or {})
+    levers = payload.get("levers") or []
+    exercise_id = payload.get("exercise_id")
+
+    snapshot: dict = {"preference": None, "rep_override": None, "scheme": None,
+                      "days": [], "created_plan_ids": []}
+    applied: list[int] = []
+    skipped_days = 0
+
+    for lever in levers:
+        if lever["index"] not in accepted:
+            continue
+        kind = lever["kind"]
+        if kind == params.LEVER_ENSURE_PRESENT:
+            if await _apply_favorite(session, app_user_id, exercise_id, snapshot):
+                applied.append(lever["index"])
+        elif kind == params.LEVER_REP_RANGE:
+            if await _apply_rep_range(session, app_user_id, exercise_id, lever, snapshot):
+                applied.append(lever["index"])
+        elif kind == params.LEVER_SCHEME:
+            if await _apply_scheme(session, app_user_id, exercise_id, lever, snapshot):
+                applied.append(lever["index"])
+        elif kind == params.LEVER_SETS:
+            done, skipped = await _apply_sets(
+                session, app_user_id, proposal, exercise_id, lever
+            )
+            skipped_days += skipped
+            if done:
+                applied.append(lever["index"])
+        # LEVER_LIFT_FREQUENCY / LEVER_STRUCTURAL: структурные рычаги,
+        # применяет Задача 9 — здесь индекс молча пропускается.
+
+    if applied:
+        payload["applied_snapshot"] = snapshot
+        proposal.payload = payload
+        flag_modified(proposal, "payload")
+        await session.commit()
+
+    return {
+        "status": "applied" if applied else "declined",
+        "proposal_id": proposal.id,
+        "applied": applied,
+        "skipped_days": skipped_days,
+    }
+
+
+async def _apply_favorite(
+    session: AsyncSession, app_user_id: int, exercise_id: Optional[int], snapshot: dict
+) -> bool:
+    """Пометить целевой лифт избранным, чтобы умная замена его не вытесняла."""
+    if exercise_id is None:
+        return False
+    existing = (await session.execute(
+        select(UserExercisePreference).where(
+            UserExercisePreference.app_user_id == app_user_id,
+            UserExercisePreference.exercise_id == exercise_id,
+        )
+    )).scalar_one_or_none()
+    snapshot["preference"] = existing.preference if existing else None
+    if existing is None:
+        # exercise_name обязателен в модели (см. api/routers/exercises.py,
+        # set_exercise_preference) — тянем его из Exercise; если упражнения
+        # уже нет, ставить нечего.
+        exercise_name = (await session.execute(
+            select(Exercise.name).where(Exercise.id == exercise_id)
+        )).scalar_one_or_none()
+        if exercise_name is None:
+            return False
+        session.add(UserExercisePreference(
+            app_user_id=app_user_id, exercise_id=exercise_id,
+            exercise_name=exercise_name, preference="favorite",
+        ))
+    else:
+        existing.preference = "favorite"
+    await session.flush()
+    return True
+
+
+async def _apply_rep_range(
+    session: AsyncSession, app_user_id: int, exercise_id: Optional[int],
+    lever: dict, snapshot: dict,
+) -> bool:
+    if exercise_id is None:
+        return False
+    detail = lever.get("detail") or {}
+    rep_min, rep_max = detail.get("rep_min"), detail.get("rep_max")
+    if rep_min is None or rep_max is None:
+        return False
+    existing = (await session.execute(
+        select(UserExerciseRepOverride).where(
+            UserExerciseRepOverride.app_user_id == app_user_id,
+            UserExerciseRepOverride.exercise_id == exercise_id,
+        )
+    )).scalar_one_or_none()
+    snapshot["rep_override"] = (
+        {"rep_min": existing.rep_min, "rep_max": existing.rep_max} if existing else None
+    )
+    if existing is None:
+        session.add(UserExerciseRepOverride(
+            app_user_id=app_user_id, exercise_id=exercise_id,
+            rep_min=int(rep_min), rep_max=int(rep_max),
+        ))
+    else:
+        existing.rep_min, existing.rep_max = int(rep_min), int(rep_max)
+    await session.flush()
+    return True
+
+
+async def _apply_scheme(
+    session: AsyncSession, app_user_id: int, exercise_id: Optional[int],
+    lever: dict, snapshot: dict,
+) -> bool:
+    """Схема живёт в settings, а не в кэше состояния: выбор пользователя
+    (а теперь и принятое им предложение) пересчётом чиниться не должен."""
+    if exercise_id is None:
+        return False
+    to_scheme = (lever.get("detail") or {}).get("to_scheme")
+    if not to_scheme:
+        return False
+    profile = (await session.execute(
+        select(AppUserProfile).where(AppUserProfile.app_user_id == app_user_id)
+    )).scalar_one_or_none()
+    if profile is None:
+        return False
+    settings = dict(profile.settings or {})
+    progression = dict(settings.get("progression") or {})
+    overrides = dict(progression.get("overrides") or {})
+    snapshot["scheme"] = overrides.get(str(exercise_id))
+    overrides[str(exercise_id)] = to_scheme
+    progression["overrides"] = overrides
+    settings["progression"] = progression
+    profile.settings = settings
+    flag_modified(profile, "settings")
+    await session.flush()
+    return True
+
+
+async def _apply_sets(
+    session: AsyncSession, app_user_id: int, proposal: PeriodizationProposal,
+    exercise_id: Optional[int], lever: dict,
+) -> tuple[bool, int]:
+    """+N подходов целевого лифта на будущих днях блока.
+
+    Правка живёт НА ДНЕ (UserCalendarDay.volume_adjustments), а не в
+    WorkoutPlanExercise: план переиспользуется на всех подходящих днях, и
+    правка в нём изменила бы каждый такой день навсегда (см. докстринг поля).
+    Дни, переставшие быть planned, пропускаются: там уже есть факт.
+    """
+    if exercise_id is None:
+        return False, 0
+    delta = int((lever.get("detail") or {}).get("delta_sets") or 0)
+    if delta == 0:
+        return False, 0
+
+    today = date.today()
+    days = (await session.execute(
+        select(UserCalendarDay).where(
+            UserCalendarDay.app_user_id == app_user_id,
+            UserCalendarDay.block_id == proposal.block_id,
+            UserCalendarDay.target_date > today,
+        )
+    )).scalars().all()
+
+    touched, skipped = 0, 0
+    for day in days:
+        if day.status != "planned":
+            skipped += 1
+            continue
+        adjustments = list(day.volume_adjustments or [])
+        adjustments.append({
+            "exercise_id": exercise_id,
+            "delta_sets": delta,
+            "proposal_id": proposal.id,
+        })
+        day.volume_adjustments = adjustments
+        flag_modified(day, "volume_adjustments")
+        touched += 1
+
+    await session.flush()
+    return touched > 0, skipped
