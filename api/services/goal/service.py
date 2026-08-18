@@ -692,14 +692,16 @@ async def _apply_structural(
     вовсе (ни снимок, ни удаление), и повтор начнёт с нетронутых дней.
     Если оборвётся ПОСЛЕ — календарь и снимок, описывающий его прежнее
     состояние, окажутся в БД вместе, консистентно.
-    Отдельно: вызывающему (Задача 10) по-прежнему нужно проставлять
-    proposal.status/decided_action ДО apply_goal_decision, если среди
-    принятых рычагов может быть структурный, — то же самое поле promise
-    "не коммитит сессию сама" здесь не держится (тот же разбор, что и
-    periodization.service.apply_decision делает у себя, "Critical 3" у
-    вызова _perform) — это НЕ то же самое, что риск потери snapshot,
-    который эта правка закрывает: снимок теперь переживёт обрыв, а
-    proposal.status/decided_action вне payload — нет.
+    Отдельно (СДЕЛАНО ревью Задачи 10, Critical 1 — см. periodization.service.
+    apply_decision, ветку KIND_GOAL_PLAN/ACTION_APPLY_GOAL): вызывающий
+    проставляет proposal.status/decided_action/client_uuid/decided_at ДО
+    apply_goal_decision, тем же порядком, что и _BLOCK_MUTATING_ACTIONS
+    там же (её "Critical 3" у вызова _perform) — то же самое обещание "не
+    коммитит сессию сама" здесь не держится. Это НЕ то же самое, что риск
+    потери snapshot, который эта правка (Critical 2 предыдущего ревью)
+    закрывает: снимок переживает обрыв благодаря flush() выше ДО wipe/
+    regenerate; proposal.status/decided_action вне payload переживает обрыв
+    благодаря тому, что вызывающий пишет их ДО, а не после, этого вызова.
     """
     if snapshot.get("structural_applied"):
         return False, 0
@@ -722,6 +724,19 @@ async def _apply_structural(
         ).order_by(UserCalendarDay.target_date)
     )).scalars().all()
 
+    # ИСПРАВЛЕНО (ревью Задачи 10, Critical 2 — ворота отката блокировали
+    # безопасный откат навсегда): каждая запись снимка ниже несёт булево
+    # поле "touched" — было ли это КОНКРЕТНО тот день, который регенерация
+    # реально тронула бы, а не просто день, существовавший на момент снимка.
+    # Предикат ОБЯЗАН зеркалить условие, по которому _wipe_future_calendar
+    # щадит день (см. её докстринг): status == 'planned' и пустой
+    # volume_adjustments — тронутый; иначе (уже есть факт или принятая
+    # правка объёма) — день, который автопилот и не собирался трогать.
+    # undo_goal_decision (см. её докстринг и гейт ниже по файлу) смотрит
+    # ТОЛЬКО на даты с touched=True: день, который автопилот не трогал, не
+    # имеет права блокировать откат тем, что позже обзавёлся фактом, — этот
+    # факт никак не связан с применением рычага.
+    touched_flags = [d.status == "planned" and not d.volume_adjustments for d in days]
     snapshot["days"] = [
         {
             "target_date": d.target_date.isoformat(),
@@ -731,24 +746,17 @@ async def _apply_structural(
             "meso_tag": d.meso_tag,
             "mesocycle_phase_number": d.mesocycle_phase_number,
             "is_rest_day": d.is_rest_day,
+            "touched": touched,
         }
-        for d in days
+        for d, touched in zip(days, touched_flags)
     ]
     # skipped_days считает дни СРЕДИ БУДУЩИХ дней блока, которые перегенерация
     # не тронула, потому что они уже несут факт или принятую правку — то же
     # самое множество, что молча обходит _wipe_future_calendar (см. её
-    # докстринг); здесь просто считаем его явно для ответа наружу. Условие
-    # ОБЯЗАНО зеркалить предикат её DELETE ровно: status != 'planned' —
-    # это факт (см. проверку самой _wipe_future_calendar), а непустой
-    # volume_adjustments на ЕЩЁ planned дне — это принятая пользователем
-    # правка объёма (LEVER_SETS), которая тоже переживает wipe. Считать
-    # только status != 'planned', как было раньше, занижало бы счётчик:
-    # planned-день с принятой правкой объёма реально уцелел бы (см. sa_or
-    # в _wipe_future_calendar), но в ответ ушёл бы как "не пропущен".
-    skipped = sum(
-        1 for d in days
-        if d.status != "planned" or bool(d.volume_adjustments)
-    )
+    # докстринг); здесь просто считаем его явно для ответа наружу, из того же
+    # touched_flags, что и снимок выше, — одно и то же условие не должно жить
+    # в коде дважды и рисковать разойтись.
+    skipped = sum(1 for touched in touched_flags if not touched)
 
     # Маркер выставляем ДО разрушения календаря — см. разбор в докстринге
     # выше: он обязан уехать в БД в ТОЙ ЖЕ транзакции, что и сам wipe, иначе
@@ -773,18 +781,33 @@ async def undo_goal_decision(
 ) -> dict:
     """Вернуть то, что автопилот сделал, — и только то.
 
-    Ворота: ни один затронутый день не сменил статус и не получил
-    привязанной сессии. После появления факта откат означал бы
+    Ворота: ни один день, который автопилот РЕАЛЬНО тронул (touched=True в
+    снимке, см. докстринг _apply_structural), не сменил статус и не получил
+    привязанной сессии. После появления факта на ТАКОМ дне откат означал бы
     переписывание истории — вместо него честнее новое предложение.
+
+    ИСПРАВЛЕНО (ревью Задачи 10, Critical 2 — ворота блокировали безопасный
+    откат навсегда): snapshot["days"] несёт КАЖДЫЙ будущий день блока на
+    момент применения, включая дни, которые _wipe_future_calendar щадит по
+    определению (уже нёсшие факт или принятую правку объёма — автопилот их
+    не трогал вовсе). Раньше гейт ниже смотрел на ВСЕ даты снимка без
+    разбора: блок с одним таким пощажённым, но уже completed днём навсегда
+    блокировал откат, хотя ни один РЕАЛЬНО регенерированный день факта не
+    получил. Смотрим только на даты с touched=True — то множество, что
+    зеркалит days-запрос _apply_structural и её же touched_flags.
     """
     snapshot = (proposal.payload or {}).get("applied_snapshot")
     if not snapshot:
         return {"status": "conflict", "proposal_id": proposal.id,
                 "reason": "Нечего отменять: предложение не применялось"}
 
-    exercise_id = (proposal.payload or {}).get("exercise_id")
+    payload = proposal.payload or {}
+    exercise_id = payload.get("exercise_id")
+    levers = payload.get("levers") or []
     dates = [
-        date.fromisoformat(d["target_date"]) for d in (snapshot.get("days") or [])
+        date.fromisoformat(d["target_date"])
+        for d in (snapshot.get("days") or [])
+        if d.get("touched")
     ]
     if dates:
         blocked = (await session.execute(
@@ -838,7 +861,15 @@ async def undo_goal_decision(
             else:
                 pref.preference = snapshot["preference"]
 
-        # 3. Диапазон повторов.
+        # 3. Диапазон повторов — восстанавливаем ТОЛЬКО если текущее
+        # значение ещё совпадает с тем, что записал автопилот (ИСПРАВЛЕНО,
+        # ревью Задачи 10, Important 3, спека §5.5: было безусловно). Что
+        # именно записал автопилот, берём из proposal.payload["levers"] —
+        # тот же rep_min/rep_max, что _apply_rep_range взяла из detail
+        # своего lever'а. Пользователь мог отредактировать диапазон уже
+        # ПОСЛЕ применения — такую правку откат не имеет права стирать
+        # молча, ровно как и с преференцией выше: разошедшееся значение
+        # оставляем как есть и называем в kept, а не восстанавливаем поверх.
         override = (await session.execute(
             select(UserExerciseRepOverride).where(
                 UserExerciseRepOverride.app_user_id == app_user_id,
@@ -847,12 +878,22 @@ async def undo_goal_decision(
         )).scalar_one_or_none()
         previous = snapshot.get("rep_override")
         if override is not None:
-            if previous is None:
+            rep_lever = next(
+                (l for l in levers if l.get("kind") == params.LEVER_REP_RANGE), None
+            )
+            written = (rep_lever or {}).get("detail") or {}
+            written_value = (written.get("rep_min"), written.get("rep_max"))
+            if (override.rep_min, override.rep_max) != written_value:
+                kept.append("rep_override")    # пользователь сам поменял диапазон после применения
+            elif previous is None:
                 await session.delete(override)
             else:
                 override.rep_min, override.rep_max = previous["rep_min"], previous["rep_max"]
 
-    # 4. Схема прогрессии.
+    # 4. Схема прогрессии — та же дисциплина сравнения, что и у диапазона
+    # повторов выше (ИСПРАВЛЕНО, ревью Задачи 10, Important 3): текущее
+    # значение сверяем с detail.to_scheme того lever'а, который его записал,
+    # а не восстанавливаем безусловно.
     profile = (await session.execute(
         select(AppUserProfile).where(AppUserProfile.app_user_id == app_user_id)
     )).scalar_one_or_none()
@@ -861,14 +902,21 @@ async def undo_goal_decision(
         progression = dict(settings.get("progression") or {})
         overrides = dict(progression.get("overrides") or {})
         if str(exercise_id) in overrides:
-            if snapshot.get("scheme") is None:
-                overrides.pop(str(exercise_id), None)
+            scheme_lever = next(
+                (l for l in levers if l.get("kind") == params.LEVER_SCHEME), None
+            )
+            written_scheme = ((scheme_lever or {}).get("detail") or {}).get("to_scheme")
+            if overrides[str(exercise_id)] != written_scheme:
+                kept.append("scheme")    # пользователь сам поменял схему после применения
             else:
-                overrides[str(exercise_id)] = snapshot["scheme"]
-            progression["overrides"] = overrides
-            settings["progression"] = progression
-            profile.settings = settings
-            flag_modified(profile, "settings")
+                if snapshot.get("scheme") is None:
+                    overrides.pop(str(exercise_id), None)
+                else:
+                    overrides[str(exercise_id)] = snapshot["scheme"]
+                progression["overrides"] = overrides
+                settings["progression"] = progression
+                profile.settings = settings
+                flag_modified(profile, "settings")
 
     # 5. Дни календаря — вернуть снятые координаты.
     for row in snapshot.get("days") or []:

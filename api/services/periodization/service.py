@@ -843,18 +843,47 @@ async def apply_decision(
             return outcome
 
         if action == params.ACTION_APPLY_GOAL:
+            # ИСПРАВЛЕНО (ревью Задачи 10, Critical 1 — та же несущая
+            # конструкция, что и у _BLOCK_MUTATING_ACTIONS ниже по файлу, см.
+            # комментарий у Critical 3 там). Поля решения выставляем ДО вызова
+            # apply_goal_decision, а не после её return. Среди принятых
+            # рычагов может оказаться структурный (LEVER_LIFT_FREQUENCY/
+            # LEVER_STRUCTURAL) — тогда apply_goal_decision доходит до
+            # _apply_structural -> SchedulingEngine.generate_block_days, а та
+            # КОММИТИТ СЕССИЮ САМА (см. докстринг _apply_structural). Раньше
+            # decided-поля писались только ПОСЛЕ return — обрыв процесса в
+            # окне между внутренним commit'ом регенерации и финальным
+            # commit'ом здесь оставлял календарь уже перегенерированным и
+            # snapshot["structural_applied"] уже True, а proposal.status
+            # всё ещё pending. Повтор запроса тогда видел бы structural_
+            # applied=True, apply_goal_decision вернула бы applied=[]
+            # (структурному рычагу уже нечего применять), и предложение
+            # навсегда помечалось бы declined — хотя рычаг фактически
+            # применён, календарь реально изменён, а откат (undo_goal_
+            # decision) гейтится именно на status == accepted и стал бы для
+            # этого предложения недостижим НАВСЕГДА.
+            # Ставим оптимистично accepted СЕЙЧАС: обрыв процесса в этом окне
+            # оставит правдивую accepted-строку, чьи изменения откат сможет
+            # отменить. Если вызов благополучно вернётся и окажется, что
+            # НИЧЕГО не применилось (applied пуст), понижаем до declined уже
+            # после — см. ниже.
+            proposal.status = params.STATUS_ACCEPTED
+            proposal.decided_action = action
+            proposal.client_uuid = client_uuid
+            proposal.decided_at = datetime.now(timezone.utc)
+
             outcome = await apply_goal_decision(
                 session, app_user_id, proposal, action, options or {}
             )
+            if not outcome["applied"]:
+                proposal.status = params.STATUS_DECLINED
         else:
             outcome = {"status": "declined", "proposal_id": proposal.id, "applied": []}
+            proposal.status = params.STATUS_DECLINED
+            proposal.decided_action = action
+            proposal.client_uuid = client_uuid
+            proposal.decided_at = datetime.now(timezone.utc)
 
-        proposal.status = (
-            params.STATUS_ACCEPTED if outcome["applied"] else params.STATUS_DECLINED
-        )
-        proposal.decided_action = action
-        proposal.client_uuid = client_uuid
-        proposal.decided_at = datetime.now(timezone.utc)
         await session.commit()
         return outcome
 
