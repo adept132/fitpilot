@@ -364,6 +364,24 @@ async def apply_goal_decision(
     Структурный рычаг (lift_frequency/structural) сюда не относится — его
     применение решает Задача 9; индекс такого рычага в accepted сейчас
     просто ничего не делает.
+
+    НЕ КОММИТИТ СЕССИЮ (ревью Задачи 8, Critical 1) — по тому же контракту,
+    что и volume.apply_volume_decision: только flush(). Записи рычагов и
+    решение по предложению (proposal.status/decided_action/client_uuid/
+    decided_at) обязаны попасть в ОДИН commit() вызывающей стороны
+    (periodization.service.apply_decision, Задача 10) — см. подробный разбор
+    в её докстринге у Critical 3: коммит здесь расщепил бы транзакцию на
+    два, и обрыв процесса между ними оставил бы рычаги применёнными, а
+    предложение — всё ещё pending; повтор из офлайн-очереди мобильного
+    клиента прошёл бы проверку status == pending заново и применил бы
+    рычаги ВТОРОЙ раз (см. идемпотентность _apply_sets по proposal_id ниже —
+    это подстраховка на случай именно такого повтора, а не замена
+    атомарности).
+
+    skipped_days — счётчик СРЕДИ СТРОГО БУДУЩИХ дней блока (target_date >
+    today), которые уже несут факт (status != "planned") и потому рычаг
+    LEVER_SETS их не тронул. Сегодняшний день в этот счётчик НЕ входит — он
+    не применяется и не считается пропущенным (см. докстринг _apply_sets).
     """
     raw = options.get("accepted")
     accepted = set(raw) if isinstance(raw, list) else set()
@@ -403,7 +421,7 @@ async def apply_goal_decision(
         payload["applied_snapshot"] = snapshot
         proposal.payload = payload
         flag_modified(proposal, "payload")
-        await session.commit()
+        await session.flush()
 
     return {
         "status": "applied" if applied else "declined",
@@ -513,7 +531,22 @@ async def _apply_sets(
     Правка живёт НА ДНЕ (UserCalendarDay.volume_adjustments), а не в
     WorkoutPlanExercise: план переиспользуется на всех подходящих днях, и
     правка в нём изменила бы каждый такой день навсегда (см. докстринг поля).
-    Дни, переставшие быть planned, пропускаются: там уже есть факт.
+    Дни, переставшие быть planned, пропускаются: там уже есть факт. Граница
+    выборки — target_date > today: сегодняшний день не применяется и не
+    считается пропущенным (см. докстринг apply_goal_decision про
+    skipped_days).
+
+    Идемпотентность по proposal_id (ревью Задачи 8, Critical 1): apply_
+    goal_decision больше не коммитит сама (см. её докстринг) — решение и
+    правка коммитятся ОДНИМ commit() вызывающей стороны (Задача 10), но до
+    тех пор, пока это не подключено, а также на случай повтора из офлайн-
+    очереди мобильного клиента ПОСЛЕ того как рычаг уже применился, но
+    предложение ещё не успело перейти в decided-статус, — повторный проход
+    по тому же дню не должен задвоить прибавку подходов. Если день уже
+    несёт запись {exercise_id, proposal_id} от ЭТОГО ЖЕ предложения, вторую
+    не добавляем, но день всё равно считаем затронутым (это не тот же
+    случай, что «дня уже нет в planned» — правка НА НЁМ есть, просто уже
+    ровно одна).
     """
     if exercise_id is None:
         return False, 0
@@ -536,6 +569,13 @@ async def _apply_sets(
             skipped += 1
             continue
         adjustments = list(day.volume_adjustments or [])
+        already_applied = any(
+            a.get("exercise_id") == exercise_id and a.get("proposal_id") == proposal.id
+            for a in adjustments
+        )
+        if already_applied:
+            touched += 1
+            continue
         adjustments.append({
             "exercise_id": exercise_id,
             "delta_sets": delta,

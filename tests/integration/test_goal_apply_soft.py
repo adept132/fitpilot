@@ -1,4 +1,15 @@
-"""Мягкие рычаги: применение, снимок, выборочность (P0-12, Задача 8)."""
+"""Мягкие рычаги: применение, снимок, выборочность (P0-12, Задача 8).
+
+apply_goal_decision НЕ коммитит сессию сама (ревью Задачи 8, Critical 1) —
+контракт совпадает с volume.apply_volume_decision: только flush(). Реальный
+вызывающий (periodization.service.apply_decision, Задача 10) проставляет
+proposal.status/decided_action/client_uuid/decided_at и коммитит ОДИН раз,
+атомарно, вместе с записями рычагов. Двухблочный стиль тестов ниже
+(`async with SessionLocal() as db: ...`) — деталь харнесса, а не то, что
+диктует семантику сервиса, поэтому каждый блок, вызывающий
+apply_goal_decision и желающий увидеть эффект в следующем блоке, коммитит
+явно — ровно так, как это будет делать настоящий вызывающий.
+"""
 from datetime import date, timedelta
 
 import pytest
@@ -9,6 +20,7 @@ from api.services.goal.service import apply_goal_decision
 from api.services.models import (
     AppUserProfile,
     PeriodizationProposal,
+    UserCalendarDay,
     UserExercisePreference,
     UserExerciseRepOverride,
 )
@@ -58,7 +70,18 @@ async def active_block(test_user):
         yield block
 
 
-async def _proposal(user_id: int, block_id: int, exercise_id: int) -> int:
+_DEFAULT_LEVERS = [
+    {"index": 0, "kind": "ensure_present", "reason_code": "lift_missing",
+     "effect_slope": 0.2, "effect_days": 10, "detail": {}},
+    {"index": 1, "kind": "rep_range", "reason_code": "pace_behind",
+     "effect_slope": 0.1, "effect_days": 5,
+     "detail": {"rep_min": 2, "rep_max": 5}},
+]
+
+
+async def _proposal(
+    user_id: int, block_id: int, exercise_id: int, levers: list[dict] | None = None
+) -> int:
     async with SessionLocal() as db:
         row = PeriodizationProposal(
             app_user_id=user_id, block_id=block_id,
@@ -66,13 +89,7 @@ async def _proposal(user_id: int, block_id: int, exercise_id: int) -> int:
             reason_code="pace_behind",
             payload={
                 "goal_id": 1, "exercise_id": exercise_id,
-                "levers": [
-                    {"index": 0, "kind": "ensure_present", "reason_code": "lift_missing",
-                     "effect_slope": 0.2, "effect_days": 10, "detail": {}},
-                    {"index": 1, "kind": "rep_range", "reason_code": "pace_behind",
-                     "effect_slope": 0.1, "effect_days": 5,
-                     "detail": {"rep_min": 2, "rep_max": 5}},
-                ],
+                "levers": levers if levers is not None else _DEFAULT_LEVERS,
                 "applied_snapshot": None,
             },
             status=periodization_params.STATUS_PENDING,
@@ -91,6 +108,9 @@ async def test_only_accepted_levers_are_applied(test_user, fresh_exercise, activ
             db, test_user.id, proposal,
             periodization_params.ACTION_APPLY_GOAL, {"accepted": [0]},
         )
+        # apply_goal_decision больше не коммитит сама (Critical 1) — коммитим
+        # здесь явно, ровно как это сделает настоящий вызывающий (Задача 10).
+        await db.commit()
     assert result["applied"] == [0]
 
     async with SessionLocal() as db:
@@ -116,6 +136,7 @@ async def test_empty_accepted_applies_nothing(test_user, fresh_exercise, active_
             db, test_user.id, proposal,
             periodization_params.ACTION_APPLY_GOAL, {"accepted": []},
         )
+        await db.commit()
     assert result["status"] == "declined"
     assert result["applied"] == []
 
@@ -128,6 +149,7 @@ async def test_snapshot_records_previous_state(test_user, fresh_exercise, active
             db, test_user.id, proposal,
             periodization_params.ACTION_APPLY_GOAL, {"accepted": [0, 1]},
         )
+        await db.commit()
 
     async with SessionLocal() as db:
         row = await db.get(PeriodizationProposal, pid)
@@ -135,3 +157,243 @@ async def test_snapshot_records_previous_state(test_user, fresh_exercise, active
     assert snapshot is not None
     assert snapshot["preference"] is None      # преференции не было
     assert snapshot["rep_override"] is None    # оверрайда не было
+
+
+async def test_snapshot_captures_preexisting_preference_and_rep_override(
+    test_user, fresh_exercise, active_block
+):
+    """Ветка «оверрайд/преференция уже существовали» — до этой правки в
+    тестах исполнялась только ветка «ничего не было» (снимок None), см.
+    докстринг test_snapshot_records_previous_state выше."""
+    async with SessionLocal() as db:
+        db.add(UserExercisePreference(
+            app_user_id=test_user.id, exercise_id=fresh_exercise.id,
+            exercise_name=fresh_exercise.name, preference="disliked",
+        ))
+        db.add(UserExerciseRepOverride(
+            app_user_id=test_user.id, exercise_id=fresh_exercise.id,
+            rep_min=6, rep_max=10,
+        ))
+        await db.commit()
+
+    pid = await _proposal(test_user.id, active_block.id, fresh_exercise.id)
+    async with SessionLocal() as db:
+        proposal = await db.get(PeriodizationProposal, pid)
+        result = await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0, 1]},
+        )
+        await db.commit()
+    assert result["applied"] == [0, 1]
+
+    async with SessionLocal() as db:
+        row = await db.get(PeriodizationProposal, pid)
+        pref = (await db.execute(
+            select(UserExercisePreference).where(
+                UserExercisePreference.app_user_id == test_user.id,
+                UserExercisePreference.exercise_id == fresh_exercise.id,
+            )
+        )).scalar_one()
+        override = (await db.execute(
+            select(UserExerciseRepOverride).where(
+                UserExerciseRepOverride.app_user_id == test_user.id,
+                UserExerciseRepOverride.exercise_id == fresh_exercise.id,
+            )
+        )).scalar_one()
+    snapshot = row.payload["applied_snapshot"]
+    assert snapshot["preference"] == "disliked"                     # снимок ДО перезаписи
+    assert snapshot["rep_override"] == {"rep_min": 6, "rep_max": 10}
+    assert pref.preference == "favorite"                            # перезаписано
+    assert (override.rep_min, override.rep_max) == (2, 5)
+
+
+async def test_scheme_lever_writes_override_and_snapshots_none(
+    test_user, fresh_exercise, active_block
+):
+    async with SessionLocal() as db:
+        db.add(AppUserProfile(app_user_id=test_user.id))
+        await db.commit()
+
+    levers = [
+        {"index": 0, "kind": "scheme", "reason_code": "pace_behind",
+         "effect_slope": 0.15, "effect_days": 7, "detail": {"to_scheme": "5x5"}},
+    ]
+    pid = await _proposal(test_user.id, active_block.id, fresh_exercise.id, levers)
+    async with SessionLocal() as db:
+        proposal = await db.get(PeriodizationProposal, pid)
+        result = await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0]},
+        )
+        await db.commit()
+    assert result["applied"] == [0]
+
+    async with SessionLocal() as db:
+        profile = (await db.execute(
+            select(AppUserProfile).where(AppUserProfile.app_user_id == test_user.id)
+        )).scalar_one()
+        row = await db.get(PeriodizationProposal, pid)
+    assert profile.settings["progression"]["overrides"][str(fresh_exercise.id)] == "5x5"
+    assert row.payload["applied_snapshot"]["scheme"] is None
+
+
+async def test_scheme_lever_snapshots_existing_override(
+    test_user, fresh_exercise, active_block
+):
+    async with SessionLocal() as db:
+        db.add(AppUserProfile(
+            app_user_id=test_user.id,
+            settings={"progression": {"overrides": {str(fresh_exercise.id): "3x8"}}},
+        ))
+        await db.commit()
+
+    levers = [
+        {"index": 0, "kind": "scheme", "reason_code": "pace_behind",
+         "effect_slope": 0.15, "effect_days": 7, "detail": {"to_scheme": "5x5"}},
+    ]
+    pid = await _proposal(test_user.id, active_block.id, fresh_exercise.id, levers)
+    async with SessionLocal() as db:
+        proposal = await db.get(PeriodizationProposal, pid)
+        await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0]},
+        )
+        await db.commit()
+
+    async with SessionLocal() as db:
+        profile = (await db.execute(
+            select(AppUserProfile).where(AppUserProfile.app_user_id == test_user.id)
+        )).scalar_one()
+        row = await db.get(PeriodizationProposal, pid)
+    assert profile.settings["progression"]["overrides"][str(fresh_exercise.id)] == "5x5"
+    assert row.payload["applied_snapshot"]["scheme"] == "3x8"      # снимок СУЩЕСТВОВАВШЕГО значения
+
+
+async def test_sets_lever_writes_adjustment_to_future_planned_days(
+    test_user, fresh_exercise, active_block
+):
+    future = date.today() + timedelta(days=3)
+    async with SessionLocal() as db:
+        day = UserCalendarDay(
+            app_user_id=test_user.id, target_date=future,
+            block_id=active_block.id, status="planned",
+        )
+        db.add(day)
+        await db.commit()
+        await db.refresh(day)
+        day_id = day.id
+
+    levers = [
+        {"index": 0, "kind": "sets", "reason_code": "pace_behind",
+         "effect_slope": 0.1, "effect_days": 14, "detail": {"delta_sets": 2}},
+    ]
+    pid = await _proposal(test_user.id, active_block.id, fresh_exercise.id, levers)
+    async with SessionLocal() as db:
+        proposal = await db.get(PeriodizationProposal, pid)
+        result = await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0]},
+        )
+        await db.commit()
+    assert result["applied"] == [0]
+    assert result["skipped_days"] == 0
+
+    async with SessionLocal() as db:
+        day = await db.get(UserCalendarDay, day_id)
+    assert day.volume_adjustments == [
+        {"exercise_id": fresh_exercise.id, "delta_sets": 2, "proposal_id": pid}
+    ]
+
+
+async def test_sets_lever_skips_non_planned_day_and_counts_it(
+    test_user, fresh_exercise, active_block
+):
+    future = date.today() + timedelta(days=3)
+    async with SessionLocal() as db:
+        planned_day = UserCalendarDay(
+            app_user_id=test_user.id, target_date=future,
+            block_id=active_block.id, status="planned",
+        )
+        missed_day = UserCalendarDay(
+            app_user_id=test_user.id, target_date=future + timedelta(days=1),
+            block_id=active_block.id, status="missed",
+        )
+        db.add_all([planned_day, missed_day])
+        await db.commit()
+        await db.refresh(planned_day)
+        await db.refresh(missed_day)
+        planned_id, missed_id = planned_day.id, missed_day.id
+
+    levers = [
+        {"index": 0, "kind": "sets", "reason_code": "pace_behind",
+         "effect_slope": 0.1, "effect_days": 14, "detail": {"delta_sets": 2}},
+    ]
+    pid = await _proposal(test_user.id, active_block.id, fresh_exercise.id, levers)
+    async with SessionLocal() as db:
+        proposal = await db.get(PeriodizationProposal, pid)
+        result = await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0]},
+        )
+        await db.commit()
+    assert result["applied"] == [0]
+    assert result["skipped_days"] == 1
+
+    async with SessionLocal() as db:
+        planned_day = await db.get(UserCalendarDay, planned_id)
+        missed_day = await db.get(UserCalendarDay, missed_id)
+    assert planned_day.volume_adjustments == [
+        {"exercise_id": fresh_exercise.id, "delta_sets": 2, "proposal_id": pid}
+    ]
+    assert not (missed_day.volume_adjustments or [])
+
+
+async def test_sets_lever_applied_twice_does_not_double(
+    test_user, fresh_exercise, active_block
+):
+    future = date.today() + timedelta(days=3)
+    async with SessionLocal() as db:
+        day = UserCalendarDay(
+            app_user_id=test_user.id, target_date=future,
+            block_id=active_block.id, status="planned",
+        )
+        db.add(day)
+        await db.commit()
+        await db.refresh(day)
+        day_id = day.id
+
+    levers = [
+        {"index": 0, "kind": "sets", "reason_code": "pace_behind",
+         "effect_slope": 0.1, "effect_days": 14, "detail": {"delta_sets": 2}},
+    ]
+    pid = await _proposal(test_user.id, active_block.id, fresh_exercise.id, levers)
+
+    # Первое применение.
+    async with SessionLocal() as db:
+        proposal = await db.get(PeriodizationProposal, pid)
+        result_1 = await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0]},
+        )
+        await db.commit()
+    assert result_1["applied"] == [0]
+
+    # Повтор того же решения (двойной тап / повтор из офлайн-очереди) —
+    # свежий объект proposal той же сессии реальной apply_decision (Задача
+    # 10) не переставит статус в pending=False до истечения этого вызова,
+    # но идемпотентность самой правки НЕ должна зависеть от этого — см.
+    # докстринг _apply_sets.
+    async with SessionLocal() as db:
+        proposal = await db.get(PeriodizationProposal, pid)
+        result_2 = await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0]},
+        )
+        await db.commit()
+    assert result_2["applied"] == [0]
+
+    async with SessionLocal() as db:
+        day = await db.get(UserCalendarDay, day_id)
+    assert day.volume_adjustments == [
+        {"exercise_id": fresh_exercise.id, "delta_sets": 2, "proposal_id": pid}
+    ]
