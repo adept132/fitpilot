@@ -87,6 +87,17 @@ async def create_goal(
     )
     db.add(goal)
     await db.commit()
+
+    # P0-12: создание цели — изменились срок, целевое значение или признак
+    # ведущей, автопилот пересчитывает предложение немедленно.
+    from api.services.goal.service import refresh_goal_proposals
+    from api.services.volume.repository import guarded, utc_today
+
+    await guarded(
+        db, "обновление автопилота цели",
+        refresh_goal_proposals(db, current_user.id, utc_today()),
+    )
+
     await db.refresh(goal)
 
     profile = await _profile(db, current_user.id)
@@ -163,6 +174,17 @@ async def update_goal(
         goal.is_primary = payload.is_primary
 
     await db.commit()
+
+    # P0-12: правка цели — изменились срок, целевое значение или признак
+    # ведущей, автопилот пересчитывает предложение немедленно.
+    from api.services.goal.service import refresh_goal_proposals
+    from api.services.volume.repository import guarded, utc_today
+
+    await guarded(
+        db, "обновление автопилота цели",
+        refresh_goal_proposals(db, current_user.id, utc_today()),
+    )
+
     await db.refresh(goal)
 
     profile = await _profile(db, current_user.id)

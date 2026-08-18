@@ -125,6 +125,16 @@ async def build_context(
         refresh_volume_proposals(session, app_user.id, utc_today()),
     )
 
+    # P0-12: автопилот цели просыпается на той же точке — окно объёма уже
+    # закрыто вызовом выше, значит есть новый факт и новый тренд.
+    from api.services.goal.service import refresh_goal_proposals
+
+    await guarded(
+        session,
+        "обновление автопилота цели",
+        refresh_goal_proposals(session, app_user.id, utc_today()),
+    )
+
     # --- 1. ЗАГРУЗКА СПЛИТОВ ---
     splits_stmt = (
         select(SplitBlueprint)

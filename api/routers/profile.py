@@ -37,6 +37,16 @@ async def update_profile_me(
     await session.commit()
     await session.refresh(app_user)
 
+    # P0-12: расписание, оборудование и ограничения — входы плана. Их смена
+    # двигает ETA цели немедленно, не дожидаясь конца недели.
+    from api.services.goal.service import refresh_goal_proposals
+    from api.services.volume.repository import guarded, utc_today
+
+    await guarded(
+        session, "обновление автопилота цели",
+        refresh_goal_proposals(session, app_user.id, utc_today()),
+    )
+
     return ProfileResponse(
         id=app_user.id,
         email=app_user.email,
@@ -248,6 +258,16 @@ async def update_profile_settings(
     profile.settings = current_settings
     await db.commit()
 
+    # P0-12: расписание, оборудование и ограничения — входы плана. Их смена
+    # двигает ETA цели немедленно, не дожидаясь конца недели.
+    from api.services.goal.service import refresh_goal_proposals
+    from api.services.volume.repository import guarded, utc_today
+
+    await guarded(
+        db, "обновление автопилота цели",
+        refresh_goal_proposals(db, current_user.id, utc_today()),
+    )
+
     return {"status": "ok", "settings": profile.settings}
 
 
@@ -345,5 +365,15 @@ async def update_custom_budget(
     # Просто перезаписываем JSONB тем, что накрутил пользователь
     profile.volume_budget = payload.model_dump()
     await db.commit()
+
+    # P0-12: расписание, оборудование и ограничения — входы плана. Их смена
+    # двигает ETA цели немедленно, не дожидаясь конца недели.
+    from api.services.goal.service import refresh_goal_proposals
+    from api.services.volume.repository import guarded, utc_today
+
+    await guarded(
+        db, "обновление автопилота цели",
+        refresh_goal_proposals(db, current_user.id, utc_today()),
+    )
 
     return profile.volume_budget
