@@ -212,3 +212,21 @@ def _milestones(
         )
         for i in range(weeks + 1)
     ]
+
+
+def calibration_factor(
+    adherence_ratios: list[float], lift_sessions: int, success_rate: float
+) -> Optional[float]:
+    """Множитель темпа из собственной статистики пользователя.
+
+    None означает «данных мало» — вторая дата не показывается вовсе.
+    Выдуманного множителя не бывает: это ровно то число, которое
+    пользователь не смог бы проверить.
+    """
+    if len(adherence_ratios) < params.CALIBRATION_MIN_WINDOWS:
+        return None
+    if lift_sessions < params.CALIBRATION_MIN_SESSIONS:
+        return None
+    adherence = sum(adherence_ratios) / len(adherence_ratios)
+    raw = adherence * success_rate
+    return max(params.CALIBRATION_MIN_FACTOR, min(params.CALIBRATION_MAX_FACTOR, raw))
