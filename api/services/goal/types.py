@@ -37,3 +37,41 @@ class Simulation:
     calibration_available: bool = False
     factor: Optional[float] = None
     sessions_used: int = 0
+
+
+@dataclass(frozen=True)
+class Rates:
+    """Три темпа, между которыми решает решатель рычагов (P0-12, §5.4)."""
+
+    required: float                 # кг e1RM в неделю, чтобы успеть к сроку
+    plan: float                     # что даёт план (с калибровкой)
+    ceiling: float                  # биологический потолок
+
+
+@dataclass(frozen=True)
+class Lever:
+    """Одна ступень лестницы рычагов, предложенная пользователю."""
+
+    index: int
+    kind: str
+    reason_code: str
+    effect_slope: float             # прибавка к темпу, кг/нед
+    effect_days: int                # насколько раньше наступит ETA
+    detail: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class DecisionInput:
+    """Вход решателя: три темпа плюс контекст плана и тренда."""
+
+    rates: Rates
+    deadline: date
+    eta: Optional[date]
+    lift_in_plan: bool
+    trend_slope: float              # фактический тренд, кг/нед; < 0 — регресс
+    microcycles_left: int
+    headroom_sets: int              # сколько подходов ещё влезает до MRV
+    scheme: str                     # текущая схема прогрессии
+    is_heavy_compound: bool         # fatigue_tier == 1 и штанга/смит
+    rep_max: int                    # верх текущего диапазона повторов
+    target_reps: int                # повторы, на которые поставлена цель
