@@ -526,15 +526,19 @@ async def refresh_goal_proposals(
         scheme=state["exercise"]["scheme"],
         is_heavy_compound=state["exercise"]["is_heavy_compound"],
     ), simulate_with)
-    if not levers:
+    if not levers and reason not in params.LEVERLESS_PROPOSAL_REASONS:
         # ИСПРАВЛЕНО (ревью Задачи 6, Important 2): это УДАВШАЯСЯ переоценка
         # (evaluate() что-то посчитал, активный блок нашёлся) с содержательным
-        # выводом «сейчас предлагать нечего» — пользователь мог нагнать темп,
-        # тренд уйти в минус или требуемый темп выйти выше потолка. Прежнее
-        # pending-предложение по ЭТОЙ цели после такого вывода несёт устаревшие
-        # цифры и совет, который уже неверен (ревью воспроизвело это буквально:
-        # предложение по "лифта нет в плане" осталось висеть после того, как
-        # ситуация стала ABOVE_CEILING) — гасим его здесь же.
+        # выводом «сейчас предлагать нечего» — пользователь мог нагнать темп
+        # (reason == "") или тренд уйти в минус (REASON_TREND_DOWN, спека
+        # отдаёт его P0-07/P0-08, автопилот здесь молчит сознательно, см.
+        # params.LEVERLESS_PROPOSAL_REASONS). Прежнее pending-предложение по
+        # ЭТОЙ цели после такого вывода несёт устаревшие цифры и совет,
+        # который уже неверен — гасим его здесь же.
+        # ФИКС (Задача 17): REASON_ABOVE_CEILING/REASON_NO_LEVER_LEFT сюда
+        # больше не попадают — у них тоже нет рычагов, но есть честный совет
+        # «сдвиньте срок» (§5.4, решение 13), и они проваливаются дальше по
+        # функции, к тому же дедупу/созданию, что и предложения с рычагами.
         # Важна граница: этот блок недостижим, если evaluate() вернул None или
         # активного блока нет (оба return выше) — временная невозможность
         # посчитать НЕ повод гасить предложение, которое пользователь как раз
@@ -601,6 +605,19 @@ async def refresh_goal_proposals(
         return match  # те же условия той же цели — то же предложение, второго не надо
 
     sim = state["simulation"]
+    # ФИКС (Задача 17, §5.4 решение 13): рычагов нет (above_ceiling/
+    # no_lever_left) -> единственное честное предложение — сдвинуть срок.
+    # Дата берётся ТОЙ ЖЕ функцией пересечения, что и nominal_date/
+    # calibrated_date внутри этой же симуляции (simulate.run) — второй,
+    # независимо посчитанной даты не заводим. Темп — потолок из ЭТОЙ ЖЕ
+    # rates (state["rates"].ceiling = current_e1rm * cap_pct), а не заново
+    # выведенное число.
+    suggested_deadline = (
+        simulate.crossing_date_at_rate(
+            today, state["current_e1rm"], state["target_e1rm"], state["rates"].ceiling,
+        )
+        if not levers else None
+    )
     proposal = PeriodizationProposal(
         app_user_id=app_user_id,
         block_id=block.id,
@@ -615,6 +632,12 @@ async def refresh_goal_proposals(
             "deadline": goal.deadline.isoformat(),
             "target_e1rm": round(state["target_e1rm"], 1),
             "inputs_hash": state["inputs_hash"],
+            # Предложение сдвинуть срок (Задача 17): правка ЦЕЛИ, а не
+            # плана — применяет её пользователь через PATCH /goals своей
+            # рукой (спека, решение 13), не decision-эндпоинт предложений.
+            "suggested_deadline": (
+                suggested_deadline.isoformat() if suggested_deadline else None
+            ),
             "eta": {
                 "nominal": sim.nominal_date.isoformat() if sim.nominal_date else None,
                 "calibrated": sim.calibrated_date.isoformat() if sim.calibrated_date else None,

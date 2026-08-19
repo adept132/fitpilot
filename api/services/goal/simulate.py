@@ -312,6 +312,21 @@ def run(
     )
 
 
+def crossing_date_at_rate(
+    anchor: date, start_e1rm: float, target_e1rm: float, weekly_rate: float
+) -> Optional[date]:
+    """Дата пересечения цели при постоянном темпе `weekly_rate` от `anchor`.
+
+    Автопилот (P0-12, Задача 17, §5.4 решение 13) зовёт это для
+    REASON_ABOVE_CEILING/REASON_NO_LEVER_LEFT: рычагов нет, единственное
+    честное число — дата, достижимая на биологическом потолке. Это ТА ЖЕ
+    формула _crossing_date, что уже считает nominal_date/calibrated_date
+    внутри run(), с явно переданным темпом (потолок) вместо темпа плана —
+    вторую, независимую формулу даты спека запрещает заводить.
+    """
+    return _crossing_date(anchor, start_e1rm, target_e1rm, weekly_rate)
+
+
 def _crossing_date(
     first_day: Optional[date], start: float, target: float, slope: float
 ) -> Optional[date]:

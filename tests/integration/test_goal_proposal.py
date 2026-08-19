@@ -234,14 +234,20 @@ async def test_finished_goal_expires_its_active_proposal(test_user, fresh_exerci
 # как ситуация стала REASON_ABOVE_CEILING. refresh_goal_proposals обязан
 # погасить его сам, не дожидаясь, пока пользователь заметит несоответствие.
 
-async def test_no_levers_after_reeval_expires_pending_proposal(
+async def test_no_levers_after_reeval_replaces_stale_pending_proposal(
     test_user, seeded_history, active_block
 ):
     """Удачная переоценка (working_e1rm есть, блок активен), но decide()
     возвращает пустой список рычагов — здесь REASON_ABOVE_CEILING: короткий
     дедлайн (10 дней) и большой разрыв (100 -> ~206.7) требуют темпа далеко
     выше недельного потолка роста. Прежнее pending-предложение по ЭТОЙ цели
-    обязано уйти в expired."""
+    обязано уйти в expired.
+
+    ФИКС (Задача 17): раньше "рычагов нет" означало "сказать нечего" целиком,
+    и вторая часть этого теста проверяла result is None. Теперь
+    REASON_ABOVE_CEILING — не молчание: рычагов действительно нет, но есть
+    честный совет "сдвиньте срок" (§5.4, решение 13) — новое предложение
+    обязано заменить устаревшее, а не просто погасить его в никуда."""
     goal_id = await _primary_goal(
         test_user.id, seeded_history.id, 200.0,
         deadline=date.today() + timedelta(days=10), target_reps=1,
@@ -264,7 +270,11 @@ async def test_no_levers_after_reeval_expires_pending_proposal(
 
     async with SessionLocal() as db:
         result = await refresh_goal_proposals(db, test_user.id, date.today())
-    assert result is None
+    assert result is not None
+    assert result.id != proposal_id
+    assert result.reason_code == goal_params.REASON_ABOVE_CEILING
+    assert result.payload["levers"] == []
+    assert result.payload["suggested_deadline"] is not None
 
     async with SessionLocal() as db:
         refreshed = await db.get(PeriodizationProposal, proposal_id)
@@ -418,3 +428,98 @@ async def test_refresh_goal_proposals_stays_silent_on_falling_trend(
     async with SessionLocal() as db:
         result = await refresh_goal_proposals(db, test_user.id, date.today())
     assert result is None
+
+
+# --- Задача 17: рычагов нет, но предложение сдвинуть срок — не тишина ---
+#
+# Спека §5.4, решение 13: "быстрее биологического потолка план не сделает.
+# Единственное предложение — сдвинуть дедлайн или снизить целевой вес;
+# применяет пользователь руками". До этой задачи decide() честно возвращал
+# REASON_ABOVE_CEILING, а refresh_goal_proposals читал пустой список
+# рычагов как "сказать нечего" и не создавал вообще ничего — пользователь
+# видел ETA за дедлайном без единого объяснения (см. брифинг задачи).
+
+async def test_above_ceiling_proposal_carries_reachable_suggested_date(
+    test_user, seeded_history, active_block
+):
+    """Короткий дедлайн (10 дней) и большой разрыв (100 -> ~206.7 кг) требуют
+    темпа далеко выше недельного потолка новичка (1 %/нед) — REASON_ABOVE_
+    CEILING. Предложение обязано нести дату, ДОСТИЖИМУЮ на этом самом
+    потолке (не выдуманную): пересчитывая (target - current) / темп из
+    payload, получаем ceiling с точностью до округления дней/недель."""
+    await _primary_goal(
+        test_user.id, seeded_history.id, 200.0,
+        deadline=date.today() + timedelta(days=10), target_reps=1,
+    )
+    await _set_working_e1rm(test_user.id, seeded_history.id, 100.0)
+
+    async with SessionLocal() as db:
+        proposal = await refresh_goal_proposals(db, test_user.id, date.today())
+
+    assert proposal is not None
+    assert proposal.reason_code == goal_params.REASON_ABOVE_CEILING
+    assert proposal.payload["levers"] == []
+    suggested = proposal.payload["suggested_deadline"]
+    assert suggested is not None
+
+    target = proposal.payload["target_e1rm"]
+    ceiling = proposal.payload["rates"]["ceiling"]
+    weeks = (date.fromisoformat(suggested) - date.today()).days / 7.0
+    achieved_rate = (target - 100.0) / weeks
+    assert achieved_rate == pytest.approx(ceiling, rel=0.05)
+
+
+async def test_above_ceiling_does_not_duplicate_on_repeated_wakeup(
+    test_user, seeded_history, active_block
+):
+    """Тот же дедуп (inputs_hash + goal_id), что и для предложений с
+    рычагами (test_repeated_refresh_does_not_duplicate) — не должен зависеть
+    от того, есть рычаги или нет: второй вызов на тех же условиях обязан
+    вернуть ТУ ЖЕ строку, а не завести вторую, и не должен молча
+    экспирировать первую без замены."""
+    await _primary_goal(
+        test_user.id, seeded_history.id, 200.0,
+        deadline=date.today() + timedelta(days=10), target_reps=1,
+    )
+    await _set_working_e1rm(test_user.id, seeded_history.id, 100.0)
+
+    async with SessionLocal() as db:
+        first = await refresh_goal_proposals(db, test_user.id, date.today())
+    assert first is not None
+    assert first.reason_code == goal_params.REASON_ABOVE_CEILING
+
+    async with SessionLocal() as db:
+        second = await refresh_goal_proposals(db, test_user.id, date.today())
+    assert second is not None
+    assert second.id == first.id
+
+    async with SessionLocal() as db:
+        rows = (await db.execute(
+            select(PeriodizationProposal).where(
+                PeriodizationProposal.app_user_id == test_user.id,
+                PeriodizationProposal.kind == periodization_params.KIND_GOAL_PLAN,
+                PeriodizationProposal.status == periodization_params.STATUS_PENDING,
+            )
+        )).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].id == first.id
+
+
+async def test_goal_within_ceiling_still_gets_ordinary_lever_proposal(
+    test_user, seeded_history, active_block
+):
+    """Регрессия: ветка "рычагов нет" не должна перехватывать случай, где
+    рычаги реально есть. Тот же сетап, что test_repeated_refresh_does_not_
+    duplicate (required ~0.39 кг/нед заведомо ниже ceiling ~1.0 кг/нед у
+    новичка) — рычаг ensure_present обязан появиться, а suggested_deadline
+    остаётся пустым (сдвигать срок незачем, план и так справляется)."""
+    await _primary_goal(test_user.id, seeded_history.id, 100.0, target_reps=1)
+    await _set_working_e1rm(test_user.id, seeded_history.id, 100.0)
+
+    async with SessionLocal() as db:
+        proposal = await refresh_goal_proposals(db, test_user.id, date.today())
+
+    assert proposal is not None
+    assert proposal.reason_code != goal_params.REASON_ABOVE_CEILING
+    assert proposal.payload["levers"] != []
+    assert proposal.payload["suggested_deadline"] is None
