@@ -29,6 +29,7 @@ from typing import Optional
 from api.services.goal import params
 from api.services.goal.types import FutureSession, Milestone, Simulation
 from api.services.progression.engine import plan_exercise
+from api.services.progression.resolve import override_for
 from api.services.progression.types import (
     ExerciseHistory,
     SchemeContext,
@@ -46,12 +47,26 @@ def _e1rm(weight: float, reps: int) -> float:
 
 
 def _synthetic_facts(prescription) -> tuple[SetFact, ...]:
-    """Предписание выполнено по верхней границе диапазона при заданном RIR."""
+    """Предписание выполнено по верхней границе диапазона при заданном RIR.
+
+    ПОБОЧНАЯ НАХОДКА (P0-12, фикс C1): у AMRAP-подхода (rep_max=None,
+    открытый верх — так задаёт percent_1rm.plan) верхней границы не
+    существует. Старое `sp.rep_max or sp.rep_min` падало здесь на
+    буквальный rep_min — «выполнено ровно по минимуму» — и делало
+    percent_1rm ЕДИНСТВЕННОЙ схемой, для которой «удавшаяся сессия»
+    (спека §5.3: «симуляция предполагает, что каждая будущая сессия
+    удалась») не двигает working_e1rm вовсе: training_max пересчитывается
+    от AMRAP-результата, а ровно-минимум воспроизводит тот же вес на
+    следующей сессии, не давая расти. Этот путь ни разу не исполнялся до
+    фикса C1 (override схемы никуда не передавался — см. правку в run()
+    ниже), поэтому и не был замечен раньше. +2 — тот же запас, что и у
+    рычага "диапазон повторов" (decide._detail), а не новое число с нуля.
+    """
     return tuple(
         SetFact(
             set_number=sp.set_number,
             weight_kg=sp.weight_kg,
-            reps=sp.rep_max or sp.rep_min,
+            reps=sp.rep_max if sp.rep_max is not None else sp.rep_min + 2,
             rir=sp.rir,
         )
         for sp in prescription.sets
@@ -99,6 +114,20 @@ def run(
     history = ctx.history
     used_count = 0
 
+    # ФИКС C1 (финальное ревью P0-12, побочная находка): plan_exercise()
+    # принимает ручной override схемы ТРЕТЬИМ параметром, а не читает его
+    # из ctx.settings сам — это делает вызывающий код через
+    # progression.resolve.override_for (см. её докстринг). Раньше run()
+    # звала plan_exercise(step_ctx) без override вовсе, и LEVER_SCHEME
+    # (apply_lever пишет override именно в ctx.settings) был бы НЕВИДИМ
+    # симуляции целиком: resolve_scheme(ctx, override=None) никогда не
+    # увидел бы override и всегда шёл бы дальше по фазе/эвристике — рычаг
+    # "схема" не смог бы дать ни одного отличного от нуля эффекта ни при
+    # каком плане. exercise_id и settings не меняются между итерациями
+    # цикла (settings — часть ctx, exercise_id — ctx.history.exercise_id,
+    # неизменный между шагами), поэтому override считается один раз.
+    override = override_for(ctx.settings, ctx.history.exercise_id)
+
     for future in used:
         # state/last_outcome сюда сознательно не пробрасываются — см.
         # докстринг модуля: plan_exercise() их всё равно отбросит и
@@ -109,7 +138,7 @@ def run(
             phase_effort_tier=future.phase_effort_tier,
             target_sets=future.prescription_sets or ctx.target_sets,
         )
-        prescription = plan_exercise(step_ctx)
+        prescription = plan_exercise(step_ctx, override=override)
         used_count += 1
 
         top = prescription.top_weight
@@ -241,3 +270,134 @@ def calibration_factor(
     adherence = sum(adherence_ratios) / len(adherence_ratios)
     raw = adherence * success_rate
     return max(params.CALIBRATION_MIN_FACTOR, min(params.CALIBRATION_MAX_FACTOR, raw))
+
+
+# --- P0-12, фикс C1: рычаг -> изменённый план для повторного прогона run() ---
+#
+# decide.py просит "какой темп даст этот рычаг" через simulate_with, а
+# simulate_with (service.py) отвечает, прогоняя run() ЕЩЁ РАЗ над планом,
+# который меняет apply_lever. Здесь и только здесь живёт знание о том, ЧТО
+# именно каждый рычаг меняет в сессиях/контексте — то же самое знание, что
+# использует apply_goal_decision (service.py) для настоящей записи в БД,
+# но здесь оно только перестраивает dataclasses в памяти, БД не касается.
+
+
+def _typical_sets(sessions: list[FutureSession], fallback: int) -> int:
+    """Подходов на сессию по умолчанию для СИНТЕЗИРУЕМЫХ сессий — среднее по
+    уже существующим, а не выдуманное число; fallback — когда сессий ещё нет
+    (ensure_present: лифта в плане пока нет вовсе)."""
+    if not sessions:
+        return max(1, fallback)
+    return max(1, round(sum(s.prescription_sets for s in sessions) / len(sessions)))
+
+
+def _spread_sessions(
+    base: list[FutureSession],
+    extra_per_cycle: int,
+    microcycle_length: int,
+    start: date,
+    until: date,
+    prescription_sets: int,
+) -> list[FutureSession]:
+    """Добавить `extra_per_cycle` синтетических сессий на КАЖДЫЙ микроцикл
+    длиной `microcycle_length` в окне [start, until], равномерно расставленных
+    внутри цикла, и слить с уже существующими.
+
+    Прокси для "лифт появляется в плане чаще/впервые" (LEVER_ENSURE_PRESENT —
+    base пуст, LEVER_LIFT_FREQUENCY — extra_per_cycle=1, LEVER_STRUCTURAL —
+    extra_per_cycle=2) БЕЗ обращения к настоящему генератору расписания:
+    полный прогон SchedulingEngine на каждый кандидат-рычаг в decide()
+    означал бы запись в БД на КАЖДУЮ пробную симуляцию — недопустимая цена
+    за число, которое может быть тут же отброшено (эффект <= 0). Это
+    осознанное приближение, а не точный повтор перегенерации; оно
+    задокументировано в отчёте задачи как известное упрощение.
+    """
+    if extra_per_cycle <= 0 or microcycle_length <= 0 or start > until:
+        return list(base)
+
+    offsets = [
+        round(microcycle_length * (i + 1) / (extra_per_cycle + 1))
+        for i in range(extra_per_cycle)
+    ]
+    extra: list[FutureSession] = []
+    cycle_start = start
+    while cycle_start <= until:
+        for offset in offsets:
+            d = cycle_start + timedelta(days=offset)
+            if start <= d <= until:
+                extra.append(FutureSession(
+                    date=d, phase_effort_tier="medium", prescription_sets=prescription_sets,
+                ))
+        cycle_start += timedelta(days=microcycle_length)
+
+    return sorted(list(base) + extra, key=lambda s: s.date)
+
+
+def apply_lever(
+    kind: str,
+    detail: dict,
+    sessions: list[FutureSession],
+    ctx: SchemeContext,
+    *,
+    exercise_id: int,
+    microcycle_length: int,
+    start: date,
+    until: date,
+) -> tuple[list[FutureSession], SchemeContext]:
+    """План (сессии + контекст), КАКИМ ОН БУДЕТ, если применить рычаг `kind`.
+
+    Та же правка, которую реально запишет apply_goal_decision в БД (см. её
+    носители в спеке §5.2), но здесь только в памяти — для повторного
+    прогона run() внутри simulate_with (decide.py). Ни разу не обращается к
+    БД: exercise_id/microcycle_length/start/until — уже известные вызывающей
+    стороне числа, а не запросы.
+    """
+    if kind == params.LEVER_ENSURE_PRESENT:
+        # Лифта в sessions нет вовсе (см. decide._applicable) — синтезируем
+        # его присутствие с нуля, по одной сессии на микроцикл.
+        return _spread_sessions([], 1, microcycle_length, start, until, ctx.target_sets), ctx
+
+    if kind == params.LEVER_SETS:
+        delta = int(detail.get("delta_sets") or 0)
+        if delta <= 0 or not sessions:
+            return list(sessions), ctx
+        return (
+            [replace(s, prescription_sets=s.prescription_sets + delta) for s in sessions],
+            ctx,
+        )
+
+    if kind == params.LEVER_REP_RANGE:
+        rep_min, rep_max = detail.get("rep_min"), detail.get("rep_max")
+        if rep_min is None or rep_max is None:
+            return list(sessions), ctx
+        return list(sessions), replace(ctx, rep_min=int(rep_min), rep_max=int(rep_max))
+
+    if kind == params.LEVER_SCHEME:
+        to_scheme = detail.get("to_scheme")
+        if not to_scheme:
+            return list(sessions), ctx
+        # Тот же путь резолва, что и настоящее применение (_apply_scheme
+        # пишет туда же, profile.settings.progression.overrides) — override
+        # приоритетнее фазы мезоцикла и эвристики (resolve_scheme), поэтому
+        # это действительно меняет схему, которую выберет движок.
+        settings = dict(ctx.settings or {})
+        progression = dict(settings.get("progression") or {})
+        overrides = dict(progression.get("overrides") or {})
+        overrides[str(exercise_id)] = to_scheme
+        progression["overrides"] = overrides
+        settings["progression"] = progression
+        return list(sessions), replace(ctx, settings=settings)
+
+    if kind in params.STRUCTURAL_LEVERS:
+        # LEVER_LIFT_FREQUENCY — +1 сессия на микроцикл (та же дельта, что
+        # decide._detail даёт настоящему рычагу). LEVER_STRUCTURAL — более
+        # дорогая для пользователя ступень (другой сплит/частота/длина
+        # микроцикла через генератор); полный прогон генератора здесь
+        # недоступен (см. докстринг _spread_sessions), поэтому моделируем
+        # её как более сильную версию того же механизма — +2 сессии на
+        # микроцикл вместо одной.
+        extra = 2 if kind == params.LEVER_STRUCTURAL else 1
+        typical = _typical_sets(sessions, ctx.target_sets)
+        return _spread_sessions(sessions, extra, microcycle_length, start, until, typical), ctx
+
+    return list(sessions), ctx

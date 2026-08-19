@@ -155,6 +155,12 @@ async def evaluate(
         lift_sessions,
         success_rate,
     )
+    # ФИКС I4 (финальное ревью P0-12): фактический тренд лифта — из истории,
+    # а не из симулированного планового темпа (см. докстринг repository.
+    # historical_trend_slope про то, почему это была мёртвая ветка).
+    trend_slope = await repository.historical_trend_slope(
+        session, app_user_id, goal.exercise_id
+    )
 
     # КРИТИЧЕСКАЯ ПОПРАВКА К БРИФУ (см. поправки постановщика Задачи 6):
     # simulate.run принимает SchemeContext ПЕРВЫМ аргументом, а не голый
@@ -189,6 +195,18 @@ async def evaluate(
         "lift_in_plan": bool(sessions),
         "inputs_hash": _inputs_hash(profile, goal),
         "level": level,
+        "trend_slope": trend_slope,
+        # ФИКС C1: ctx/sessions/cap_pct/factor/горизонт — то же самое, чем
+        # только что воспользовался baseline-прогон run() выше, — наружу для
+        # refresh_goal_proposals: ей нужно ЭТО ЖЕ (ctx, sessions), чтобы
+        # собрать simulate_with и пересимулировать план С рычагом, не тратя
+        # второй раунд запросов к БД на то, что уже загружено здесь.
+        "ctx": ctx,
+        "sessions": sessions,
+        "cap_pct": cap_pct,
+        "factor": factor,
+        "horizon_start": today + timedelta(days=1),
+        "horizon_until": until,
         # Контекст рычагов: запас объёма до MRV и параметры упражнения, ОБА
         # берутся из БД через repository (поправка постановщика Задачи 6:
         # заготовка брифа местами хардкодила эти значения — без реального
@@ -461,19 +479,51 @@ async def refresh_goal_proposals(
     microcycles_left = max(
         int((goal.deadline - today).days // max(block.microcycle_length, 1)), 0
     )
+
+    # ФИКС C1 (финальное ревью P0-12): simulate_with — единственный источник
+    # эффекта рычага для decide(). `applied` — уже ПРИНЯТЫЕ decide() рычаги
+    # ЭТОГО же прохода лестницы (пустой кортеж на первом кандидате); каждый
+    # вызов пересобирает план С НУЛЯ, применяя applied по порядку и кандидат
+    # (kind, detail) поверх них, — состояние не копится в замыкании между
+    # вызовами, поэтому один и тот же набор аргументов всегда даёт один и
+    # тот же ответ (decide() полагается на это как на чистую функцию).
+    # cap_pct/factor берутся ИЗ baseline-прогона evaluate() — потолок роста
+    # и калибровка исполнения остаются в силе для КАЖДОЙ пробной симуляции,
+    # ни один рычаг не может обещать темп быстрее биологического потолка.
+    def simulate_with(applied, kind, detail):
+        cur_sessions, cur_ctx = state["sessions"], state["ctx"]
+        for lever in applied:
+            cur_sessions, cur_ctx = simulate.apply_lever(
+                lever.kind, lever.detail, cur_sessions, cur_ctx,
+                exercise_id=goal.exercise_id,
+                microcycle_length=block.microcycle_length,
+                start=state["horizon_start"], until=state["horizon_until"],
+            )
+        cur_sessions, cur_ctx = simulate.apply_lever(
+            kind, detail, cur_sessions, cur_ctx,
+            exercise_id=goal.exercise_id,
+            microcycle_length=block.microcycle_length,
+            start=state["horizon_start"], until=state["horizon_until"],
+        )
+        probe = simulate.run(
+            cur_ctx, target_e1rm=state["target_e1rm"], sessions=cur_sessions,
+            cap_pct=state["cap_pct"], factor=state["factor"],
+        )
+        return probe.plan_slope, (probe.calibrated_date or probe.nominal_date)
+
     levers, reason = decide.decide(DecisionInput(
         rates=state["rates"],
         deadline=goal.deadline,
         eta=state["eta"],
         lift_in_plan=state["lift_in_plan"],
-        trend_slope=state["simulation"].nominal_slope,
+        trend_slope=state["trend_slope"],
         microcycles_left=microcycles_left,
         headroom_sets=state["headroom_sets"],
         scheme=state["exercise"]["scheme"],
         is_heavy_compound=state["exercise"]["is_heavy_compound"],
         rep_max=state["exercise"]["rep_max"],
         target_reps=goal.target_reps or 1,
-    ))
+    ), simulate_with)
     if not levers:
         # ИСПРАВЛЕНО (ревью Задачи 6, Important 2): это УДАВШАЯСЯ переоценка
         # (evaluate() что-то посчитал, активный блок нашёлся) с содержательным

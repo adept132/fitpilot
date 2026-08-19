@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Optional
+from typing import Callable, Optional, Sequence
 
 
 @dataclass(frozen=True)
@@ -58,6 +58,18 @@ class Lever:
     effect_slope: float             # прибавка к темпу, кг/нед
     effect_days: int                # насколько раньше наступит ETA
     detail: dict = field(default_factory=dict)
+
+
+# Контракт пересимуляции (P0-12, фикс C1 финального ревью): decide.py не
+# знает, КАК рычаг меняет план (сессии, диапазон повторов, схему) — это
+# знание живёт в simulate.apply_lever и в вызывающей стороне (service.py,
+# у которой есть SchemeContext и будущие сессии). decide.py лишь просит
+# число: "какой темп и какой ETA даст этот рычаг, если применить его поверх
+# уже принятых рычагов applied" — и получает его РЕАЛЬНЫМ прогоном движка
+# (simulate.run), а не оценкой. applied передаётся явно (а не через
+# скрытое состояние замыкания), поэтому одинаковый вызов всегда даёт
+# одинаковый ответ — decide.py остаётся чистой функцией своих аргументов.
+SimulateWith = Callable[[Sequence[Lever], str, dict], tuple[float, Optional[date]]]
 
 
 @dataclass(frozen=True)

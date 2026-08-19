@@ -12,6 +12,7 @@ from typing import Optional
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.services.forecast import linear_trend
 from api.services.goal.types import FutureSession
 from api.services.models import (
     Exercise,
@@ -134,6 +135,60 @@ async def lift_stats(
 
     grew = sum(1 for a, b in zip(weights, weights[1:]) if b >= a)
     return len(weights), grew / (len(weights) - 1)
+
+
+async def historical_trend_slope(
+    session: AsyncSession, app_user_id: int, exercise_id: int
+) -> float:
+    """Фактический тренд e1RM лифта, кг/нед — линейная регрессия по
+    последним завершённым сессиям.
+
+    ФИКС I4 (финальное ревью P0-12): раньше DecisionInput.trend_slope
+    получал `state["simulation"].nominal_slope` — плановый ПРОГНОЗНЫЙ темп,
+    который simulate.run строит неотрицательным по конструкции (`max(...,
+    0.0)`, см. её докстринг), — падающий тренд не мог сработать НИКОГДА в
+    проде: REASON_TREND_DOWN был мёртвой веткой. Здесь — настоящая история
+    факта, а не симуляция плана.
+
+    Источник — тот же load_history, что и движок прогрессии (то же окно
+    HISTORY_LIMIT), НАПРЯМУЮ, а не через repository.scheme_context: у
+    scheme_context есть bootstrap-заглушка на случай пустой истории (см. её
+    докстринг) — одна синтетическая точка не должна притворяться трендом.
+    Пустая/однократная история здесь просто даёт "тренда нет" (0.0), не
+    вызывая линейную регрессию вовсе.
+
+    e1RM подхода — тот же Эпли без RIR, что и everywhere в модуле цели
+    (goal_service.epley_e1rm, simulate._e1rm): лучший подход сессии — с
+    максимальным получившимся e1RM, а не просто с максимальным весом (при
+    разных повторах это не одно и то же). Нерабочие типы подходов и
+    аномальные исключаются той же логикой, что rebuild_state (progression.
+    params.IGNORED_SET_TYPES, SetFact.is_anomalous) — второй, рассинхрони-
+    зирующийся список литералов не заводим.
+    """
+    from api.services.progression.params import IGNORED_SET_TYPES
+    from api.services.progression.repository import load_history
+
+    history = await load_history(session, app_user_id, exercise_id)
+
+    points: list[tuple[date, float]] = []
+    for s in history.sessions:
+        if s.finished_at is None:
+            continue
+        working = [
+            f for f in s.sets
+            if f.weight_kg is not None
+            and f.reps > 0
+            and not f.is_anomalous
+            and (f.set_type or "normal").lower() not in IGNORED_SET_TYPES
+        ]
+        if not working:
+            continue
+        best = max(f.weight_kg * (1.0 + f.reps / 30.0) for f in working)
+        points.append((s.finished_at.date(), best))
+
+    if len(points) < 2:
+        return 0.0
+    return linear_trend(points).slope_per_week
 
 
 async def adherence_ratios(

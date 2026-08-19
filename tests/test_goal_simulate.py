@@ -174,3 +174,132 @@ def test_history_keep_matches_progression_history_limit():
     from api.services.progression.repository import HISTORY_LIMIT
 
     assert simulate._HISTORY_KEEP == HISTORY_LIMIT
+
+
+# --- P0-12, фикс C1: эффект рычага — из пересимуляции, а не из константы ---
+#
+# Спека §5.4 явно требует, чтобы одинаковый рычаг давал РАЗНОЕ число в
+# зависимости от того, какой план он меняет: лифт, стоящий раз в неделю, и
+# лифт, стоящий трижды в неделю, не обязаны получать одну и ту же прибавку
+# темпа. Раньше decide._LEVER_SHARE была фиксированной константой — тест
+# ниже был бы физически не в состоянии обнаружить регресс назад к константе,
+# потому что apply_lever() отвечает НАСТОЯЩИМ прогоном движка, а не оценкой.
+#
+# Рычаг для доказательства — LEVER_LIFT_FREQUENCY, а не «+1 подход»
+# (LEVER_SETS), хотя в самой спеке в качестве примера упомянут именно
+# подход. Число подходов ни в одной из четырёх схем прогрессии не входит в
+# условие продвижения веса (double: `ceiling_reached = all(reps >= ceiling
+# for reps in previous)` — булево условие «дошли ли ДО потолка», не «сколько
+# подходов»; fixed_increment и e1rm_factor аналогично булевы; percent_1rm
+# вообще не читает target_sets) — при синтетическом исполнении «на потолке
+# диапазона» (§5.3) число подходов физически не может сдвинуть e1RM ни на
+# грамм. См. test_apply_lever_sets_has_no_measurable_effect_on_pace ниже:
+# это не пропущенный случай, а честный результат пересимуляции — тот самый,
+# ради которого делается фикс C1 (константа НЕ подставляется, даже когда
+# настоящий эффект равен нулю).
+
+def test_apply_lever_lift_frequency_effect_depends_on_session_frequency():
+    start = date(2026, 3, 2)
+    until = start + timedelta(days=365)
+    ctx = _ctx()
+    once_a_week = _sessions(60, start=start, every_days=7)
+    three_a_week = _sessions(150, start=start, every_days=2)
+
+    def _plan_slope(sessions):
+        return simulate.run(
+            ctx, target_e1rm=140.0, sessions=sessions, cap_pct=1.0, factor=None,
+        ).plan_slope
+
+    def _plan_slope_with_extra_session(sessions):
+        lever_sessions, lever_ctx = simulate.apply_lever(
+            params.LEVER_LIFT_FREQUENCY, {"delta_sessions": 1}, sessions, ctx,
+            exercise_id=51, microcycle_length=7, start=start, until=until,
+        )
+        return simulate.run(
+            lever_ctx, target_e1rm=140.0, sessions=lever_sessions,
+            cap_pct=1.0, factor=None,
+        ).plan_slope
+
+    effect_once = _plan_slope_with_extra_session(once_a_week) - _plan_slope(once_a_week)
+    effect_thrice = _plan_slope_with_extra_session(three_a_week) - _plan_slope(three_a_week)
+
+    assert effect_once > 0
+    assert effect_thrice > 0
+    assert effect_once != effect_thrice, (
+        "тот же +1 сессия обязана давать разный эффект на разной исходной "
+        "частоте лифта в плане — иначе эффект по-прежнему константа, а не "
+        "симуляция"
+    )
+
+
+def test_apply_lever_sets_has_no_measurable_effect_on_pace():
+    """Честный ноль, а не невидимый регресс: под синтетическим исполнением
+    «на потолке диапазона» число подходов не входит ни в одно условие
+    продвижения веса ни в одной из схем (см. блок-докстринг выше) — значит
+    LEVER_SETS не может двигать e1RM-темп В ЭТОЙ симуляции, и это истинно
+    ПРИ ЛЮБОЙ частоте плана. decide() обязан отфильтровать такой рычаг
+    (effect_slope <= 0 -> continue, см. decide.py) вместо того, чтобы
+    предлагать его с нулевым эффектом."""
+    start = date(2026, 3, 2)
+    until = start + timedelta(days=365)
+    ctx = _ctx()
+
+    for sessions in (
+        _sessions(60, start=start, every_days=7),
+        _sessions(150, start=start, every_days=2),
+    ):
+        base = simulate.run(
+            ctx, target_e1rm=140.0, sessions=sessions, cap_pct=1.0, factor=None,
+        ).plan_slope
+        lever_sessions, lever_ctx = simulate.apply_lever(
+            params.LEVER_SETS, {"delta_sets": 2}, sessions, ctx,
+            exercise_id=51, microcycle_length=7, start=start, until=until,
+        )
+        with_lever = simulate.run(
+            lever_ctx, target_e1rm=140.0, sessions=lever_sessions,
+            cap_pct=1.0, factor=None,
+        ).plan_slope
+        assert with_lever == base
+
+
+def test_apply_lever_ensure_present_synthesizes_sessions_from_nothing():
+    """LEVER_ENSURE_PRESENT: лифта в sessions нет вовсе (пустой список) —
+    apply_lever обязан синтезировать его присутствие, а не просто вернуть
+    пустой план (иначе он и дальше не рос бы, и рычаг выглядел бы
+    бесполезным, хотя весь его смысл — вернуть лифт в план)."""
+    start = date(2026, 3, 2)
+    until = start + timedelta(days=90)
+    ctx = _ctx()
+
+    sessions, out_ctx = simulate.apply_lever(
+        params.LEVER_ENSURE_PRESENT, {}, [], ctx,
+        exercise_id=51, microcycle_length=7, start=start, until=until,
+    )
+    assert sessions, "ensure_present обязан синтезировать сессии из пустого плана"
+    assert all(start <= s.date <= until for s in sessions)
+    assert out_ctx is ctx  # ensure_present не трогает контекст, только сессии
+
+
+def test_apply_lever_rep_range_changes_ctx_not_sessions():
+    ctx = _ctx()
+    sessions = _sessions(5, start=date(2026, 3, 2))
+    out_sessions, out_ctx = simulate.apply_lever(
+        params.LEVER_REP_RANGE, {"rep_min": 1, "rep_max": 5}, sessions, ctx,
+        exercise_id=51, microcycle_length=7,
+        start=date(2026, 3, 2), until=date(2026, 6, 2),
+    )
+    assert out_sessions == sessions
+    assert out_ctx.rep_min == 1
+    assert out_ctx.rep_max == 5
+
+
+def test_apply_lever_scheme_overrides_settings_for_exercise():
+    ctx = _ctx()
+    sessions = _sessions(5, start=date(2026, 3, 2))
+    out_sessions, out_ctx = simulate.apply_lever(
+        params.LEVER_SCHEME, {"to_scheme": "percent_1rm"}, sessions, ctx,
+        exercise_id=51, microcycle_length=7,
+        start=date(2026, 3, 2), until=date(2026, 6, 2),
+    )
+    assert out_sessions == sessions
+    assert out_ctx.settings["progression"]["overrides"]["51"] == "percent_1rm"

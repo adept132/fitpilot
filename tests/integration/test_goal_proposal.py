@@ -1,15 +1,21 @@
 """Создание предложения автопилота: пороги, дедуп, вытеснение (P0-12, Задача 6)."""
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
 
+from api.services.goal import decide, repository
+from api.services.goal import params as goal_params
 from api.services.goal.service import refresh_goal_proposals
+from api.services.goal.types import DecisionInput, Rates
 from api.services.models import (
     PeriodizationProposal,
     TrainingBlock,
     UserExerciseProgressionState,
     UserGoal,
+    WorkoutSession,
+    WorkoutSessionExercise,
+    WorkoutSessionSet,
 )
 from api.services.periodization import params as periodization_params
 from app.database import SessionLocal
@@ -310,3 +316,108 @@ async def test_incomplete_evaluation_leaves_pending_proposal_untouched(
     async with SessionLocal() as fresh_db:
         untouched = await fresh_db.get(PeriodizationProposal, proposal_id)
         assert untouched.status == periodization_params.STATUS_PENDING
+
+
+# --- Финальное ревью P0-12, фикс I4: падающий тренд — через настоящую
+# историю, а не через руками подставленную -0.4 ---
+#
+# Раньше DecisionInput.trend_slope в проде получал `state["simulation"].
+# nominal_slope` — плановый ПРОГНОЗНЫЙ темп, который simulate.run строит
+# неотрицательным по конструкции (`max(raw_slope, 0.0)`, см. её докстринг):
+# REASON_TREND_DOWN не мог сработать НИКОГДА на реальном пути. Три теста
+# ниже доказывают фикс на трёх уровнях одной и той же цепочки: сырое число
+# из repository, решение decide() на этом числе, и молчание всего
+# refresh_goal_proposals end-to-end.
+
+async def _seed_declining_sessions(user_id: int, exercise_id: int) -> None:
+    """Три тренировки со стабильно падающим рабочим весом (60 -> 52 -> 44 кг,
+    раз в неделю) — тренд e1RM по ним обязан получиться отрицательным."""
+    async with SessionLocal() as db:
+        for i, weight in enumerate([60.0, 52.0, 44.0]):
+            workout = WorkoutSession(
+                app_user_id=user_id, source="free", status="finished",
+                finished_at=datetime.now(timezone.utc) - timedelta(days=(3 - i) * 7),
+            )
+            db.add(workout)
+            await db.flush()
+            se = WorkoutSessionExercise(
+                workout_session_id=workout.id, exercise_id=exercise_id, order_index=0,
+            )
+            db.add(se)
+            await db.flush()
+            for set_number in range(1, 4):
+                db.add(WorkoutSessionSet(
+                    workout_session_exercise_id=se.id, set_number=set_number,
+                    set_type="normal", weight=weight, reps=8,
+                    effort_level="medium", is_completed=True,
+                ))
+        await db.commit()
+
+
+async def test_historical_trend_slope_is_negative_for_real_declining_history(
+    test_user, fresh_exercise
+):
+    """Уровень 1: сырая функция repository.historical_trend_slope, которую
+    теперь и читает service.evaluate, реально умеет вернуть отрицательное
+    число на настоящей истории — раньше эта функция даже не существовала,
+    а её место занимал симулированный плановый темп."""
+    await _seed_declining_sessions(test_user.id, fresh_exercise.id)
+
+    async with SessionLocal() as db:
+        trend = await repository.historical_trend_slope(db, test_user.id, fresh_exercise.id)
+
+    assert trend < 0
+
+
+async def test_falling_trend_from_real_history_blocks_acceleration(
+    test_user, fresh_exercise
+):
+    """Уровень 2: тот же реальный тренд, поданный в decide() без единого
+    руками подставленного числа, обрывает лестницу ДО обращения к
+    пересимуляции рычагов — падающий тренд не ускоряется (спека §5.4)."""
+    await _seed_declining_sessions(test_user.id, fresh_exercise.id)
+
+    async with SessionLocal() as db:
+        trend = await repository.historical_trend_slope(db, test_user.id, fresh_exercise.id)
+    assert trend < 0
+
+    inp = DecisionInput(
+        rates=Rates(required=1.5, plan=0.5, ceiling=2.0),
+        deadline=date.today() + timedelta(days=60),
+        eta=date.today() + timedelta(days=120),
+        lift_in_plan=True,
+        trend_slope=trend,
+        microcycles_left=8,
+        headroom_sets=4,
+        scheme="double",
+        is_heavy_compound=True,
+        rep_max=12,
+        target_reps=3,
+    )
+
+    def _unreachable_simulate_with(applied, kind, detail):
+        raise AssertionError(
+            "падающий тренд обязан оборвать decide() ДО обращения к "
+            "пересимуляции рычагов"
+        )
+
+    levers, reason = decide.decide(inp, _unreachable_simulate_with)
+    assert levers == []
+    assert reason == goal_params.REASON_TREND_DOWN
+
+
+async def test_refresh_goal_proposals_stays_silent_on_falling_trend(
+    test_user, fresh_exercise, active_block
+):
+    """Уровень 3: сквозь весь продакшн-путь — настоящая падающая история +
+    ведущая цель + активный блок -> refresh_goal_proposals не создаёт
+    предложение ускорения. До фикса I4 trend_slope на этом пути физически
+    не мог быть отрицательным, и этот сценарий не мог провалиться иначе,
+    чем на подставленной вручную константе."""
+    await _seed_declining_sessions(test_user.id, fresh_exercise.id)
+    await _set_working_e1rm(test_user.id, fresh_exercise.id, 45.0)
+    await _primary_goal(test_user.id, fresh_exercise.id, 200.0, target_reps=3)
+
+    async with SessionLocal() as db:
+        result = await refresh_goal_proposals(db, test_user.id, date.today())
+    assert result is None
