@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import func, select
@@ -78,6 +78,43 @@ async def future_sessions(
         )
         for row in rows
     ]
+
+
+async def structural_calendar_preview(
+    session: AsyncSession, app_user_id: int, block_id: int, today: date,
+) -> tuple[int, int]:
+    """Сколько будущих дней блока структурная перегенерация реально тронет —
+    и сколько защищены фактом или принятой правкой объёма (P0-12, Задача 18).
+
+    Честная замена настоящему GenerationComparison (спека §6.2): прогнать
+    SchedulingEngine.generate_block_days ради предпросмотра нельзя — она
+    пишет в БД и коммитит (periodization.service._generate_future_calendar)
+    прямо на предложении, которое пользователь ещё не принял. Вместо
+    dry-run-генерации — тот же самый предикат, каким живая
+    _wipe_future_calendar (periodization.service) уже решает, какой день
+    удалить: status == 'planned' и пустой volume_adjustments. Дни,
+    попадающие под него, — affected (то, что реально изменится); всё
+    остальное (уже есть факт или принятая правка объёма P0-09) — protected.
+    Это ровно то же условие, что goal.service._apply_structural считает как
+    touched_flags при настоящем применении — здесь оно просто посчитано
+    заранее, до согласия пользователя, и без единой записи.
+
+    Дни-«дыры» (даты диапазона блока без единой строки UserCalendarDay)
+    сознательно не считаются ни там, ни там: превью отвечает на вопрос «что
+    случится с уже существующим», а не воспроизводит вставку новых дней,
+    которую делает generate_block_days.
+    """
+    first_future = today + timedelta(days=1)
+    rows = (await session.execute(
+        select(UserCalendarDay.status, UserCalendarDay.volume_adjustments).where(
+            UserCalendarDay.app_user_id == app_user_id,
+            UserCalendarDay.block_id == block_id,
+            UserCalendarDay.target_date >= first_future,
+        )
+    )).all()
+    affected = sum(1 for status, adjustments in rows if status == "planned" and not adjustments)
+    protected = len(rows) - affected
+    return affected, protected
 
 
 async def current_e1rm(

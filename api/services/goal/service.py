@@ -413,6 +413,33 @@ async def build_context(
     }
 
 
+def _lever_session_counts(
+    levers: list, state: dict, block: TrainingBlock, exercise_id: int,
+) -> tuple[int, int]:
+    """Сколько сессий целевого лифта в горизонте — сейчас и после ВСЕХ
+    рычагов лестницы (P0-12, Задача 18: превью структурного рычага, §6.2).
+
+    «После» получаем ТОЙ ЖЕ функцией simulate.apply_lever, которой
+    simulate_with (см. ниже) уже посчитал эффект каждого рычага на темп —
+    не выводим число вторым, независимым способом (тот же принцип, каким
+    simulate_with уже пользуется для темпа). Раз simulate_with уже прогонял
+    apply_lever кумулятивно поверх applied+candidate на каждом шаге
+    лестницы, применение здесь того же списка levers с нуля даёт то самое
+    состояние сессий, на котором decide() остановился, приняв последний
+    рычаг.
+    """
+    before = len(state["sessions"])
+    cur_sessions, cur_ctx = state["sessions"], state["ctx"]
+    for lever in levers:
+        cur_sessions, cur_ctx = simulate.apply_lever(
+            lever.kind, lever.detail, cur_sessions, cur_ctx,
+            exercise_id=exercise_id,
+            microcycle_length=block.microcycle_length,
+            start=state["horizon_start"], until=state["horizon_until"],
+        )
+    return before, len(cur_sessions)
+
+
 async def refresh_goal_proposals(
     session: AsyncSession, app_user_id: int, today: date
 ) -> Optional[PeriodizationProposal]:
@@ -618,6 +645,39 @@ async def refresh_goal_proposals(
         )
         if not levers else None
     )
+
+    # Превью структурного рычага (P0-12, Задача 18, §6.2): GeneratorComparisonSheet
+    # экрана-генератора здесь не годится — построить настоящий GenerationComparison
+    # значит прогнать SchedulingEngine.generate_block_days, а она пишет в БД и
+    # коммитит (см. её докстринг) ради предпросмотра предложения, которое
+    # пользователь ещё не принял. Вместо dry-run — то, что система и так уже
+    # знает, не трогая календарь:
+    #   affected_dates/protected_dates — тот же предикат, каким живая
+    #     _wipe_future_calendar удаляет дни (repository.structural_calendar_preview),
+    #     посчитанный превентивно, ДО применения;
+    #   sessions_before/sessions_after — сколько сессий целевого лифта несёт
+    #     горизонт сейчас и после лестницы; sessions_after не считается заново
+    #     отдельной формулой, а взят из той же apply_lever-прокрутки, которой
+    #     simulate_with уже пользовался, чтобы получить эффект каждого рычага
+    #     (_lever_session_counts выше).
+    # Заполняется только когда лестница реально дошла до структурной ступени
+    # (LEVER_LIFT_FREQUENCY/LEVER_STRUCTURAL, params.STRUCTURAL_LEVERS) — на
+    # ensure_present/scheme календарь не трогается, превью нечего показывать.
+    structural = None
+    if any(lever.kind in params.STRUCTURAL_LEVERS for lever in levers):
+        affected_dates, protected_dates = await repository.structural_calendar_preview(
+            session, app_user_id, block.id, today,
+        )
+        sessions_before, sessions_after = _lever_session_counts(
+            levers, state, block, goal.exercise_id,
+        )
+        structural = {
+            "affected_dates": affected_dates,
+            "protected_dates": protected_dates,
+            "sessions_before": sessions_before,
+            "sessions_after": sessions_after,
+        }
+
     proposal = PeriodizationProposal(
         app_user_id=app_user_id,
         block_id=block.id,
@@ -658,7 +718,7 @@ async def refresh_goal_proposals(
                 }
                 for l in levers
             ],
-            "structural": None,
+            "structural": structural,
             "applied_snapshot": None,
         },
         status=periodization_params.STATUS_PENDING,

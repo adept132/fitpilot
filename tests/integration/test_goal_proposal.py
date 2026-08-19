@@ -7,10 +7,11 @@ from sqlalchemy import select
 from api.services.goal import decide, repository
 from api.services.goal import params as goal_params
 from api.services.goal.service import refresh_goal_proposals
-from api.services.goal.types import DecisionInput, Rates
+from api.services.goal.types import DecisionInput, Lever, Rates
 from api.services.models import (
     PeriodizationProposal,
     TrainingBlock,
+    UserCalendarDay,
     UserExerciseProgressionState,
     UserGoal,
     WorkoutSession,
@@ -523,3 +524,109 @@ async def test_goal_within_ceiling_still_gets_ordinary_lever_proposal(
     assert proposal.reason_code != goal_params.REASON_ABOVE_CEILING
     assert proposal.payload["levers"] != []
     assert proposal.payload["suggested_deadline"] is None
+
+
+# --- Задача 18: превью структурного рычага (спека §6.2) ---
+#
+# GeneratorComparisonSheet экрана-генератора здесь не годится — построить
+# настоящий GenerationComparison означает прогнать SchedulingEngine.
+# generate_block_days, а она пишет в БД и коммитит ради предпросмотра
+# предложения, которое пользователь ещё не принял. payload["structural"]
+# заполняется вместо него правдивым превью из уже известного состояния:
+# какие даты реально тронет перегенерация (тот же предикат, что
+# _wipe_future_calendar) и сколько сессий целевого лифта план держит сейчас
+# и после лестницы.
+
+
+async def test_proposal_with_structural_lever_carries_preview(
+    test_user, seeded_history, active_block, monkeypatch
+):
+    """decide() моклен на канонический структурный рычаг (lift_frequency):
+    организовать реальную лестницу до структурной ступени требует
+    специфичного сочетания входов, уже покрытого test_goal_decide.py —
+    здесь под проверкой интеграция service.py с repository (реальные даты
+    из БД) и simulate.apply_lever (реальный пересчёт числа сессий), а не
+    сама лестница decide().
+
+    Три будущих дня блока: обычный planned (affected — ровно то, что
+    удалила бы _wipe_future_calendar), день с фактом (status="completed")
+    и день с принятой правкой объёма (volume_adjustments) — оба защищены и
+    обязаны попасть в protected_dates, а не в affected_dates.
+    """
+    await _primary_goal(test_user.id, seeded_history.id, 150.0, target_reps=1)
+    await _set_working_e1rm(test_user.id, seeded_history.id, 100.0)
+
+    first_future = date.today() + timedelta(days=1)
+    async with SessionLocal() as db:
+        db.add(UserCalendarDay(
+            app_user_id=test_user.id, target_date=first_future,
+            block_id=active_block.id, day_tag="push",
+            micro_tag="medium", meso_tag="medium",
+            is_rest_day=False, is_blackout=False, status="planned",
+        ))
+        db.add(UserCalendarDay(
+            app_user_id=test_user.id, target_date=first_future + timedelta(days=1),
+            block_id=active_block.id, day_tag="push",
+            micro_tag="medium", meso_tag="medium",
+            is_rest_day=False, is_blackout=False, status="completed",
+        ))
+        db.add(UserCalendarDay(
+            app_user_id=test_user.id, target_date=first_future + timedelta(days=2),
+            block_id=active_block.id, day_tag="push",
+            micro_tag="medium", meso_tag="medium",
+            is_rest_day=False, is_blackout=False, status="planned",
+            volume_adjustments=[
+                {"exercise_id": seeded_history.id, "delta_sets": 2, "proposal_id": 1}
+            ],
+        ))
+        await db.commit()
+
+    def _fake_decide(inp, simulate_with):
+        return [Lever(
+            index=0, kind=goal_params.LEVER_LIFT_FREQUENCY,
+            reason_code=goal_params.REASON_PACE_BEHIND,
+            effect_slope=0.3, effect_days=12, detail={"delta_sessions": 1},
+        )], goal_params.REASON_PACE_BEHIND
+
+    monkeypatch.setattr("api.services.goal.decide.decide", _fake_decide)
+
+    async with SessionLocal() as db:
+        proposal = await refresh_goal_proposals(db, test_user.id, date.today())
+
+    assert proposal is not None
+    structural = proposal.payload["structural"]
+    assert structural is not None
+    assert structural["affected_dates"] == 1
+    assert structural["protected_dates"] == 2
+    assert structural["sessions_before"] == 0  # seeded_history без плана в календаре
+    assert structural["sessions_after"] > structural["sessions_before"]
+
+
+async def test_non_structural_proposal_carries_no_structural_preview(
+    test_user, seeded_history, active_block, monkeypatch
+):
+    """decide() моклен на единственный рычаг ensure_present (нулевая цена,
+    §5.4, ступень 1 лестницы) — календаря он не касается вовсе, значит и
+    превью нечего показывать. Мок здесь тот же приём, что и в
+    test_proposal_with_structural_lever_carries_preview: изолирует ветку
+    "нет структурного рычага" от конкретного сочетания входов, при котором
+    настоящая лестница на нём остановится (это уже покрыто
+    test_goal_decide.py)."""
+    await _primary_goal(test_user.id, seeded_history.id, 100.0, target_reps=1)
+    await _set_working_e1rm(test_user.id, seeded_history.id, 100.0)
+
+    def _fake_decide(inp, simulate_with):
+        return [Lever(
+            index=0, kind=goal_params.LEVER_ENSURE_PRESENT,
+            reason_code=goal_params.REASON_LIFT_MISSING,
+            effect_slope=0.25, effect_days=18, detail={},
+        )], goal_params.REASON_LIFT_MISSING
+
+    monkeypatch.setattr("api.services.goal.decide.decide", _fake_decide)
+
+    async with SessionLocal() as db:
+        proposal = await refresh_goal_proposals(db, test_user.id, date.today())
+
+    assert proposal is not None
+    assert proposal.payload["levers"][0]["kind"] == goal_params.LEVER_ENSURE_PRESENT
+    assert proposal.payload["structural"] is None
