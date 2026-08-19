@@ -174,6 +174,40 @@ async def lift_stats(
     return len(weights), grew / (len(weights) - 1)
 
 
+async def e1rm_history_points(
+    session: AsyncSession, app_user_id: int, exercise_id: int
+) -> list[tuple[date, float]]:
+    """Даты и e1RM лучших рабочих подходов по последним завершённым сессиям.
+
+    Вынесено из historical_trend_slope (P0-12, Задача 19, §6.2): вехам
+    симуляции нужны те же точки (дата, e1RM), что и тренду, — веха без
+    факта отвечает вопросом «что реально показано на этой неделе», тренд —
+    той же историей, только регрессией. Второй, расходящийся запрос за
+    историей лифта не заводим — build_context зовёт это напрямую.
+    """
+    from api.services.progression.params import IGNORED_SET_TYPES
+    from api.services.progression.repository import load_history
+
+    history = await load_history(session, app_user_id, exercise_id)
+
+    points: list[tuple[date, float]] = []
+    for s in history.sessions:
+        if s.finished_at is None:
+            continue
+        working = [
+            f for f in s.sets
+            if f.weight_kg is not None
+            and f.reps > 0
+            and not f.is_anomalous
+            and (f.set_type or "normal").lower() not in IGNORED_SET_TYPES
+        ]
+        if not working:
+            continue
+        best = max(f.weight_kg * (1.0 + f.reps / 30.0) for f in working)
+        points.append((s.finished_at.date(), best))
+    return points
+
+
 async def historical_trend_slope(
     session: AsyncSession, app_user_id: int, exercise_id: int
 ) -> float:
@@ -201,28 +235,11 @@ async def historical_trend_slope(
     аномальные исключаются той же логикой, что rebuild_state (progression.
     params.IGNORED_SET_TYPES, SetFact.is_anomalous) — второй, рассинхрони-
     зирующийся список литералов не заводим.
+
+    Точки — из e1rm_history_points (вынесено туда Задачей 19, §6.2): тот
+    же запрос, которым теперь пользуются и вехи «симуляция vs факт».
     """
-    from api.services.progression.params import IGNORED_SET_TYPES
-    from api.services.progression.repository import load_history
-
-    history = await load_history(session, app_user_id, exercise_id)
-
-    points: list[tuple[date, float]] = []
-    for s in history.sessions:
-        if s.finished_at is None:
-            continue
-        working = [
-            f for f in s.sets
-            if f.weight_kg is not None
-            and f.reps > 0
-            and not f.is_anomalous
-            and (f.set_type or "normal").lower() not in IGNORED_SET_TYPES
-        ]
-        if not working:
-            continue
-        best = max(f.weight_kg * (1.0 + f.reps / 30.0) for f in working)
-        points.append((s.finished_at.date(), best))
-
+    points = await e1rm_history_points(session, app_user_id, exercise_id)
     if len(points) < 2:
         return 0.0
     return linear_trend(points).slope_per_week

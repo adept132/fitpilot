@@ -306,6 +306,29 @@ async def _undo_blocked_reason(
     )
 
 
+def _milestones_with_fact(
+    milestones: list, history_points: list[tuple[date, float]]
+) -> list[dict]:
+    """Вехи симуляции против факта (P0-12, Задача 19, §6.2).
+
+    actual_e1rm — e1RM из истории, показанный в ту же календарную неделю
+    [week_start, week_start+7), последнее значение недели, если тренировок
+    несколько. Недели без факта отдают None, а не 0 — экран обязан читать
+    отсутствие данных как «рано», не как «упал до нуля» (history_points
+    отсортированы по возрастанию даты вызывающим кодом).
+    """
+    result = []
+    for m in milestones:
+        week_end = m.week_start + timedelta(days=7)
+        in_week = [v for d, v in history_points if m.week_start <= d < week_end]
+        result.append({
+            "week_start": m.week_start.isoformat(),
+            "expected_e1rm": m.expected_e1rm,
+            "actual_e1rm": in_week[-1] if in_week else None,
+        })
+    return result
+
+
 async def build_context(
     session: AsyncSession, app_user_id: int, goal: UserGoal, today: date
 ) -> dict:
@@ -368,6 +391,13 @@ async def build_context(
         ).order_by(PeriodizationProposal.decided_at.desc())
     )).scalars().first()
 
+    # Веха vs факт (P0-12, Задача 19, §6.2): та же история, что уже
+    # прочитана для тренда (repository.historical_trend_slope) — второй,
+    # расходящийся запрос за фактом лифта не заводим.
+    history_points = sorted(
+        await repository.e1rm_history_points(session, app_user_id, goal.exercise_id)
+    )
+
     last_applied = None
     if applied is not None:
         blocked_reason = await _undo_blocked_reason(session, app_user_id, applied)
@@ -393,11 +423,7 @@ async def build_context(
             "plan": round(state["rates"].plan, 3),
             "ceiling": round(state["rates"].ceiling, 3),
         },
-        "milestones": [
-            {"week_start": m.week_start.isoformat(),
-             "expected_e1rm": m.expected_e1rm, "actual_e1rm": None}
-            for m in sim.milestones
-        ],
+        "milestones": _milestones_with_fact(sim.milestones, history_points),
         "plan_ahead": {
             "target_lift_sessions": len(sessions),
             "sets_per_window": sum(s.prescription_sets for s in sessions[:4]),

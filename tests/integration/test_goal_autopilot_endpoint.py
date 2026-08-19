@@ -3,7 +3,8 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from api.services.goal.service import build_context
+from api.services.goal.service import _milestones_with_fact, build_context
+from api.services.goal.types import Milestone
 from api.services.models import (
     PeriodizationProposal,
     UserCalendarDay,
@@ -286,3 +287,29 @@ async def test_applied_proposal_of_other_goal_does_not_leak(
         ctx_a = await build_context(db, test_user.id, goal, date.today())
 
     assert ctx_a["last_applied"] is not None
+
+
+def test_milestones_with_fact_fills_actual_only_for_weeks_with_history():
+    """P0-12, Задача 19, §6.2: веха читает факт из истории в своей
+    календарной неделе [week_start, week_start+7); неделя без факта
+    отдаёт None, а не 0 — иначе экран читал бы "рано" как "упал"."""
+    milestones = [
+        Milestone(week_start=date(2026, 3, 2), expected_e1rm=100.0),
+        Milestone(week_start=date(2026, 3, 9), expected_e1rm=101.0),
+        Milestone(week_start=date(2026, 3, 16), expected_e1rm=102.0),
+    ]
+    # Отсортированы по возрастанию — контракт функции (сортирует вызывающий
+    # код, см. build_context).
+    history_points = [
+        (date(2026, 3, 3), 99.0),
+        (date(2026, 3, 5), 100.5),  # та же неделя 1, позже — побеждает как факт
+        (date(2026, 3, 20), 103.0),  # неделя 3
+    ]
+
+    result = _milestones_with_fact(milestones, history_points)
+
+    assert result[0]["week_start"] == "2026-03-02"
+    assert result[0]["expected_e1rm"] == 100.0
+    assert result[0]["actual_e1rm"] == 100.5
+    assert result[1]["actual_e1rm"] is None
+    assert result[2]["actual_e1rm"] == 103.0
