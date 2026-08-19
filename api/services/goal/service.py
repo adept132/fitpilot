@@ -3,14 +3,9 @@
 Лениво, на существующих точках вызова — планировщика в проекте нет и
 заводить его не нужно (то же решение, что в volume.service).
 
-ОТКЛОНЕНИЕ ОТ БРИФА (см. отчёт Задачи 6): бриф в разделе "Interfaces" называет
-`build_context(session, app_user_id, goal, today) -> dict` как продукт этой
-задачи ("тело эндпоинта Task 11"), но ни один шаг брифа не даёт для неё ни
-кода, ни формы возвращаемого словаря, ни теста. Постановщик Задачи 6 эту
-функцию тоже не упоминает. Реализовывать экранный контракт без единого
-заданного поля значило бы гадать форму API, которую использует другая,
-ещё не начатая задача — build_context сюда не добавлен, это осознанный
-пробел, а не забывчивость (см. "Сомнения" в отчёте).
+build_context (Задача 11) — тело GET /goals/{id}/autopilot: всё, что нужно
+экрану цели, одним вызовом поверх evaluate(). Молчание всегда с причиной
+(см. её докстринг).
 """
 
 from __future__ import annotations
@@ -203,6 +198,172 @@ async def evaluate(
         "exercise": await repository.exercise_context(
             session, app_user_id, goal.exercise_id
         ),
+    }
+
+
+UNAVAILABLE_NOT_STRENGTH = "Эта цель вне контура плана: её ведёт питание, а не тренировки"
+UNAVAILABLE_NO_DEADLINE = "У цели нет срока — автопилоту нечему не успевать"
+UNAVAILABLE_NO_HISTORY = "Нужно несколько тренировок с этим упражнением, чтобы построить прогноз"
+UNAVAILABLE_NO_BLOCK = "Автопилоту нужен план: разверните блок"
+
+
+def _touched_dates(snapshot: dict) -> list[date]:
+    """Даты дней снимка, которые перегенерация РЕАЛЬНО тронула (touched=True).
+
+    Общая точка правды для undo_goal_decision (сами ворота отката) и
+    build_context (can_undo экрана, Задача 11) — оба обязаны видеть одно и
+    то же множество дней, иначе экран разойдётся с тем, что реально
+    разрешает POST /goals/proposals/{id}/decision (undo_goal). Дни, которые
+    регенерация пощадила (уже несли факт или принятую правку объёма —
+    touched=False, см. докстринг _apply_structural), не входят: факт,
+    появившийся на них позже, не имеет отношения к тому, что применил
+    автопилот, и не должен блокировать откат.
+    """
+    return [
+        date.fromisoformat(d["target_date"])
+        for d in (snapshot.get("days") or [])
+        if d.get("touched")
+    ]
+
+
+async def _blocked_by_calendar_fact(
+    session: AsyncSession, app_user_id: int, dates: list[date]
+) -> bool:
+    """Есть ли среди дат уже факт, который откат переписал бы.
+
+    Общая проверка для undo_goal_decision и can_undo экрана автопилота (см.
+    докстринг _touched_dates) — то же самое условие, тем же запросом.
+    """
+    if not dates:
+        return False
+    blocked = (await session.execute(
+        select(UserCalendarDay.id).where(
+            UserCalendarDay.app_user_id == app_user_id,
+            UserCalendarDay.target_date.in_(dates),
+            sa_or(
+                UserCalendarDay.status != "planned",
+                UserCalendarDay.actual_workout_session_id.isnot(None),
+            ),
+        )
+    )).scalars().first()
+    return blocked is not None
+
+
+async def _undo_blocked_reason(
+    session: AsyncSession, app_user_id: int, proposal: PeriodizationProposal
+) -> Optional[str]:
+    """Причина, по которой /undo этого предложения сейчас откажет, либо None.
+
+    Использует ТУ ЖЕ логику отбора дат (_touched_dates), что и реальные
+    ворота undo_goal_decision, — иначе can_undo экрана может разойтись с
+    тем, что действительно разрешает откат (см. её докстринг, ревью
+    Задачи 10, Critical 2: гейт по ВСЕМ дням снимка блокировал бы откат там,
+    где сервер его разрешает).
+    """
+    snapshot = (proposal.payload or {}).get("applied_snapshot") or {}
+    dates = _touched_dates(snapshot)
+    blocked = await _blocked_by_calendar_fact(session, app_user_id, dates)
+    return (
+        "По изменённым дням уже есть выполненная тренировка"
+        if blocked else None
+    )
+
+
+async def build_context(
+    session: AsyncSession, app_user_id: int, goal: UserGoal, today: date
+) -> dict:
+    """Тело GET /goals/{id}/autopilot: обе даты ETA, темпы, вехи, план,
+    активное предложение и состояние отмены последнего применённого.
+
+    Молчание всегда с причиной (см. UNAVAILABLE_* выше) — экран не имеет
+    права показать пустой автопилот без объяснения, почему он выключен.
+    """
+    empty = {
+        "available": False, "unavailable_reason": None,
+        "eta": {}, "rates": {}, "milestones": [], "plan_ahead": {},
+        "proposal": None, "last_applied": None,
+    }
+
+    if goal.goal_type != "strength":
+        return {**empty, "unavailable_reason": UNAVAILABLE_NOT_STRENGTH}
+    if goal.deadline is None:
+        return {**empty, "unavailable_reason": UNAVAILABLE_NO_DEADLINE}
+
+    state = await evaluate(session, app_user_id, goal, today)
+    if state is None:
+        return {**empty, "unavailable_reason": UNAVAILABLE_NO_HISTORY}
+
+    block = (await session.execute(
+        select(TrainingBlock).where(
+            TrainingBlock.app_user_id == app_user_id,
+            TrainingBlock.status == "active",
+        )
+    )).scalar_one_or_none()
+    if block is None:
+        return {**empty, "unavailable_reason": UNAVAILABLE_NO_BLOCK}
+
+    sim = state["simulation"]
+    sessions = await repository.future_sessions(
+        session, app_user_id, goal.exercise_id, today,
+        goal.deadline + timedelta(days=_HORIZON_TAIL_DAYS),
+    )
+    pending = (await session.execute(
+        select(PeriodizationProposal).where(
+            PeriodizationProposal.app_user_id == app_user_id,
+            PeriodizationProposal.kind == periodization_params.KIND_GOAL_PLAN,
+            PeriodizationProposal.status == periodization_params.STATUS_PENDING,
+        ).order_by(PeriodizationProposal.created_at.desc())
+    )).scalars().first()
+    applied = (await session.execute(
+        select(PeriodizationProposal).where(
+            PeriodizationProposal.app_user_id == app_user_id,
+            PeriodizationProposal.kind == periodization_params.KIND_GOAL_PLAN,
+            PeriodizationProposal.status == periodization_params.STATUS_ACCEPTED,
+        ).order_by(PeriodizationProposal.decided_at.desc())
+    )).scalars().first()
+
+    last_applied = None
+    if applied is not None:
+        blocked_reason = await _undo_blocked_reason(session, app_user_id, applied)
+        last_applied = {
+            "proposal_id": applied.id,
+            "applied_at": applied.decided_at.isoformat() if applied.decided_at else None,
+            "can_undo": blocked_reason is None,
+            "undo_blocked_reason": blocked_reason,
+        }
+
+    return {
+        "available": True,
+        "unavailable_reason": None,
+        "eta": {
+            "nominal": sim.nominal_date.isoformat() if sim.nominal_date else None,
+            "calibrated": sim.calibrated_date.isoformat() if sim.calibrated_date else None,
+            "factor": sim.factor,
+            "horizon": sim.horizon,
+            "calibration_available": sim.calibration_available,
+        },
+        "rates": {
+            "required": round(state["rates"].required, 3),
+            "plan": round(state["rates"].plan, 3),
+            "ceiling": round(state["rates"].ceiling, 3),
+        },
+        "milestones": [
+            {"week_start": m.week_start.isoformat(),
+             "expected_e1rm": m.expected_e1rm, "actual_e1rm": None}
+            for m in sim.milestones
+        ],
+        "plan_ahead": {
+            "target_lift_sessions": len(sessions),
+            "sets_per_window": sum(s.prescription_sets for s in sessions[:4]),
+            "effort": sessions[0].phase_effort_tier if sessions else None,
+            "next_session_date": sessions[0].date.isoformat() if sessions else None,
+        },
+        "proposal": (
+            {"id": pending.id, "kind": pending.kind,
+             "reason_code": pending.reason_code, "payload": pending.payload}
+            if pending else None
+        ),
+        "last_applied": last_applied,
     }
 
 
@@ -837,27 +998,16 @@ async def undo_goal_decision(
     payload = proposal.payload or {}
     exercise_id = payload.get("exercise_id")
     levers = payload.get("levers") or []
-    dates = [
-        date.fromisoformat(d["target_date"])
-        for d in (snapshot.get("days") or [])
-        if d.get("touched")
-    ]
-    if dates:
-        blocked = (await session.execute(
-            select(UserCalendarDay.id).where(
-                UserCalendarDay.app_user_id == app_user_id,
-                UserCalendarDay.target_date.in_(dates),
-                sa_or(
-                    UserCalendarDay.status != "planned",
-                    UserCalendarDay.actual_workout_session_id.isnot(None),
-                ),
-            )
-        )).scalars().first()
-        if blocked is not None:
-            return {
-                "status": "conflict", "proposal_id": proposal.id,
-                "reason": "По изменённым дням уже есть факт — откат переписал бы историю",
-            }
+    # Тот же отбор дат и тот же запрос, что и can_undo экрана автопилота
+    # (build_context -> _undo_blocked_reason, Задача 11) — общие хелперы
+    # _touched_dates/_blocked_by_calendar_fact, чтобы эти две точки не могли
+    # разойтись в том, что считается заблокированным откатом.
+    dates = _touched_dates(snapshot)
+    if await _blocked_by_calendar_fact(session, app_user_id, dates):
+        return {
+            "status": "conflict", "proposal_id": proposal.id,
+            "reason": "По изменённым дням уже есть факт — откат переписал бы историю",
+        }
 
     kept: list[str] = []
 

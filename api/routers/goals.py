@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from api.deps import get_db
-from api.schemas.goals import GoalCreate, GoalResponse, GoalStatus, GoalUpdate
+from api.schemas.goals import GoalAutopilotRead, GoalCreate, GoalResponse, GoalStatus, GoalUpdate
 from api.services.app_user_service import get_current_app_user
 from api.services.goal_service import (
     GOAL_MEASUREMENT,
@@ -201,6 +201,22 @@ async def delete_goal(
     goal = await _owned_goal(db, goal_id, current_user.id)
     await db.delete(goal)
     await db.commit()
+
+
+@router.get("/{goal_id}/autopilot", response_model=GoalAutopilotRead)
+async def get_goal_autopilot(
+    goal_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: AppUser = Depends(get_current_app_user),
+):
+    """Контекст экрана автопилота цели (P0-12, Задача 11): обе даты ETA,
+    темпы, вехи, план на будущих неделях, активное предложение и состояние
+    отмены последнего применённого."""
+    from api.services.goal.service import build_context
+    from api.services.volume.repository import utc_today
+
+    goal = await _owned_goal(db, goal_id, current_user.id)
+    return GoalAutopilotRead(**await build_context(db, current_user.id, goal, utc_today()))
 
 
 async def _owned_goal(db: AsyncSession, goal_id: int, app_user_id: int) -> UserGoal:

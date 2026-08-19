@@ -55,3 +55,51 @@ class GoalResponse(BaseModel):
     is_completed: bool
     is_primary: bool = False
     status: GoalStatus
+
+
+# --- Контекст экрана автопилота цели (P0-12, Задача 11) ---
+
+class GoalEta(BaseModel):
+    nominal: Optional[str] = None
+    calibrated: Optional[str] = None
+    factor: Optional[float] = None
+    horizon: str = "materialized"
+    calibration_available: bool = False
+
+
+class GoalRates(BaseModel):
+    required: float = 0.0
+    plan: float = 0.0
+    ceiling: float = 0.0
+
+
+class GoalMilestone(BaseModel):
+    week_start: str
+    expected_e1rm: float
+    actual_e1rm: Optional[float] = None
+
+
+class GoalPlanAhead(BaseModel):
+    target_lift_sessions: int = 0
+    sets_per_window: int = 0
+    effort: Optional[str] = None
+    next_session_date: Optional[str] = None
+
+
+class GoalLastApplied(BaseModel):
+    proposal_id: int
+    applied_at: Optional[str] = None
+    can_undo: bool = False
+    undo_blocked_reason: Optional[str] = None
+
+
+class GoalAutopilotRead(BaseModel):
+    available: bool = False
+    # Причина, по которой автопилот молчит: показывается пользователю as is.
+    unavailable_reason: Optional[str] = None
+    eta: GoalEta = GoalEta()
+    rates: GoalRates = GoalRates()
+    milestones: list[GoalMilestone] = []
+    plan_ahead: GoalPlanAhead = GoalPlanAhead()
+    proposal: Optional[dict] = None
+    last_applied: Optional[GoalLastApplied] = None
