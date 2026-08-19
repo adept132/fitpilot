@@ -74,12 +74,71 @@ def _synthetic_facts(prescription) -> tuple[SetFact, ...]:
     )
 
 
+def project_sessions(
+    materialized: list[FutureSession], microcycle_length: int, until: date
+) -> list[FutureSession]:
+    """Продолжить ряд будущих сессий за горизонт материализованного
+    календаря (спека §5.3, §7): та же частота целевого лифта в микроцикле и
+    те же фазы по кругу — взятые из САМИХ материализованных дней, а не
+    выдуманные.
+
+    Ритм — позиция дня внутри цикла длиной microcycle_length (смещение от
+    первого материализованного дня по модулю) вместе с её фазовым тиром:
+    сколько раз и под какими тирами лифт встретился в материализованных
+    сессиях на этой позиции, столько же раз и с теми же тирами он
+    встретится в каждом следующем цикле. Первое вхождение каждой позиции
+    побеждает — разгрузочная неделя, случайно попавшая в материализованный
+    хвост, не навязывает свой тир всем будущим циклам.
+
+    Честные нули (спека §7): пустой materialized (нет ритма без
+    материализованных сессий) или microcycle_length <= 0 (цикл не
+    определён) — список без изменений, ничего не выдумываем.
+    """
+    if not materialized or microcycle_length <= 0:
+        return list(materialized)
+
+    last_date = materialized[-1].date
+    if last_date >= until:
+        return list(materialized)
+
+    anchor = materialized[0].date
+    pattern: dict[int, tuple[str, int]] = {}
+    for s in materialized:
+        offset = (s.date - anchor).days % microcycle_length
+        pattern.setdefault(offset, (s.phase_effort_tier, s.prescription_sets))
+    offsets = sorted(pattern)
+
+    projected: list[FutureSession] = []
+    # Начинаем с цикла, СОДЕРЖАЩЕГО last_date, а не со следующего: если в
+    # этом цикле лифт встречается на позиции ПОЗЖЕ last_date (например, на
+    # прошлой неделе лифт стоял по средам и субботам, а материализованный
+    # хвост обрывается в четверг), эта суббота обязана попасть в достройку.
+    cycle_index = (last_date - anchor).days // microcycle_length
+    while True:
+        cycle_start = anchor + timedelta(days=microcycle_length * cycle_index)
+        if cycle_start > until:
+            break
+        for offset in offsets:
+            day = cycle_start + timedelta(days=offset)
+            if last_date < day <= until:
+                tier, sets = pattern[offset]
+                projected.append(
+                    FutureSession(date=day, phase_effort_tier=tier, prescription_sets=sets)
+                )
+        cycle_index += 1
+
+    return list(materialized) + projected
+
+
 def run(
     ctx: SchemeContext,
     target_e1rm: float,
     sessions: list[FutureSession],
     cap_pct: float,
     factor: Optional[float],
+    *,
+    microcycle_length: Optional[int] = None,
+    until: Optional[date] = None,
 ) -> Simulation:
     """Дата пересечения цели, темп и вехи.
 
@@ -87,7 +146,22 @@ def run(
     (WEEKLY_GROWTH_CAP_PCT из forecast_service): арифметика прибавок не
     физиология, и без потолка движок обещал бы +260 кг в год.
     factor=None — статистики исполнения не хватило, вторая дата не считается.
+
+    microcycle_length/until (спека §5.3, §7): когда переданы оба и дедлайн
+    дальше материализованного календаря, sessions достраиваются вперёд по
+    её же ритму (project_sessions) ДО начала прокрутки — дальше это тот же
+    единственный цикл, тот же clamp cap_pct и тот же factor, то есть
+    достроенная дата ограничена биологическим потолком и калибровкой ровно
+    так же, как материализованная. Горизонт помечается "projected" только
+    если прокрутка РЕАЛЬНО дошла до хотя бы одной достроенной сессии
+    (used_count зашёл за материализованный хвост) — если цель достигнута
+    раньше, внутри материализованных дней, горизонт остаётся "materialized"
+    даже когда достройка была подготовлена, но не понадобилась.
     """
+    materialized_count = len(sessions)
+    if microcycle_length and until is not None:
+        sessions = project_sessions(sessions, microcycle_length, until)
+
     used = sessions[: params.MAX_SIMULATED_SESSIONS]
     start = ctx.state.working_e1rm or 0.0
     first_day = used[0].date if used else None
@@ -209,6 +283,18 @@ def run(
             else None
         )
 
+    # "projected" только если прокрутка реально ИСПОЛЬЗОВАЛА хотя бы одну
+    # достроенную сессию (used_count зашёл за материализованный хвост) — не
+    # просто потому, что достройка была подготовлена в sessions выше. Цель,
+    # достигнутая внутри материализованных дней, не становится "по текущему
+    # ритму" только оттого, что project_sessions на всякий случай пристроила
+    # хвост, до которого прокрутка не дошла (см. докстринг run()).
+    horizon = (
+        params.HORIZON_PROJECTED
+        if used_count > min(materialized_count, len(used))
+        else params.HORIZON_MATERIALIZED
+    )
+
     return Simulation(
         nominal_date=nominal_date,
         calibrated_date=calibrated_date,
@@ -219,7 +305,7 @@ def run(
             if reached_on is not None
             else []
         ),
-        horizon=params.HORIZON_MATERIALIZED,
+        horizon=horizon,
         calibration_available=calibration_available,
         factor=factor,
         sessions_used=used_count,

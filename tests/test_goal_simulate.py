@@ -247,6 +247,136 @@ def test_apply_lever_ensure_present_synthesizes_sessions_from_nothing():
     assert out_ctx is ctx  # ensure_present не трогает контекст, только сессии
 
 
+# --- P0-12, Задача 16: projected-горизонт (спека §5.3, §7) ---
+#
+# Календарь материализован на ~90 дней, а дедлайн цели часто дальше:
+# прокрутка обязана продолжаться по НАБЛЮДЁННОМУ ритму блока (та же частота
+# лифта в микроцикле, те же фазы по кругу), а не выдавать «недостижимо»
+# только потому, что список сессий кончился раньше дедлайна.
+
+def _weekly_pair_sessions(
+    anchor: date, cycles: int, length: int = 7, offsets: tuple[int, int] = (1, 4)
+) -> list[FutureSession]:
+    """Лифт дважды за микроцикл длиной `length`: лёгкий день на offsets[0],
+    тяжёлый — на offsets[1]. Ритм для теста «частота и тиры сохраняются»."""
+    out = [
+        FutureSession(
+            date=anchor + timedelta(days=c * length + off),
+            phase_effort_tier="medium" if i == 0 else "hard",
+            prescription_sets=3,
+        )
+        for c in range(cycles)
+        for i, off in enumerate(offsets)
+    ]
+    return sorted(out, key=lambda s: s.date)
+
+
+def test_project_sessions_empty_materialized_synthesizes_nothing():
+    """Честный ноль (спека §7): нет материализованных сессий — нет ритма,
+    который можно было бы продолжить, и достраивать нечего."""
+    result = simulate.project_sessions([], microcycle_length=7, until=date(2026, 6, 1))
+    assert result == []
+
+
+def test_project_sessions_noop_when_until_within_materialized():
+    """Дедлайн-хвост не дальше последнего материализованного дня — достройка
+    не нужна, список возвращается как есть (регресс-гвард на «пустой» путь)."""
+    materialized = _sessions(10, start=date(2026, 3, 2), every_days=3)
+    result = simulate.project_sessions(
+        materialized, microcycle_length=7, until=materialized[-1].date
+    )
+    assert result == materialized
+
+
+def test_project_sessions_preserves_lift_frequency_and_tiers_per_microcycle():
+    """Лифт, стоящий дважды за микроцикл (лёгкий + тяжёлый день), обязан
+    продолжать появляться дважды с теми же тирами — не один раз и не три."""
+    anchor = date(2026, 3, 2)
+    materialized = _weekly_pair_sessions(anchor, cycles=3)
+    until = anchor + timedelta(days=90)
+
+    projected = simulate.project_sessions(materialized, microcycle_length=7, until=until)
+    tail = [s for s in projected if s.date > materialized[-1].date]
+    assert tail, "должна была достроиться хотя бы одна будущая сессия"
+
+    by_cycle: dict[int, int] = {}
+    for s in projected:
+        cycle = (s.date - anchor).days // 7
+        by_cycle[cycle] = by_cycle.get(cycle, 0) + 1
+    # Последний, возможно неполный, цикл (обрезанный по until) не считаем —
+    # только циклы, целиком лежащие внутри достроенного диапазона.
+    full_cycles = [
+        c for c in by_cycle if anchor + timedelta(days=(c + 1) * 7 - 1) <= until
+    ]
+    assert full_cycles
+    assert all(by_cycle[c] == 2 for c in full_cycles), (
+        "частота лифта за микроцикл обязана сохраниться — не 1 и не 3"
+    )
+
+    tier_by_offset = {1: "medium", 4: "hard"}
+    assert all(
+        s.phase_effort_tier == tier_by_offset[(s.date - anchor).days % 7] for s in tail
+    ), "фазы по кругу обязаны повторять наблюдённый порядок тиров"
+
+
+def test_run_projects_past_calendar_when_deadline_is_beyond_it():
+    """Дедлайн дальше материализованного календаря: без достройки список
+    сессий кончается раньше цели («недостижимо»), с достройкой — цель
+    находится, а горизонт честно помечен projected."""
+    ctx = _ctx()
+    anchor = date(2026, 3, 2)
+    materialized = _sessions(10, start=anchor, every_days=3)  # кончается на 27-й день
+    until = anchor + timedelta(days=365)
+
+    baseline = simulate.run(
+        ctx, target_e1rm=200.0, sessions=materialized, cap_pct=1.0, factor=None,
+    )
+    assert baseline.nominal_date is None
+    assert baseline.horizon == params.HORIZON_MATERIALIZED
+
+    projected = simulate.run(
+        ctx, target_e1rm=200.0, sessions=materialized, cap_pct=1.0, factor=None,
+        microcycle_length=7, until=until,
+    )
+    assert projected.nominal_date is not None
+    assert projected.horizon == params.HORIZON_PROJECTED
+    assert projected.sessions_used > len(materialized)
+
+
+def test_run_stays_materialized_when_target_reached_before_projected_sessions():
+    """Дедлайн формально дальше календаря (until подготовлен далеко), но
+    прокрутка находит цель ВНУТРИ материализованных дней — горизонт и числа
+    обязаны остаться теми же, что и без параметров достройки вовсе (регресс-
+    гвард: «дедлайн внутри календаря не меняет ответ»)."""
+    ctx = _ctx()
+    sessions = _sessions(40, start=date(2026, 3, 2), every_days=3)
+    until = sessions[-1].date + timedelta(days=200)
+
+    baseline = simulate.run(ctx, target_e1rm=110.0, sessions=sessions, cap_pct=0.01, factor=None)
+    result = simulate.run(
+        ctx, target_e1rm=110.0, sessions=sessions, cap_pct=0.01, factor=None,
+        microcycle_length=7, until=until,
+    )
+
+    assert result.horizon == params.HORIZON_MATERIALIZED
+    assert result.nominal_date == baseline.nominal_date
+    assert result.nominal_slope == baseline.nominal_slope
+    assert result.sessions_used == baseline.sessions_used
+
+
+def test_run_no_materialized_sessions_no_projection_even_with_deadline_params():
+    """Пустой календарь — достраивать не от чего (спека §7): «недостижимо»
+    остаётся честным ответом, даже когда microcycle_length/until переданы."""
+    ctx = _ctx()
+    result = simulate.run(
+        ctx, target_e1rm=110.0, sessions=[], cap_pct=0.01, factor=None,
+        microcycle_length=7, until=date(2026, 12, 31),
+    )
+    assert result.nominal_date is None
+    assert result.horizon == params.HORIZON_MATERIALIZED
+    assert result.sessions_used == 0
+
+
 def test_apply_lever_scheme_overrides_settings_for_exercise():
     ctx = _ctx()
     sessions = _sessions(5, start=date(2026, 3, 2))

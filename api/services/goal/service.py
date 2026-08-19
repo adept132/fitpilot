@@ -145,6 +145,16 @@ async def evaluate(
     sessions = await repository.future_sessions(
         session, app_user_id, goal.exercise_id, today, until
     )
+    # Ритм для достройки горизонта за календарь (спека §5.3, §7,
+    # simulate.project_sessions): длина микроцикла активного блока. Нет
+    # активного блока — нет ритма, simulate.run() ниже просто не достраивает
+    # (microcycle_length=None), горизонт остаётся materialized как раньше.
+    microcycle_length = (await session.execute(
+        select(TrainingBlock.microcycle_length).where(
+            TrainingBlock.app_user_id == app_user_id,
+            TrainingBlock.status == "active",
+        )
+    )).scalar_one_or_none()
     lift_sessions, success_rate = await repository.lift_stats(
         session, app_user_id, goal.exercise_id
     )
@@ -174,6 +184,8 @@ async def evaluate(
         sessions=sessions,
         cap_pct=cap_pct,
         factor=factor,
+        microcycle_length=microcycle_length,
+        until=until,
     )
 
     weeks_left = max((goal.deadline - today).days / 7.0, 1e-9)
