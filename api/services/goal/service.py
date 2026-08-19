@@ -259,8 +259,21 @@ async def _undo_blocked_reason(
     тем, что действительно разрешает откат (см. её докстринг, ревью
     Задачи 10, Critical 2: гейт по ВСЕМ дням снимка блокировал бы откат там,
     где сервер его разрешает).
+
+    ИНВАРИАНТ (ревью Задачи 11, Minor — эти два места обязаны сходиться в
+    трактовке пустого снимка): undo_goal_decision (см. её первую проверку
+    ниже по файлу) отвечает явным conflict «нечего отменять», если
+    applied_snapshot отсутствует или пуст, — это НЕ «ничего не блокирует».
+    Раньше эта функция трактовала то же самое состояние как can_undo=True,
+    и экран пообещал бы отмену, которую сервер тут же завернул бы. Сегодня
+    это недостижимо (диспетчер понижает принятое предложение до declined,
+    если ничего не применилось, — applied_snapshot пишется только когда
+    что-то реально применилось), но раз обе функции читают одно и то же
+    поле, они не имеют права трактовать его состояния по-разному.
     """
-    snapshot = (proposal.payload or {}).get("applied_snapshot") or {}
+    snapshot = (proposal.payload or {}).get("applied_snapshot")
+    if not snapshot:
+        return "Нечего отменять: предложение не применялось"
     dates = _touched_dates(snapshot)
     blocked = await _blocked_by_calendar_fact(session, app_user_id, dates)
     return (
@@ -307,11 +320,19 @@ async def build_context(
         session, app_user_id, goal.exercise_id, today,
         goal.deadline + timedelta(days=_HORIZON_TAIL_DAYS),
     )
+    # ИСПРАВЛЕНО (ревью Задачи 11, Critical 1 — предложение чужой цели
+    # утекало на этот экран): без фильтра по payload["goal_id"] обе выборки
+    # ниже брали САМОЕ СВЕЖЕЕ goal_plan-предложение ПОЛЬЗОВАТЕЛЯ, а не этой
+    # цели, — при двух целях одного типа второй экран показывал предложение
+    # (и, того хуже, last_applied/proposal_id) первой. Тот же второй ключ,
+    # что уже применяется в refresh_goal_proposals/_retire_finished_primary_
+    # goal — payload несёт goal_id именно чтобы это различать.
     pending = (await session.execute(
         select(PeriodizationProposal).where(
             PeriodizationProposal.app_user_id == app_user_id,
             PeriodizationProposal.kind == periodization_params.KIND_GOAL_PLAN,
             PeriodizationProposal.status == periodization_params.STATUS_PENDING,
+            PeriodizationProposal.payload["goal_id"].astext == str(goal.id),
         ).order_by(PeriodizationProposal.created_at.desc())
     )).scalars().first()
     applied = (await session.execute(
@@ -319,6 +340,7 @@ async def build_context(
             PeriodizationProposal.app_user_id == app_user_id,
             PeriodizationProposal.kind == periodization_params.KIND_GOAL_PLAN,
             PeriodizationProposal.status == periodization_params.STATUS_ACCEPTED,
+            PeriodizationProposal.payload["goal_id"].astext == str(goal.id),
         ).order_by(PeriodizationProposal.decided_at.desc())
     )).scalars().first()
 
@@ -990,6 +1012,10 @@ async def undo_goal_decision(
          пользователя ПОСЛЕ применения — такую правку не восстанавливаем
          поверх, а называем в kept (см. ниже).
     """
+    # ИНВАРИАНТ (ревью Задачи 11, Minor): _undo_blocked_reason (build_context,
+    # can_undo экрана) обязана трактовать отсутствующий/пустой snapshot ТАК
+    # ЖЕ — как блокирующую причину, а не как «ничего не мешает». Разошедшийся
+    # can_undo=True обещал бы отмену, которую этот же conflict тут же завернёт.
     snapshot = (proposal.payload or {}).get("applied_snapshot")
     if not snapshot:
         return {"status": "conflict", "proposal_id": proposal.id,

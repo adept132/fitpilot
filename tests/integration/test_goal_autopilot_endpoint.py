@@ -214,3 +214,75 @@ async def test_can_undo_false_when_touched_day_has_fact(
 
     assert ctx["last_applied"]["can_undo"] is False
     assert ctx["last_applied"]["undo_blocked_reason"]
+
+
+# --- ревью Задачи 11, Critical 1: предложение одной цели не должно
+# утекать на экран другой цели того же пользователя ---
+#
+# Обе выборки в build_context (pending и applied) раньше фильтровались
+# только по app_user_id + kind + status, без payload["goal_id"] — при двух
+# strength-целях одного пользователя самое свежее goal_plan-предложение
+# ПОЛЬЗОВАТЕЛЯ (принадлежащее первой цели) утекало на экран второй.
+
+async def test_pending_proposal_of_other_goal_does_not_leak(
+    test_user, seeded_history, active_block
+):
+    await _set_working_e1rm(test_user.id, seeded_history.id, 100.0)
+    goal_a = await _goal(test_user.id, seeded_history.id, primary=False)
+    goal_b = await _goal(test_user.id, seeded_history.id, primary=False)
+
+    async with SessionLocal() as db:
+        db.add(PeriodizationProposal(
+            app_user_id=test_user.id, block_id=active_block.id,
+            kind=periodization_params.KIND_GOAL_PLAN, reason_code="pace_behind",
+            payload={"goal_id": goal_a, "exercise_id": seeded_history.id, "levers": []},
+            status=periodization_params.STATUS_PENDING,
+        ))
+        await db.commit()
+
+        goal = await db.get(UserGoal, goal_b)
+        ctx_b = await build_context(db, test_user.id, goal, date.today())
+
+    assert ctx_b["proposal"] is None
+
+    async with SessionLocal() as db:
+        goal = await db.get(UserGoal, goal_a)
+        ctx_a = await build_context(db, test_user.id, goal, date.today())
+
+    assert ctx_a["proposal"] is not None
+    assert ctx_a["proposal"]["id"] is not None
+
+
+async def test_applied_proposal_of_other_goal_does_not_leak(
+    test_user, seeded_history, active_block
+):
+    """Хуже, чем просто «показал не то»: если бы этот путь утёк, экран
+    второй цели показал бы last_applied.proposal_id первой, и «Отменить»
+    там откатывала бы изменения, принадлежащие чужой цели."""
+    await _set_working_e1rm(test_user.id, seeded_history.id, 100.0)
+    goal_a = await _goal(test_user.id, seeded_history.id, primary=False)
+    goal_b = await _goal(test_user.id, seeded_history.id, primary=False)
+
+    async with SessionLocal() as db:
+        db.add(PeriodizationProposal(
+            app_user_id=test_user.id, block_id=active_block.id,
+            kind=periodization_params.KIND_GOAL_PLAN, reason_code="pace_behind",
+            payload={
+                "goal_id": goal_a, "exercise_id": seeded_history.id, "levers": [],
+                "applied_snapshot": {"days": [], "created_plan_ids": []},
+            },
+            status=periodization_params.STATUS_ACCEPTED,
+            decided_at=datetime.now(timezone.utc),
+        ))
+        await db.commit()
+
+        goal = await db.get(UserGoal, goal_b)
+        ctx_b = await build_context(db, test_user.id, goal, date.today())
+
+    assert ctx_b["last_applied"] is None
+
+    async with SessionLocal() as db:
+        goal = await db.get(UserGoal, goal_a)
+        ctx_a = await build_context(db, test_user.id, goal, date.today())
+
+    assert ctx_a["last_applied"] is not None
