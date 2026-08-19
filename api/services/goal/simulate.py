@@ -59,8 +59,9 @@ def _synthetic_facts(prescription) -> tuple[SetFact, ...]:
     от AMRAP-результата, а ровно-минимум воспроизводит тот же вес на
     следующей сессии, не давая расти. Этот путь ни разу не исполнялся до
     фикса C1 (override схемы никуда не передавался — см. правку в run()
-    ниже), поэтому и не был замечен раньше. +2 — тот же запас, что и у
-    рычага "диапазон повторов" (decide._detail), а не новое число с нуля.
+    ниже), поэтому и не был замечен раньше. +2 — произвольный, но
+    консервативный запас сверх минимума: одна лишняя пара повторов над
+    нижней границей, не выдуманное большое число.
     """
     return tuple(
         SetFact(
@@ -356,21 +357,6 @@ def apply_lever(
         # Лифта в sessions нет вовсе (см. decide._applicable) — синтезируем
         # его присутствие с нуля, по одной сессии на микроцикл.
         return _spread_sessions([], 1, microcycle_length, start, until, ctx.target_sets), ctx
-
-    if kind == params.LEVER_SETS:
-        delta = int(detail.get("delta_sets") or 0)
-        if delta <= 0 or not sessions:
-            return list(sessions), ctx
-        return (
-            [replace(s, prescription_sets=s.prescription_sets + delta) for s in sessions],
-            ctx,
-        )
-
-    if kind == params.LEVER_REP_RANGE:
-        rep_min, rep_max = detail.get("rep_min"), detail.get("rep_max")
-        if rep_min is None or rep_max is None:
-            return list(sessions), ctx
-        return list(sessions), replace(ctx, rep_min=int(rep_min), rep_max=int(rep_max))
 
     if kind == params.LEVER_SCHEME:
         to_scheme = detail.get("to_scheme")

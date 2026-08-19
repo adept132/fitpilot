@@ -84,15 +84,6 @@ async def test_no_calendar_gives_empty_list(test_user, fresh_exercise):
     assert found == []
 
 
-async def test_headroom_is_never_negative(test_user, fresh_exercise):
-    """Нет окна и нет предписания — запас считается по полному MRV, но не ниже нуля."""
-    async with SessionLocal() as db:
-        headroom = await repository.headroom_sets(
-            db, test_user.id, fresh_exercise.id, "intermediate", date.today()
-        )
-    assert headroom >= 0
-
-
 async def test_exercise_context_reports_muscle_and_scheme(test_user, fresh_exercise):
     async with SessionLocal() as db:
         ctx = await repository.exercise_context(db, test_user.id, fresh_exercise.id)
@@ -237,100 +228,22 @@ async def test_scheme_context_uses_real_history_when_available(test_user, fresh_
 
 # --- Ревью Задачи 5 ---
 #
-# Minor: обе фикстуры выше (fresh_exercise) несут main_muscle_group="back" —
-# это не русское имя (MUSCLE_TRANSLATION_MAP) и не EN системный ключ
-# (landmarks.MUSCLES), так что headroom_sets на них всегда падал в ранний
-# `return 0` ДО того, как доходил до реальной арифметики MRV. Настоящий путь
-# (landmarks -> масштаб под длину микроцикла -> вычитание prescribed_for) не
-# исполнялся в тестах ни разу. Тест ниже даёт упражнению мышцу, которая
-# резолвится («Грудь» — есть в MUSCLE_TRANSLATION_MAP), и настоящее окно
-# объёма (calendar day + план), чтобы MRV-путь реально прогнал числа.
-#
-# Important 1 (регрессия): второй тест проверяет то самое расхождение,
-# из-за которого нашлась находка — main_muscle_group иногда уже хранит EN
-# системный ключ ("chest"), а не русское имя, потому что
+# Important 1 (регрессия): main_muscle_group иногда уже хранит EN системный
+# ключ ("chest"), а не русское отображаемое имя, потому что
 # api/routers/exercises.py пишет пользовательский ввод verbatim.
 # key_for_muscle такую строку не резолвил вовсе; to_system_key обязана.
+# (headroom_sets/headroom_for_window, которые этот же муscle-ключ раньше
+# кормили по пути MRV-вето рычага LEVER_SETS, удалены вместе с рычагом —
+# P0-12, обрезка лестницы: ни одна схема прогрессии не читает число
+# подходов, эффект был всегда нулевым.)
 
-async def test_headroom_sets_runs_real_mrv_path_and_shrinks_with_prescribed_volume(
-    test_user, active_block
-):
-    """MRV-путь headroom_sets: ненулевой запас на лёгком предписании и его
-    сокращение при росте предписанного объёма — это и есть механизм,
-    которым автопилот не может вытолкнуть мышцу за MRV (спека, решение 11).
-    """
-    async with SessionLocal() as db:
-        ex = Exercise(
-            name=f"Жим для headroom {uuid.uuid4().hex[:8]}",
-            category="base",
-            main_muscle_group="Грудь",
-            difficulty="beginner",
-            equipment_needed=[],
-            source="custom",
-            app_user_id=test_user.id,
-        )
-        db.add(ex)
-        await db.flush()
-
-        plan = WorkoutPlan(
-            app_user_id=test_user.id, name="Push headroom", day_tag="push",
-            micro_tag="medium", meso_tag="medium",
-        )
-        db.add(plan)
-        await db.flush()
-        plan_ex = WorkoutPlanExercise(
-            plan_id=plan.id, exercise_id=ex.id, target_sets=5, order_index=0,
-        )
-        db.add(plan_ex)
-        await db.flush()
-
-        # Единственный день окна — сегодняшний. active_block.microcycle_length
-        # == 7, так что cycle_multiplier масштаба landmarks == 1: MRV груди
-        # для intermediate — 18 (см. landmarks._TABLE), сырое значение без
-        # искажений от длины окна.
-        db.add(UserCalendarDay(
-            app_user_id=test_user.id, target_date=date.today(),
-            block_id=active_block.id, plan_id=plan.id, day_tag="push",
-            micro_tag="medium", meso_tag="medium", microcycle_day_number=1,
-            is_rest_day=False, is_blackout=False, status="planned",
-        ))
-        await db.commit()
-        ex_id = ex.id
-        plan_ex_id = plan_ex.id
-
-    async with SessionLocal() as db:
-        headroom_light = await repository.headroom_sets(
-            db, test_user.id, ex_id, "intermediate", date.today()
-        )
-    # 18 (MRV) - 5 (предписано) = 13 > 0.
-    assert headroom_light > 0
-
-    async with SessionLocal() as db:
-        pe = await db.get(WorkoutPlanExercise, plan_ex_id)
-        pe.target_sets = 40
-        await db.commit()
-
-    async with SessionLocal() as db:
-        headroom_heavy = await repository.headroom_sets(
-            db, test_user.id, ex_id, "intermediate", date.today()
-        )
-    # Предписание (40) уже выше MRV (18) — запас клампится в 0, но в любом
-    # случае обязан быть строго меньше запаса на лёгком предписании.
-    assert headroom_heavy < headroom_light
-    assert headroom_heavy == 0
-
-
-async def test_headroom_sets_and_exercise_context_resolve_en_system_key_muscle(
-    test_user, active_block
-):
+async def test_exercise_context_resolves_en_system_key_muscle(test_user):
     """Регрессия ревью Задачи 5, Important 1: main_muscle_group иногда уже
     хранит EN системный ключ, а не русское отображаемое имя — не только
     легаси-данные, пользователь пишет его verbatim через
     api/routers/exercises.py при создании своего упражнения. key_for_muscle
-    такую строку не резолвил вовсе (RU_TO_KEY.get("chest") -> None) — на
-    старом коде оба ассерта ниже упали бы: ctx["muscle"] был бы None, а
-    headroom_sets схлопнулся бы в 0 из ранней ветки «мышца не резолвится»,
-    даже с настоящим окном и лёгким предписанием под MRV."""
+    такую строку не резолвил вовсе (RU_TO_KEY.get("chest") -> None) —
+    ctx["muscle"] был бы None на старом коде."""
     async with SessionLocal() as db:
         ex = Exercise(
             name=f"EN-ключ мышцы {uuid.uuid4().hex[:8]}",
@@ -342,34 +255,9 @@ async def test_headroom_sets_and_exercise_context_resolve_en_system_key_muscle(
             app_user_id=test_user.id,
         )
         db.add(ex)
-        await db.flush()
-
-        plan = WorkoutPlan(
-            app_user_id=test_user.id, name="Push EN-key", day_tag="push",
-            micro_tag="medium", meso_tag="medium",
-        )
-        db.add(plan)
-        await db.flush()
-        db.add(WorkoutPlanExercise(
-            plan_id=plan.id, exercise_id=ex.id, target_sets=5, order_index=0,
-        ))
-        db.add(UserCalendarDay(
-            app_user_id=test_user.id, target_date=date.today(),
-            block_id=active_block.id, plan_id=plan.id, day_tag="push",
-            micro_tag="medium", meso_tag="medium", microcycle_day_number=1,
-            is_rest_day=False, is_blackout=False, status="planned",
-        ))
         await db.commit()
         ex_id = ex.id
 
     async with SessionLocal() as db:
         ctx = await repository.exercise_context(db, test_user.id, ex_id)
     assert ctx["muscle"] == "chest"
-
-    async with SessionLocal() as db:
-        headroom = await repository.headroom_sets(
-            db, test_user.id, ex_id, "intermediate", date.today()
-        )
-    # 18 (MRV) - 5 (предписано) = 13 > 0 — доказывает, что путь прошёл через
-    # резолв мышцы и реальную арифметику MRV, а не свалился в return 0.
-    assert headroom > 0

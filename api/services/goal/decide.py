@@ -47,9 +47,9 @@ def decide(inp: DecisionInput, simulate_with: SimulateWith) -> tuple[list[Lever]
     eta = inp.eta
     # Присутствие лифта в плане меняется ВНУТРИ этого прохода лестницы, как
     # только LEVER_ENSURE_PRESENT принят, — остальные ступени (scheme,
-    # rep_range, sets, частота) обязаны увидеть это сразу же, а не только на
-    # СЛЕДУЮЩЕМ вызове decide(). inp.lift_in_plan — снимок ДО решения и не
-    # меняется; lift_present — то, что решатель знает СЕЙЧАС.
+    # частота) обязаны увидеть это сразу же, а не только на СЛЕДУЮЩЕМ вызове
+    # decide(). inp.lift_in_plan — снимок ДО решения и не меняется;
+    # lift_present — то, что решатель знает СЕЙЧАС.
     lift_present = inp.lift_in_plan
 
     for kind in params.LADDER:
@@ -58,7 +58,7 @@ def decide(inp: DecisionInput, simulate_with: SimulateWith) -> tuple[list[Lever]
         if not _applicable(kind, inp, lift_present):
             continue
 
-        detail = _detail(kind, inp)
+        detail = _detail(kind)
         new_slope, new_eta = simulate_with(tuple(levers), kind, detail)
         effect_slope = round(new_slope - plan_slope, 3)
         if effect_slope <= 0:
@@ -119,10 +119,6 @@ def _applicable(kind: str, inp: DecisionInput, lift_present: bool) -> bool:
         return False
     if kind == params.LEVER_SCHEME:
         return inp.is_heavy_compound and inp.scheme not in ("percent_1rm", "fixed_increment")
-    if kind == params.LEVER_REP_RANGE:
-        return inp.target_reps < inp.rep_max
-    if kind == params.LEVER_SETS:
-        return inp.headroom_sets > 0
     if kind in params.STRUCTURAL_LEVERS:
         return inp.microcycles_left >= params.MIN_MICROCYCLES_FOR_STRUCTURAL
     return False
@@ -138,15 +134,11 @@ def _effect_days(eta_before: Optional[date], eta_after: Optional[date]) -> int:
     return max(0, (eta_before - eta_after).days)
 
 
-def _detail(kind: str, inp: DecisionInput) -> dict:
+def _detail(kind: str) -> dict:
     if kind == params.LEVER_SCHEME:
         # _applicable допускает LEVER_SCHEME только при is_heavy_compound —
         # второй исход недостижим, поэтому веток здесь одна.
         return {"to_scheme": "percent_1rm"}
-    if kind == params.LEVER_REP_RANGE:
-        return {"rep_min": max(1, inp.target_reps - 1), "rep_max": inp.target_reps + 2}
-    if kind == params.LEVER_SETS:
-        return {"delta_sets": min(2, inp.headroom_sets)}
     if kind == params.LEVER_LIFT_FREQUENCY:
         return {"delta_sessions": 1}
     return {}

@@ -1,5 +1,13 @@
-"""Откат применённого предложения (P0-12, Задача 10)."""
-import uuid
+"""Откат применённого предложения (P0-12, Задача 10).
+
+УДАЛЕНО (P0-12, обрезка лестницы): рычаги LEVER_SETS и LEVER_REP_RANGE —
+вместе с ними ушли тесты про сосуществование volume_adjustments с
+volume_review (автопилот в них больше не пишет вовсе — этот носитель теперь
+целиком в руках P0-09) и про носитель UserExerciseRepOverride (разбор
+причины — в decide()/simulate.py: ни одна схема прогрессии не читает число
+подходов, а «дожатие» диапазона повторов истинно по конструкции
+синтетического исполнителя).
+"""
 from datetime import date, timedelta
 
 import pytest
@@ -10,55 +18,15 @@ from sqlalchemy.orm.attributes import flag_modified
 from api.services.goal.service import apply_goal_decision, undo_goal_decision
 from api.services.models import (
     AppUserProfile,
-    Exercise,
     PeriodizationProposal,
     UserCalendarDay,
     UserExercisePreference,
-    UserExerciseRepOverride,
-    WorkoutPlan,
-    WorkoutPlanExercise,
 )
 from api.services.periodization import params as periodization_params
 from api.services.periodization.service import apply_decision
 from app.database import SessionLocal
 
 pytestmark = pytest.mark.asyncio
-
-
-async def _exercise_with_plan(test_user, target_sets: int = 3):
-    """Упражнение на грудь + план, в котором оно стоит — нужно тестам рычага
-    LEVER_SETS после финального ревью (Critical 2): _apply_sets теперь
-    трогает только дни, чей plan_id ведёт на план с ЭТИМ упражнением (см.
-    tests/integration/test_goal_apply_soft.py::_exercise_with_plan — та же
-    фикстура, продублирована здесь, чтобы не тянуть кросс-модульный импорт
-    тестового хелпера)."""
-    marker = uuid.uuid4().hex[:8]
-    async with SessionLocal() as db:
-        ex = Exercise(
-            name=f"Жим для sets-рычага {marker}",
-            category="base",
-            main_muscle_group="chest",
-            difficulty="beginner",
-            equipment_needed=[],
-            source="custom",
-            app_user_id=test_user.id,
-        )
-        db.add(ex)
-        await db.flush()
-
-        plan = WorkoutPlan(
-            app_user_id=test_user.id, name=f"План {marker}",
-            day_tag="push", micro_tag="medium", meso_tag="medium",
-        )
-        db.add(plan)
-        await db.flush()
-        db.add(WorkoutPlanExercise(
-            plan_id=plan.id, exercise_id=ex.id, target_sets=target_sets, order_index=0,
-        ))
-        await db.commit()
-        await db.refresh(ex)
-        await db.refresh(plan)
-        return ex, plan
 
 # active_block берётся из tests/integration/conftest.py (Minor 4, ревью
 # Задачи 10): та фикстура несёт при себе минимальный активный сплит
@@ -72,25 +40,20 @@ async def _exercise_with_plan(test_user, target_sets: int = 3):
 
 @pytest_asyncio.fixture(autouse=True)
 async def _cleanup_soft_lever_writes(test_user):
-    """Снести преференции/оверрайды, которые тест навешал на fresh_exercise.
+    """Снести преференции, которые тест навешал на fresh_exercise.
 
     Без этого teardown test_user падает ForeignKeyViolationError: он сносит
-    Exercise до того, как что-то удалит ссылающиеся на неё
-    UserExercisePreference/UserExerciseRepOverride (у их exercise_id нет
-    ON DELETE CASCADE). Фикстура завязана на test_user, поэтому её teardown
-    по LIFO гарантированно отрабатывает раньше teardown'а test_user (тот же
-    приём, что в test_goal_apply_soft.py, Задача 8).
+    Exercise до того, как что-то удалит ссылающуюся на неё
+    UserExercisePreference (у её exercise_id нет ON DELETE CASCADE).
+    Фикстура завязана на test_user, поэтому её teardown по LIFO гарантированно
+    отрабатывает раньше teardown'а test_user (тот же приём, что в
+    test_goal_apply_soft.py, Задача 8).
     """
     yield
     async with SessionLocal() as db:
         await db.execute(
             delete(UserExercisePreference).where(
                 UserExercisePreference.app_user_id == test_user.id
-            )
-        )
-        await db.execute(
-            delete(UserExerciseRepOverride).where(
-                UserExerciseRepOverride.app_user_id == test_user.id
             )
         )
         await db.commit()
@@ -219,26 +182,24 @@ async def test_undo_keeps_manual_changes(test_user, fresh_exercise, active_block
     assert pref.preference == "disliked"
 
 
-async def test_undo_keeps_manually_diverged_rep_range_and_scheme(
+async def test_undo_keeps_manually_diverged_scheme(
     test_user, fresh_exercise, active_block
 ):
     """Finding 3 (ревью Задачи 10, Important): §5.5 требует ту же дисциплину
     сравнения "текущее значение против того, что записал автопилот", что
-    раньше была реализована только для преференции. Диапазон повторов и
-    схема прогрессии восстанавливались БЕЗУСЛОВНО — правка, которую
-    пользователь внёс сам ПОСЛЕ применения, молча терялась при откате.
-    Автопилот записал rep 2-5 и схему "5x5" (см. levers ниже); пользователь
-    правит оба носителя на другие значения — откат обязан оставить их как
-    есть и назвать оба в kept, не восстанавливая поверх.
+    раньше была реализована только для преференции. Схема прогрессии
+    восстанавливалась БЕЗУСЛОВНО — правка, которую пользователь внёс сам
+    ПОСЛЕ применения, молча терялась при откате. Автопилот записал схему
+    "5x5" (см. levers ниже); пользователь правит носитель на другое значение
+    — откат обязан оставить его как есть и назвать его в kept, не
+    восстанавливая поверх.
     """
     async with SessionLocal() as db:
         db.add(AppUserProfile(app_user_id=test_user.id))
         await db.commit()
 
     levers = [
-        {"index": 0, "kind": "rep_range", "reason_code": "pace_behind",
-         "effect_slope": 0.1, "effect_days": 5, "detail": {"rep_min": 2, "rep_max": 5}},
-        {"index": 1, "kind": "scheme", "reason_code": "pace_behind",
+        {"index": 0, "kind": "scheme", "reason_code": "pace_behind",
          "effect_slope": 0.15, "effect_days": 7, "detail": {"to_scheme": "5x5"}},
     ]
     async with SessionLocal() as db:
@@ -257,23 +218,15 @@ async def test_undo_keeps_manually_diverged_rep_range_and_scheme(
 
         result = await apply_goal_decision(
             db, test_user.id, proposal,
-            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0, 1]},
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0]},
         )
         await db.commit()
         pid = proposal.id
-    assert result["applied"] == [0, 1]
+    assert result["applied"] == [0]
 
-    # Пользователь правит ОБА носителя ПОСЛЕ применения — теперь они
-    # разошлись с тем, что записал автопилот (2-5 и "5x5").
+    # Пользователь правит носитель ПОСЛЕ применения — теперь он разошёлся с
+    # тем, что записал автопилот ("5x5").
     async with SessionLocal() as db:
-        override = (await db.execute(
-            select(UserExerciseRepOverride).where(
-                UserExerciseRepOverride.app_user_id == test_user.id,
-                UserExerciseRepOverride.exercise_id == fresh_exercise.id,
-            )
-        )).scalar_one()
-        override.rep_min, override.rep_max = 6, 10
-
         profile = (await db.execute(
             select(AppUserProfile).where(AppUserProfile.app_user_id == test_user.id)
         )).scalar_one()
@@ -288,106 +241,13 @@ async def test_undo_keeps_manually_diverged_rep_range_and_scheme(
         undo_result = await undo_goal_decision(db, test_user.id, proposal)
         await db.commit()
 
-    assert set(undo_result["kept"]) >= {"rep_override", "scheme"}
+    assert "scheme" in undo_result["kept"]
 
     async with SessionLocal() as db:
-        override = (await db.execute(
-            select(UserExerciseRepOverride).where(
-                UserExerciseRepOverride.app_user_id == test_user.id,
-                UserExerciseRepOverride.exercise_id == fresh_exercise.id,
-            )
-        )).scalar_one()
         profile = (await db.execute(
             select(AppUserProfile).where(AppUserProfile.app_user_id == test_user.id)
         )).scalar_one()
-    assert (override.rep_min, override.rep_max) == (6, 10)
     assert profile.settings["progression"]["overrides"][str(fresh_exercise.id)] == "3x8"
-
-
-async def test_undo_removes_only_own_volume_adjustment_keeps_volume_review(
-    test_user, active_block
-):
-    """Обязательный тест из спеки — сосуществование с P0-09: откат обязан
-    снять ТОЛЬКО свою запись в volume_adjustments дня и оставить нетронутой
-    запись, которую туда положило РЕШЕНИЕ ОБЗОРА ОБЪЁМА (volume_review) —
-    тот же формат {exercise_id, delta_sets, proposal_id}, что кладёт
-    api/services/volume/service (см. её _apply_frozen_or_pick).
-
-    fresh_exercise (conftest.py, main_muscle_group="back") заменена на
-    _exercise_with_plan (финальное ревью, Critical 2): _apply_sets теперь
-    трогает только дни, реально несущие целевое упражнение в плане, и "back"
-    не резолвится ни одним ключом landmarks (headroom всегда был бы 0)."""
-    ex, plan = await _exercise_with_plan(test_user, target_sets=3)
-    future = date.today() + timedelta(days=3)
-    async with SessionLocal() as db:
-        volume_review_proposal = PeriodizationProposal(
-            app_user_id=test_user.id, block_id=active_block.id,
-            kind=periodization_params.KIND_VOLUME_REVIEW, reason_code="over_mrv",
-            payload={"adjustments": [], "window_id": 1},
-            status=periodization_params.STATUS_ACCEPTED,
-        )
-        db.add(volume_review_proposal)
-
-        goal_proposal = PeriodizationProposal(
-            app_user_id=test_user.id, block_id=active_block.id,
-            kind=periodization_params.KIND_GOAL_PLAN, reason_code="pace_behind",
-            payload={
-                "goal_id": 1, "exercise_id": ex.id,
-                "levers": [{"index": 0, "kind": "sets", "reason_code": "pace_behind",
-                            "effect_slope": 0.1, "effect_days": 14,
-                            "detail": {"delta_sets": 2}}],
-                "applied_snapshot": None,
-            },
-            status=periodization_params.STATUS_PENDING,
-        )
-        db.add(goal_proposal)
-
-        day = UserCalendarDay(
-            app_user_id=test_user.id, target_date=future,
-            block_id=active_block.id, plan_id=plan.id,
-            is_rest_day=False, is_blackout=False, microcycle_day_number=1,
-            status="planned",
-        )
-        db.add(day)
-        await db.commit()
-        await db.refresh(volume_review_proposal)
-        await db.refresh(goal_proposal)
-        await db.refresh(day)
-        volume_review_pid = volume_review_proposal.id
-        goal_pid = goal_proposal.id
-        day_id = day.id
-
-        result = await apply_goal_decision(
-            db, test_user.id, goal_proposal,
-            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0]},
-        )
-        await db.commit()
-    assert result["applied"] == [0]
-
-    # Волюм-ревью P0-09 кладёт СВОЮ запись на тот же день, тем же форматом,
-    # что и goal-автопилот, но со своим proposal_id.
-    async with SessionLocal() as db:
-        day = await db.get(UserCalendarDay, day_id)
-        adjustments = list(day.volume_adjustments or [])
-        adjustments.append({
-            "exercise_id": ex.id, "delta_sets": 1,
-            "proposal_id": volume_review_pid,
-        })
-        day.volume_adjustments = adjustments
-        flag_modified(day, "volume_adjustments")
-        await db.commit()
-
-    async with SessionLocal() as db:
-        goal_proposal = await db.get(PeriodizationProposal, goal_pid)
-        undo_result = await undo_goal_decision(db, test_user.id, goal_proposal)
-        await db.commit()
-    assert undo_result["status"] == "undone"
-
-    async with SessionLocal() as db:
-        day = await db.get(UserCalendarDay, day_id)
-    assert day.volume_adjustments == [
-        {"exercise_id": ex.id, "delta_sets": 1, "proposal_id": volume_review_pid}
-    ]
 
 
 async def test_dispatcher_applies_structural_lever_and_allows_undo(
@@ -599,13 +459,13 @@ async def test_undo_leaves_untouched_scheme_alone_even_if_value_matches_lever(
     значения с тем, что предложил бы рычаг. Ревью воспроизвело буквально: в
     payload["levers"] лежат ОБА кандидата — схемный (decide.py всегда
     предлагает "percent_1rm" для тяжёлых базовых, детерминированно) и
-    диапазон повторов, — но пользователь принял только диапазон (accepted=
-    [1]); схемный рычаг НИКОГДА не применялся, и applied_snapshot несёт
-    ключ "rep_override", но не несёт ключа "scheme". Оверрайд схемы, который
-    уже стоял на "percent_1rm" (поставлен СОВСЕМ ДРУГИМ актором — не этим
-    предложением), совпадает со значением, которое предложил бы схемный
-    рычаг. Старый код сравнивал именно это значение и удалял оверрайд как
-    «свой» — откат обязан оставить его нетронутым."""
+    ensure_present, — но пользователь принял только ensure_present
+    (accepted=[0]); схемный рычаг НИКОГДА не применялся, и applied_snapshot
+    несёт ключ "preference", но не несёт ключа "scheme". Оверрайд схемы,
+    который уже стоял на "percent_1rm" (поставлен СОВСЕМ ДРУГИМ актором — не
+    этим предложением), совпадает со значением, которое предложил бы
+    схемный рычаг. Старый код сравнивал именно это значение и удалял
+    оверрайд как «свой» — откат обязан оставить его нетронутым."""
     async with SessionLocal() as db:
         db.add(AppUserProfile(
             app_user_id=test_user.id,
@@ -614,10 +474,10 @@ async def test_undo_leaves_untouched_scheme_alone_even_if_value_matches_lever(
         await db.commit()
 
     levers = [
-        {"index": 0, "kind": "scheme", "reason_code": "pace_behind",
+        {"index": 0, "kind": "ensure_present", "reason_code": "lift_missing",
+         "effect_slope": 0.2, "effect_days": 9, "detail": {}},
+        {"index": 1, "kind": "scheme", "reason_code": "pace_behind",
          "effect_slope": 0.15, "effect_days": 7, "detail": {"to_scheme": "percent_1rm"}},
-        {"index": 1, "kind": "rep_range", "reason_code": "pace_behind",
-         "effect_slope": 0.1, "effect_days": 5, "detail": {"rep_min": 2, "rep_max": 5}},
     ]
     async with SessionLocal() as db:
         proposal = PeriodizationProposal(
@@ -634,19 +494,19 @@ async def test_undo_leaves_untouched_scheme_alone_even_if_value_matches_lever(
         await db.refresh(proposal)
         pid = proposal.id
 
-        # Принят ТОЛЬКО диапазон повторов (индекс 1) — схемный рычаг
-        # (индекс 0) в accepted нет и никогда не применялся.
+        # Принят ТОЛЬКО ensure_present (индекс 0) — схемный рычаг (индекс 1)
+        # в accepted нет и никогда не применялся.
         result = await apply_goal_decision(
             db, test_user.id, proposal,
-            periodization_params.ACTION_APPLY_GOAL, {"accepted": [1]},
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0]},
         )
         await db.commit()
-    assert result["applied"] == [1]
+    assert result["applied"] == [0]
 
     async with SessionLocal() as db:
         row = await db.get(PeriodizationProposal, pid)
         snapshot = row.payload["applied_snapshot"]
-    assert "rep_override" in snapshot
+    assert "preference" in snapshot
     assert "scheme" not in snapshot, "схемный рычаг не применялся — снимок не должен нести его ключ"
 
     async with SessionLocal() as db:
@@ -665,20 +525,17 @@ async def test_undo_leaves_untouched_scheme_alone_even_if_value_matches_lever(
     )
 
 
-async def test_undo_removes_freshly_created_rep_override_and_scheme(
+async def test_undo_removes_freshly_created_scheme(
     test_user, fresh_exercise, active_block
 ):
     """Ключ в snapshot записан как None (носителя не было до применения) —
-    откат обязан удалить и строку оверрайда диапазона повторов, и запись
-    схемы в overrides, а не просто оставить их."""
+    откат обязан удалить запись схемы в overrides, а не просто оставить её."""
     async with SessionLocal() as db:
         db.add(AppUserProfile(app_user_id=test_user.id))
         await db.commit()
 
     levers = [
-        {"index": 0, "kind": "rep_range", "reason_code": "pace_behind",
-         "effect_slope": 0.1, "effect_days": 5, "detail": {"rep_min": 2, "rep_max": 5}},
-        {"index": 1, "kind": "scheme", "reason_code": "pace_behind",
+        {"index": 0, "kind": "scheme", "reason_code": "pace_behind",
          "effect_slope": 0.15, "effect_days": 7, "detail": {"to_scheme": "5x5"}},
     ]
     async with SessionLocal() as db:
@@ -698,10 +555,10 @@ async def test_undo_removes_freshly_created_rep_override_and_scheme(
 
         result = await apply_goal_decision(
             db, test_user.id, proposal,
-            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0, 1]},
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0]},
         )
         await db.commit()
-    assert result["applied"] == [0, 1]
+    assert result["applied"] == [0]
 
     async with SessionLocal() as db:
         proposal = await db.get(PeriodizationProposal, pid)
@@ -711,20 +568,13 @@ async def test_undo_removes_freshly_created_rep_override_and_scheme(
     assert undo_result["kept"] == []
 
     async with SessionLocal() as db:
-        override = (await db.execute(
-            select(UserExerciseRepOverride).where(
-                UserExerciseRepOverride.app_user_id == test_user.id,
-                UserExerciseRepOverride.exercise_id == fresh_exercise.id,
-            )
-        )).scalar_one_or_none()
         profile = (await db.execute(
             select(AppUserProfile).where(AppUserProfile.app_user_id == test_user.id)
         )).scalar_one()
-    assert override is None
     assert str(fresh_exercise.id) not in profile.settings.get("progression", {}).get("overrides", {})
 
 
-async def test_undo_restores_preexisting_rep_override_and_scheme_values(
+async def test_undo_restores_preexisting_scheme_value(
     test_user, fresh_exercise, active_block
 ):
     """Ключ в snapshot записан НЕ как None (носитель уже нёс значение до
@@ -735,16 +585,10 @@ async def test_undo_restores_preexisting_rep_override_and_scheme_values(
             app_user_id=test_user.id,
             settings={"progression": {"overrides": {str(fresh_exercise.id): "3x8"}}},
         ))
-        db.add(UserExerciseRepOverride(
-            app_user_id=test_user.id, exercise_id=fresh_exercise.id,
-            rep_min=6, rep_max=10,
-        ))
         await db.commit()
 
     levers = [
-        {"index": 0, "kind": "rep_range", "reason_code": "pace_behind",
-         "effect_slope": 0.1, "effect_days": 5, "detail": {"rep_min": 2, "rep_max": 5}},
-        {"index": 1, "kind": "scheme", "reason_code": "pace_behind",
+        {"index": 0, "kind": "scheme", "reason_code": "pace_behind",
          "effect_slope": 0.15, "effect_days": 7, "detail": {"to_scheme": "5x5"}},
     ]
     async with SessionLocal() as db:
@@ -764,23 +608,16 @@ async def test_undo_restores_preexisting_rep_override_and_scheme_values(
 
         result = await apply_goal_decision(
             db, test_user.id, proposal,
-            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0, 1]},
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0]},
         )
         await db.commit()
-    assert result["applied"] == [0, 1]
+    assert result["applied"] == [0]
 
-    # Применение действительно переписало носителей на новые значения.
+    # Применение действительно переписало носитель на новое значение.
     async with SessionLocal() as db:
-        override = (await db.execute(
-            select(UserExerciseRepOverride).where(
-                UserExerciseRepOverride.app_user_id == test_user.id,
-                UserExerciseRepOverride.exercise_id == fresh_exercise.id,
-            )
-        )).scalar_one()
         profile = (await db.execute(
             select(AppUserProfile).where(AppUserProfile.app_user_id == test_user.id)
         )).scalar_one()
-    assert (override.rep_min, override.rep_max) == (2, 5)
     assert profile.settings["progression"]["overrides"][str(fresh_exercise.id)] == "5x5"
 
     async with SessionLocal() as db:
@@ -791,16 +628,9 @@ async def test_undo_restores_preexisting_rep_override_and_scheme_values(
     assert undo_result["kept"] == []
 
     async with SessionLocal() as db:
-        override = (await db.execute(
-            select(UserExerciseRepOverride).where(
-                UserExerciseRepOverride.app_user_id == test_user.id,
-                UserExerciseRepOverride.exercise_id == fresh_exercise.id,
-            )
-        )).scalar_one()
         profile = (await db.execute(
             select(AppUserProfile).where(AppUserProfile.app_user_id == test_user.id)
         )).scalar_one()
-    assert (override.rep_min, override.rep_max) == (6, 10)
     assert profile.settings["progression"]["overrides"][str(fresh_exercise.id)] == "3x8"
 
 

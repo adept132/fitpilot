@@ -388,11 +388,8 @@ async def test_falling_trend_from_real_history_blocks_acceleration(
         lift_in_plan=True,
         trend_slope=trend,
         microcycles_left=8,
-        headroom_sets=4,
         scheme="double",
         is_heavy_compound=True,
-        rep_max=12,
-        target_reps=3,
     )
 
     def _unreachable_simulate_with(applied, kind, detail):

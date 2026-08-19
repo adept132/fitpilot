@@ -29,8 +29,6 @@ TODAY = date(2026, 3, 2)
 
 _SHARE = {
     params.LEVER_SCHEME: 0.15,
-    params.LEVER_REP_RANGE: 0.12,
-    params.LEVER_SETS: 0.10,
     params.LEVER_LIFT_FREQUENCY: 0.35,
     params.LEVER_STRUCTURAL: 0.50,
 }
@@ -44,11 +42,8 @@ def _inp(**over) -> DecisionInput:
         lift_in_plan=True,
         trend_slope=0.8,
         microcycles_left=12,
-        headroom_sets=4,
         scheme="double",
         is_heavy_compound=True,
-        rep_max=12,
-        target_reps=3,
     )
     base.update(over)
     return DecisionInput(**base)
@@ -124,11 +119,6 @@ def test_ladder_order_follows_params():
     assert positions == sorted(positions)
 
 
-def test_no_sets_lever_without_volume_headroom():
-    levers, _ = _decide(_inp(headroom_sets=0, rates=Rates(required=1.9, plan=0.4, ceiling=2.0)))
-    assert all(l.kind != params.LEVER_SETS for l in levers)
-
-
 def test_structural_levers_are_blocked_on_short_horizon():
     levers, _ = _decide(
         _inp(microcycles_left=1, rates=Rates(required=1.9, plan=0.4, ceiling=2.0))
@@ -163,17 +153,14 @@ def test_ladder_exhausted_but_short_is_partial_catchup():
 
 
 def test_no_applicable_lever_reports_no_lever_left():
-    """Объёма нет, схема уже оптимальная (не тяжёлый компаунд), диапазон
-    повторов уже максимален, горизонт короткий для структурных ступеней —
-    ни одна ступень не применима, лифт в плане уже есть."""
+    """Схема уже оптимальная (не тяжёлый компаунд), горизонт короткий для
+    структурных ступеней — ни одна ступень не применима, лифт в плане уже
+    есть."""
     levers, reason = _decide(
         _inp(
             rates=Rates(required=1.9, plan=0.4, ceiling=2.0),
-            headroom_sets=0,
             is_heavy_compound=False,
             scheme="fixed_increment",
-            target_reps=12,
-            rep_max=12,
             microcycles_left=1,
         )
     )
@@ -196,8 +183,6 @@ def test_lift_returning_to_plan_unlocks_the_rest_of_the_ladder_same_pass():
     contribution = {
         params.LEVER_ENSURE_PRESENT: 0.5,
         params.LEVER_SCHEME: 0.15,
-        params.LEVER_REP_RANGE: 0.12,
-        params.LEVER_SETS: 0.10,
         params.LEVER_LIFT_FREQUENCY: 0.35,
         params.LEVER_STRUCTURAL: 0.50,
     }
@@ -320,11 +305,8 @@ def test_effect_is_grounded_in_real_engine_and_minimal():
         lift_in_plan=True,
         trend_slope=0.1,
         microcycles_left=12,
-        headroom_sets=4,
         scheme="double",
         is_heavy_compound=True,
-        rep_max=8,
-        target_reps=3,
     )
     levers, reason = decide.decide(inp, simulate_with)
     assert levers, "лестница обязана найти хотя бы один настоящий рычаг для этого разрыва"

@@ -213,95 +213,6 @@ async def adherence_ratios(
     return [_adherence_ratio(w) for w in windows]
 
 
-async def _muscle_and_landmarks(
-    session: AsyncSession, exercise_id: int, level: Optional[str]
-):
-    """Мышца лифта (системный ключ) и её ориентиры MRV/MEV/MAV на уровне
-    опыта — общая часть headroom_sets/headroom_for_window (см. их докстринги
-    про to_system_key). (None, None), если мышца не резолвится."""
-    from api.services.muscle_keys import to_system_key
-    from api.services.volume.landmarks import landmarks_for
-
-    muscle_raw = (await session.execute(
-        select(Exercise.main_muscle_group).where(Exercise.id == exercise_id)
-    )).scalar_one_or_none()
-    # ИСПРАВЛЕНО (ревью Задачи 5, Important 1): key_for_muscle понимает
-    # только русские отображаемые имена. main_muscle_group хранит и уже
-    # нормализованные EN системные ключи ("chest", "back" и т.п.) — их
-    # пишет api/routers/exercises.py verbatim при создании пользователем
-    # своего упражнения, это не только легаси-данные. На таких строках
-    # key_for_muscle тихо возвращал None, headroom схлопывался в 0, и рычаг
-    # «добавь подходы» навсегда гас без единого видимого симптома.
-    # to_system_key — единая точка нормализации (EN-ключ / RU-имя /
-    # UPPERCASE UI-код), ровно для этого и заведённая в muscle_keys.py.
-    muscle = to_system_key(muscle_raw)
-    if muscle is None:
-        return None, None
-    return muscle, landmarks_for(muscle, level)
-
-
-async def headroom_for_window(
-    session: AsyncSession,
-    app_user_id: int,
-    exercise_id: int,
-    level: Optional[str],
-    window,
-) -> int:
-    """Запас эффективных подходов на мышцу лифта до MRV В КОНКРЕТНОМ окне.
-
-    Вынесено из headroom_sets (финальное ревью, находка C2) — apply-time
-    сверка `_apply_sets` в service.py обязана пересчитывать headroom для
-    КАЖДОГО окна, которое накрывают будущие дни блока, а не только для окна,
-    активного «сегодня» (то, что даёт headroom_sets). Общий код — резолв
-    мышцы, ориентиры landmarks, масштаб под длину микроцикла, вычитание
-    prescribed_for — тот же самый, разница только в том, что `window` уже
-    известен вызывающей стороне, а не ищется по дате.
-    """
-    from api.services.volume import repository as volume_repository
-    from api.services.volume.landmarks import scale_landmarks
-
-    muscle, lm = await _muscle_and_landmarks(session, exercise_id, level)
-    if muscle is None or lm is None:
-        return 0
-
-    length = await volume_repository.block_microcycle_length(session, window.block_id)
-    scaled = scale_landmarks(lm, length / 7.0)
-
-    prescribed = await volume_repository.prescribed_for(session, app_user_id, window)
-    contribution = prescribed.get(muscle)
-    planned = contribution.effective if contribution is not None else 0.0
-    return max(0, int(scaled.mrv - planned))
-
-
-async def headroom_sets(
-    session: AsyncSession,
-    app_user_id: int,
-    exercise_id: int,
-    level: Optional[str],
-    today: date,
-) -> int:
-    """Сколько эффективных подходов на главную мышцу лифта ещё влезает до MRV
-    В ОКНЕ, АКТИВНОМ НА `today`.
-
-    Автопилот ходит внутри границ движка объёма (спека, решение 11): рычаг,
-    выносящий мышцу за верхний landmark, не должен предлагаться вовсе.
-    Границы берём те же, что P0-09, и масштабируем той же формулой — иначе
-    десятидневная цель судилась бы семидневным потолком.
-
-    Тонкая обёртка над headroom_for_window: находит окно по дате, дальше —
-    общая арифметика (см. её докстринг). decide.py зовёт именно эту функцию
-    (у него есть только "сегодня"); apply-time сверка `_apply_sets`
-    (service.py) зовёт headroom_for_window напрямую — она уже держит
-    конкретные Window-объекты будущих дней блока.
-    """
-    from api.services.volume import repository as volume_repository
-
-    window = await volume_repository.current_window(session, app_user_id, today)
-    if window is None:
-        return 0
-    return await headroom_for_window(session, app_user_id, exercise_id, level, window)
-
-
 async def exercise_context(
     session: AsyncSession, app_user_id: int, exercise_id: int
 ) -> dict:
@@ -342,8 +253,11 @@ async def exercise_context(
         "scheme": (state.last_scheme if state is not None else None) or "e1rm_factor",
         "rep_max": rep_max,
         "is_heavy_compound": row.fatigue_tier == 1 and bool(equipment & {BARBELL, SMITH}),
-        # ИСПРАВЛЕНО (ревью Задачи 5, Important 1): см. докстринг-комментарий
-        # в headroom_sets — та же замена key_for_muscle -> to_system_key.
+        # ИСПРАВЛЕНО (ревью Задачи 5, Important 1): main_muscle_group хранит
+        # и уже нормализованные EN системные ключи, не только русские
+        # отображаемые имена (см. api/services/muscle_keys.py) —
+        # key_for_muscle такую строку не резолвил вовсе; to_system_key
+        # обязана.
         "muscle": to_system_key(row.main_muscle_group),
     }
 

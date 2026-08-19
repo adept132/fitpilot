@@ -31,9 +31,7 @@ from api.services.models import (
     TrainingBlock,
     UserCalendarDay,
     UserExercisePreference,
-    UserExerciseRepOverride,
     UserGoal,
-    WorkoutPlanExercise,
 )
 from api.services.periodization import params as periodization_params
 
@@ -207,13 +205,8 @@ async def evaluate(
         "factor": factor,
         "horizon_start": today + timedelta(days=1),
         "horizon_until": until,
-        # Контекст рычагов: запас объёма до MRV и параметры упражнения, ОБА
-        # берутся из БД через repository (поправка постановщика Задачи 6:
-        # заготовка брифа местами хардкодила эти значения — без реального
-        # headroom_sets вето по MRV не работало бы вовсе, спека §5.4/решение 11).
-        "headroom_sets": await repository.headroom_sets(
-            session, app_user_id, goal.exercise_id, level, today
-        ),
+        # Контекст рычагов: параметры упражнения (схема, тяжесть базы) для
+        # применимости LEVER_SCHEME — из БД через repository.
         "exercise": await repository.exercise_context(
             session, app_user_id, goal.exercise_id
         ),
@@ -518,11 +511,8 @@ async def refresh_goal_proposals(
         lift_in_plan=state["lift_in_plan"],
         trend_slope=state["trend_slope"],
         microcycles_left=microcycles_left,
-        headroom_sets=state["headroom_sets"],
         scheme=state["exercise"]["scheme"],
         is_heavy_compound=state["exercise"]["is_heavy_compound"],
-        rep_max=state["exercise"]["rep_max"],
-        target_reps=goal.target_reps or 1,
     ), simulate_with)
     if not levers:
         # ИСПРАВЛЕНО (ревью Задачи 6, Important 2): это УДАВШАЯСЯ переоценка
@@ -660,12 +650,17 @@ async def apply_goal_decision(
     Нетипизированный accepted (тело HTTP-запроса приходит как есть)
     трактуем как пустой — то же осознанное «ничего», а не 500.
 
-    Порядок применения ВНУТРИ ОДНОГО запроса — не порядок индексов рычагов
-    (порядок лестницы decide.py), а порядок фаз: структурный рычаг
-    (lift_frequency/structural) — первым, sets — последним (см. подробный
-    разбор прямо над циклом ниже, финальное ревью Critical 3, часть 2).
-    `applied` в ответе — всегда список индексов ПО ВОЗРАСТАНИЮ, независимо от
-    порядка фактического исполнения.
+    Порядок применения — порядок принятых рычагов как есть (совпадает с
+    порядком индексов лестницы decide.py: ensure_present -> scheme ->
+    lift_frequency -> structural). УДАЛЕНИЕ (P0-12, обрезка лестницы):
+    раньше здесь был отдельный порядок ФАЗ (структурный рычаг — первым,
+    sets — последним), потому что sets писала в UserCalendarDay.
+    volume_adjustments и могла столкнуться со структурной перегенерацией
+    того же дня. Носителей ensure_present/scheme (UserExercisePreference,
+    profile.settings) календарный день не касается вовсе, так что порядок
+    между всеми оставшимися рычагами теперь не имеет значения. `applied` в
+    ответе — всегда список индексов ПО ВОЗРАСТАНИЮ, независимо от порядка
+    фактического исполнения.
 
     НЕ КОММИТИТ СЕССИЮ (ревью Задачи 8, Critical 1) — по тому же контракту,
     что и volume.apply_volume_decision: только flush(). Записи рычагов и
@@ -676,19 +671,15 @@ async def apply_goal_decision(
     два, и обрыв процесса между ними оставил бы рычаги применёнными, а
     предложение — всё ещё pending; повтор из офлайн-очереди мобильного
     клиента прошёл бы проверку status == pending заново и применил бы
-    рычаги ВТОРОЙ раз (см. идемпотентность _apply_sets по proposal_id ниже —
-    это подстраховка на случай именно такого повтора, а не замена
-    атомарности).
+    рычаги ВТОРОЙ раз (см. идемпотентность _apply_structural по маркеру
+    structural_applied ниже — это подстраховка на случай именно такого
+    повтора, а не замена атомарности).
 
-    skipped_days — счётчик дней, которые рычаг НЕ тронул, хотя формально мог
-    бы. Для LEVER_SETS это (см. её докстринг, финальное ревью Critical 2):
-    дни среди строго БУДУЩИХ дней блока (target_date > today), несущие
-    целевой лифт, но уже не "planned" (есть факт), ЛИБО дни, чьё окно не
-    удалось резолвить, ЛИБО дни, для которых бюджет окна уже исчерпан
-    (landmarks P0-09 больше не позволяют). Для структурных рычагов — дни,
-    которые _wipe_future_calendar пощадила (факт или принятая правка объёма,
-    см. докстринг _apply_structural). Сегодняшний день в счётчик НЕ входит —
-    он не применяется и не считается пропущенным.
+    skipped_days — счётчик дней, которые структурный рычаг НЕ тронул, хотя
+    формально мог бы: дни, которые _wipe_future_calendar пощадила (факт или
+    принятая правка объёма, см. докстринг _apply_structural). Мягкие рычаги
+    (ensure_present/scheme) дней не касаются вовсе и в этот счётчик не
+    попадают.
     """
     raw = options.get("accepted")
     accepted = set(raw) if isinstance(raw, list) else set()
@@ -717,7 +708,7 @@ async def apply_goal_decision(
     # Это ровно то же двухуровневое правило, на которое опирается
     # undo_goal_decision (см. её докстринг): ПРИСУТСТВИЕ ключа в снимке —
     # единственный источник истины о том, писало ли ЭТО предложение данный
-    # носитель (preference/rep_override/scheme), а само записанное значение
+    # носитель (preference/scheme), а само записанное значение
     # (включая None) — это то, что было ДО записи, по которому откат либо
     # удаляет носителя (None), либо восстанавливает прежнее значение.
     existing_snapshot = payload.get("applied_snapshot")
@@ -727,73 +718,15 @@ async def apply_goal_decision(
     applied: list[int] = []
     skipped_days = 0
 
-    # ИСПРАВЛЕНО (финальное ревью, Critical 3, часть 2 — «порядок лестницы —
-    # случайность, а не решение»): рычаги применяются НЕ в порядке их
-    # индекса (порядка лестницы decide.py: ensure_present -> scheme ->
-    # rep_range -> sets -> lift_frequency -> structural), а в порядке ФАЗ,
-    # определённых ниже. Если бы порядок остался порядком индекса, sets
-    # (индекс которого в реальном предложении ВСЕГДА меньше индекса
-    # структурного рычага — decide() строит лестницу и присваивает индексы
-    # именно в этом порядке) успел бы проставить volume_adjustments на дни
-    # ДО того, как структурный рычаг тем же запросом перегенерирует
-    # календарь. _wipe_future_calendar щадит ЛЮБОЙ день с непустым
-    # volume_adjustments — это её собственный, отдельный контракт для P0-09
-    # (сохранить принятую пользователем правку объёма), никак не связанный с
-    # тем, что sets и structural в ОДНОМ запросе принадлежат одному и тому же
-    # решению автопилота. День, который sets только что пометил, оказался бы
-    # НАВСЕГДА исключён из структурной перегенерации — не только в этом
-    # запросе, но и во ВСЕХ будущих (P0-08 deload/postpone, границы блока,
-    # следующий цикл автопилота).
-    #
-    # РЕШЕНИЕ: структурные рычаги идут ПЕРВЫМИ, sets — ПОСЛЕДНИМ. Довод в
-    # пользу именно этого направления, а не обратного: _apply_sets ищет дни,
-    # которые ДЕЙСТВИТЕЛЬНО несут целевое упражнение (join через
-    # WorkoutPlanExercise.plan_id — см. её докстринг, находка C2), и этот
-    # ответ стабилен только ПОСЛЕ того, как структурная перегенерация
-    # закончила переписывать UserCalendarDay.plan_id. Если бы sets применялся
-    # первым, он отработал бы по СТАРОМУ плану (до перекройки сплита/
-    # частоты), и последующая регенерация либо стёрла бы его правку вместе с
-    # днём (она щадит только дни planned с ПУСТЫМ volume_adjustments — день с
-    # правкой не подпадает под "снести", но и не подпадает под "пересобрать
-    # по новому сплиту" тоже, а просто перестаёт существовать логически,
-    # если новый сплит вообще не ставит на эту дату целевое упражнение), либо
-    # заморозила бы день от всех БУДУЩИХ регенераций тем же механизмом C3.
-    # Другие мягкие рычаги (favorite/scheme/rep_range) от этого порядка не
-    # зависят — их носители (UserExercisePreference/settings/
-    # UserExerciseRepOverride) не привязаны к конкретному дню календаря,
-    # поэтому идут отдельной фазой ПОСЛЕ структурного (день, на котором стоит
-    # упражнение, для них не важен) и ДО sets (порядок между ними не важен по
-    # той же причине).
-    def _lever_phase(kind: str) -> int:
-        if kind in params.STRUCTURAL_LEVERS:
-            return 0
-        if kind == params.LEVER_SETS:
-            return 2
-        return 1
-
     accepted_levers = [lever for lever in levers if lever.get("index") in accepted]
-    # sorted() устойчива — рычаги одной фазы сохраняют исходный относительный
-    # порядок (важно для favorite/scheme/rep_range: между собой они не
-    # переупорядочиваются).
-    ordered_levers = sorted(accepted_levers, key=lambda l: _lever_phase(l["kind"]))
 
-    for lever in ordered_levers:
+    for lever in accepted_levers:
         kind = lever["kind"]
         if kind == params.LEVER_ENSURE_PRESENT:
             if await _apply_favorite(session, app_user_id, exercise_id, snapshot):
                 applied.append(lever["index"])
-        elif kind == params.LEVER_REP_RANGE:
-            if await _apply_rep_range(session, app_user_id, exercise_id, lever, snapshot):
-                applied.append(lever["index"])
         elif kind == params.LEVER_SCHEME:
             if await _apply_scheme(session, app_user_id, exercise_id, lever, snapshot):
-                applied.append(lever["index"])
-        elif kind == params.LEVER_SETS:
-            done, skipped = await _apply_sets(
-                session, app_user_id, proposal, exercise_id, lever
-            )
-            skipped_days += skipped
-            if done:
                 applied.append(lever["index"])
         elif kind in params.STRUCTURAL_LEVERS:
             done, skipped = await _apply_structural(
@@ -803,10 +736,8 @@ async def apply_goal_decision(
             if done:
                 applied.append(lever["index"])
 
-    # Список индексов наружу — в порядке лестницы (по возрастанию), а не в
-    # порядке фактического исполнения выше: это просто множество «что
-    # применилось», и вызывающая сторона (экран, тесты) не обязана знать про
-    # внутренний порядок фаз.
+    # Список индексов наружу — по возрастанию, а не в порядке accepted_levers
+    # (порядок accepted как список пришёл в запросе не гарантирован).
     applied.sort()
 
     if applied:
@@ -870,39 +801,6 @@ async def _apply_favorite(
     return True
 
 
-async def _apply_rep_range(
-    session: AsyncSession, app_user_id: int, exercise_id: Optional[int],
-    lever: dict, snapshot: dict,
-) -> bool:
-    if exercise_id is None:
-        return False
-    detail = lever.get("detail") or {}
-    rep_min, rep_max = detail.get("rep_min"), detail.get("rep_max")
-    if rep_min is None or rep_max is None:
-        return False
-    existing = (await session.execute(
-        select(UserExerciseRepOverride).where(
-            UserExerciseRepOverride.app_user_id == app_user_id,
-            UserExerciseRepOverride.exercise_id == exercise_id,
-        )
-    )).scalar_one_or_none()
-    # Пишем ТОЛЬКО если ключ ещё не записан — та же причина, что и в
-    # _apply_favorite (см. её комментарий и докстринг apply_goal_decision).
-    if "rep_override" not in snapshot:
-        snapshot["rep_override"] = (
-            {"rep_min": existing.rep_min, "rep_max": existing.rep_max} if existing else None
-        )
-    if existing is None:
-        session.add(UserExerciseRepOverride(
-            app_user_id=app_user_id, exercise_id=exercise_id,
-            rep_min=int(rep_min), rep_max=int(rep_max),
-        ))
-    else:
-        existing.rep_min, existing.rep_max = int(rep_min), int(rep_max)
-    await session.flush()
-    return True
-
-
 async def _apply_scheme(
     session: AsyncSession, app_user_id: int, exercise_id: Optional[int],
     lever: dict, snapshot: dict,
@@ -935,179 +833,6 @@ async def _apply_scheme(
     return True
 
 
-async def _apply_sets(
-    session: AsyncSession, app_user_id: int, proposal: PeriodizationProposal,
-    exercise_id: Optional[int], lever: dict,
-) -> tuple[bool, int]:
-    """+N подходов целевого лифта на будущих днях блока, которые ЭТОТ лифт
-    реально несут, не выше запаса ДО MRV в окне, куда попадает каждый день.
-
-    ИСПРАВЛЕНО (финальное ревью, Critical 2 — рычаг тратил бюджет окна на
-    КАЖДЫЙ будущий день блока): раньше выборка ниже была `block_id ==
-    proposal.block_id AND target_date > today` — без единого условия на то,
-    что день вообще НЕСЁТ целевое упражнение. Лифт, стоящий в плане трижды
-    за микроцикл, получал ПОЛНУЮ дельту (delta_sets = min(2, headroom_sets),
-    посчитанный decide.py ОДИН РАЗ на ОДНО окно) на КАЖДОЕ из трёх
-    вхождений — то есть примерно втрое больше разрешённого; дни отдыха и
-    blackout получали правку упражнения, которого там нет вовсе. Спека §5.4
-    ("+1…+2 подхода на будущих днях, ЕСЛИ landmarks позволяют") и решение 11
-    ("ни один рычаг не выносит мышцу за MRV") здесь нарушались буквально.
-
-    Фикс — две независимые правки:
-
-    1. Отбор дней. Джойн через WorkoutPlanExercise.plan_id == UserCalendarDay.
-       plan_id — тот же принцип, что и в repository.future_sessions (см. её
-       докстринг): день попадает в выборку, только если В ЕГО ПЛАНЕ стоит
-       ИМЕННО exercise_id. is_rest_day/is_blackout исключаются явно тем же
-       фильтром, что future_sessions использует для решателя, — день отдыха
-       или blackout по определению не несёт ни одного упражнения, но
-       фильтр не должен полагаться на это молча.
-
-    2. Правило траты бюджета окна (спека §5.4/§5.5, решение 11): headroom
-       считается ЗАНОВО на apply-time — тем же источником, что и P0-09
-       (`volume.landmarks` + `volume.repository`, через repository.
-       headroom_for_window — второго источника границ не заводим), — ОДИН
-       РАЗ для каждого окна (микроцикла), которое накрывают отобранные дни,
-       на первом дне этого окна, и кладётся в кэш на весь остаток вызова
-       (см. комментарий у window_headroom_cache ниже про то, почему НЕ на
-       каждый день). Эта первая сверка уже видит любые adjustments, лежащие
-       в БД ДО этого вызова — в том числе решение P0-09, приехавшее между
-       предложением и применением (см. §5.5 "суммарная дельта... проходит
-       через landmarks второй раз, уже по фактическому состоянию"). Внутри
-       ОДНОГО окна сумма добавленных подходов по ВСЕМ дням, несущим лифт, в
-       рамках ЭТОГО вызова не может превысить этот запас: день получает
-       `min(delta, room)`, где `room` — то, что от запаса осталось после уже
-       выданного этим же вызовом (spent_by_window). Как только запас окна
-       исчерпан, дальнейшие дни этого окна пропускаются и считаются skipped:
-       рычаг не ломится через потолок, а честно недодаёт.
-
-    Окно каждого дня ищется через volume.repository.current_window(...,
-    day.target_date) — тот же поиск "окно, покрывающее дату", что решатель
-    P0-09 уже использует для "сегодня"; здесь просто дата не "сегодня", а
-    дата конкретного будущего дня. Если для даты дня окно не резолвится
-    (легаси-календарь без микроцикловых маркеров, либо дата дальше
-    материализованного горизонта) — бюджет неизвестен, день пропускается:
-    честнее промолчать, чем додумать границу.
-
-    Дни, переставшие быть planned, по-прежнему пропускаются: там уже есть
-    факт. Граница выборки — target_date > today: сегодняшний день не
-    применяется и не считается пропущенным (см. докстринг apply_goal_
-    decision про skipped_days).
-
-    Идемпотентность по proposal_id (ревью Задачи 8, Critical 1): apply_
-    goal_decision больше не коммитит сама (см. её докстринг) — решение и
-    правка коммитятся ОДНИМ commit() вызывающей стороны (Задача 10), но до
-    тех пор, пока это не подключено, а также на случай повтора из офлайн-
-    очереди мобильного клиента ПОСЛЕ того как рычаг уже применился, но
-    предложение ещё не успело перейти в decided-статус, — повторный проход
-    по тому же дню не должен задвоить прибавку подходов. Если день уже
-    несёт запись {exercise_id, proposal_id} от ЭТОГО ЖЕ предложения, вторую
-    не добавляем, но день всё равно считаем затронутым (это не тот же
-    случай, что «дня уже нет в planned» — правка НА НЁМ есть, просто уже
-    ровно одна).
-    """
-    if exercise_id is None:
-        return False, 0
-    delta = int((lever.get("detail") or {}).get("delta_sets") or 0)
-    if delta <= 0:
-        return False, 0
-
-    from api.services.volume import repository as volume_repository
-
-    today = date.today()
-    target_plan_ids = select(WorkoutPlanExercise.plan_id).where(
-        WorkoutPlanExercise.exercise_id == exercise_id
-    )
-    days = (await session.execute(
-        select(UserCalendarDay).where(
-            UserCalendarDay.app_user_id == app_user_id,
-            UserCalendarDay.block_id == proposal.block_id,
-            UserCalendarDay.target_date > today,
-            UserCalendarDay.is_rest_day.is_(False),
-            UserCalendarDay.is_blackout.is_(False),
-            UserCalendarDay.plan_id.in_(target_plan_ids),
-        ).order_by(UserCalendarDay.target_date)
-    )).scalars().all()
-
-    if not days:
-        return False, 0
-
-    profile = (await session.execute(
-        select(AppUserProfile).where(AppUserProfile.app_user_id == app_user_id)
-    )).scalar_one_or_none()
-    level = (profile.experience_level if profile else None) or "beginner"
-
-    touched, skipped = 0, 0
-    # (block_id, window_index) -> запас окна, СЧИТАННЫЙ ОДИН РАЗ за этот
-    # вызов, при первом дне этого окна — БАЗОВАЯ ЛИНИЯ, от которой отсчитывается
-    # трата. Пересчитывать headroom_for_window на КАЖДЫЙ день того же окна
-    # было бы не просто расточительно: prescribed_for читает ТЕКУЩЕЕ
-    # состояние volume_adjustments, и день, которому только что выдали грант
-    # (flush() ещё не было — autoflush ORM не гарантированная здесь опора),
-    # мог бы либо не попасть в пересчёт (тогда бюджет считался бы дважды —
-    # headroom не уменьшился БЫ, а spent_by_window вычел бы его ЕЩЁ раз, и
-    # окно потратило бы вдвое МЕНЬШЕ разрешённого), либо попасть (тогда
-    # headroom уже уменьшился САМ, и повторное вычитание spent_by_window
-    # вычло бы его ДВАЖДЫ). Фиксированная база + explicit spent_by_window —
-    # единственный вариант, не зависящий от того, когда именно ORM решит
-    # сбросить письмо в БД.
-    window_headroom_cache: dict[tuple, int] = {}
-    spent_by_window: dict[tuple, int] = {}
-
-    for day in days:
-        if day.status != "planned":
-            skipped += 1
-            continue
-        adjustments = list(day.volume_adjustments or [])
-        already_applied = any(
-            a.get("exercise_id") == exercise_id and a.get("proposal_id") == proposal.id
-            for a in adjustments
-        )
-        if already_applied:
-            touched += 1
-            continue
-
-        window = await volume_repository.current_window(session, app_user_id, day.target_date)
-        if window is None:
-            skipped += 1
-            continue
-        window_key = (window.block_id, window.window_index)
-        if window_key not in window_headroom_cache:
-            # Свежая сверка с landmarks (спека §5.5: "суммарная дельта...
-            # проходит через landmarks второй раз, уже по фактическому
-            # состоянию") — читает ТЕКУЩЕЕ состояние БД, включая любые
-            # adjustments, уже закоммиченные ДО этого вызова (повтор из
-            # офлайн-очереди, решение P0-09, приехавшее между предложением и
-            # применением). В рамках ЭТОГО вызова дальше не пересчитывается —
-            # см. комментарий про кэш выше.
-            window_headroom_cache[window_key] = await repository.headroom_for_window(
-                session, app_user_id, exercise_id, level, window
-            )
-        headroom = window_headroom_cache[window_key]
-        already_spent = spent_by_window.get(window_key, 0)
-        room = max(0, headroom - already_spent)
-        if room <= 0:
-            # ВЕТО ОБЪЁМА (спека, решение 11 + §5.5): бюджет ЭТОГО окна уже
-            # выбран — либо этим же рычагом на более раннем дне того же
-            # окна, либо решением P0-09, приехавшим уже после предложения.
-            skipped += 1
-            continue
-
-        grant = min(delta, room)
-        adjustments.append({
-            "exercise_id": exercise_id,
-            "delta_sets": grant,
-            "proposal_id": proposal.id,
-        })
-        day.volume_adjustments = adjustments
-        flag_modified(day, "volume_adjustments")
-        spent_by_window[window_key] = already_spent + grant
-        touched += 1
-
-    await session.flush()
-    return touched > 0, skipped
-
-
 async def _apply_structural(
     session: AsyncSession, app_user_id: int, proposal: PeriodizationProposal,
     snapshot: dict,
@@ -1123,7 +848,7 @@ async def _apply_structural(
     Дисциплина снимка (фикс-проход Задачи 8, см. докстринг apply_goal_
     decision): snapshot["days"]/["created_plan_ids"] уже пришли сюда из
     setdefault выше пустыми СПИСКАМИ, а не отсутствующими ключами — этим они
-    отличаются от "preference"/"rep_override"/"scheme", где отсутствие ключа
+    отличаются от "preference"/"scheme", где отсутствие ключа
     и есть сигнал "ещё не применялось". Пустой список после setdefault
     неотличим от "структурный рычаг уже применялся, и будущих дней тогда не
     нашлось" — проверка "если список пуст, пишем" защитила бы неправильный
@@ -1307,12 +1032,12 @@ async def undo_goal_decision(
     привязанной сессии. После появления факта на ТАКОМ дне откат означал бы
     переписывание истории — вместо него честнее новое предложение.
 
-    Шаг 6 ниже (ревью Задачи 15, Critical 1) сносит ФАНТОМНЫЕ дни — строки
+    Шаг 4 ниже (ревью Задачи 15, Critical 1) сносит ФАНТОМНЫЕ дни — строки
     UserCalendarDay, которых не было вовсе до применения и которые
     придумала регенерация (SchedulingEngine.generate_block_days заполняет
     ВЕСЬ диапазон [first_future, block.planned_end_date], а не только даты,
     отражённые в snapshot["days"]). Точное правило удаления и почему оно
-    безопасно — в комментарии над самим шагом 6.
+    безопасно — в комментарии над самим шагом 4.
 
     ИСПРАВЛЕНО (ревью Задачи 10, Critical 2 — ворота блокировали безопасный
     откат навсегда): snapshot["days"] несёт КАЖДЫЙ будущий день блока на
@@ -1326,8 +1051,8 @@ async def undo_goal_decision(
 
     ИСПРАВЛЕНО (ревью Задачи 10 Task-10, Critical 1 — откат мог снести
     носителя, который это предложение никогда не писало): для preference/
-    rep_override/scheme ниже действует ДВУХУРОВНЕВОЕ правило, зеркальное
-    тому, что описано в докстринге apply_goal_decision про запись снимка:
+    scheme ниже действует ДВУХУРОВНЕВОЕ правило, зеркальное тому, что
+    описано в докстринге apply_goal_decision про запись снимка:
       1. ПРИСУТСТВИЕ ключа в snapshot решает ВЛАДЕНИЕ. Ключ отсутствует —
          это предложение соответствующего рычага не применяло (не был
          принят пользователем среди payload["levers"], или applied_snapshot
@@ -1374,24 +1099,7 @@ async def undo_goal_decision(
 
     kept: list[str] = []
 
-    # 1. Подходы: адресно по proposal_id — чужие правки (volume_review)
-    #    остаются на месте.
-    days = (await session.execute(
-        select(UserCalendarDay).where(
-            UserCalendarDay.app_user_id == app_user_id,
-            UserCalendarDay.volume_adjustments.isnot(None),
-        )
-    )).scalars().all()
-    for day in days:
-        remaining = [
-            a for a in (day.volume_adjustments or [])
-            if a.get("proposal_id") != proposal.id
-        ]
-        if len(remaining) != len(day.volume_adjustments or []):
-            day.volume_adjustments = remaining
-            flag_modified(day, "volume_adjustments")
-
-    # 2. Преференция. Владение — по присутствию ключа "preference" в
+    # 1. Преференция. Владение — по присутствию ключа "preference" в
     # snapshot (см. докстринг выше); значение constant'но ("favorite"), и
     # именно поэтому сравнение по значению БЕЗ проверки присутствия было
     # дырявым — совпадение с "favorite" ничего не говорит о том, кто его
@@ -1411,44 +1119,7 @@ async def undo_goal_decision(
             else:
                 pref.preference = snapshot["preference"]
 
-    # 3. Диапазон повторов — та же дисциплина: владение решает присутствие
-    # ключа "rep_override" в snapshot (ИСПРАВЛЕНО, ревью Задачи 10 Task-10,
-    # Critical 1 — раньше владение проверялось равенством текущего значения
-    # detail'у рычага из payload["levers"], а тот список несёт ВСЕ
-    # предложенные рычаги, включая непринятые; decide.py к тому же считает
-    # rep_min/rep_max детерминированно из неизменного target_reps, так что
-    # значение, записанное СОВСЕМ ДРУГИМ актором, могло случайно совпасть и
-    # удалялось как «наше» — см. докстринг undo_goal_decision). Восстанавливаем
-    # ТОЛЬКО если текущее значение ещё совпадает с тем, что записал автопилот
-    # (ИСПРАВЛЕНО, ревью Задачи 10, Important 3, спека §5.5: было безусловно).
-    # Что именно записал автопилот, берём из proposal.payload["levers"] — тот
-    # же rep_min/rep_max, что _apply_rep_range взяла из detail своего
-    # lever'а; эта проверка ИДЁТ ПОСЛЕ подтверждения владения и ловит только
-    # позднюю правку самого пользователя ПОСЛЕ применения — такую правку
-    # откат не имеет права стирать молча: разошедшееся значение оставляем
-    # как есть и называем в kept, а не восстанавливаем поверх.
-    if exercise_id is not None and "rep_override" in snapshot:
-        override = (await session.execute(
-            select(UserExerciseRepOverride).where(
-                UserExerciseRepOverride.app_user_id == app_user_id,
-                UserExerciseRepOverride.exercise_id == exercise_id,
-            )
-        )).scalar_one_or_none()
-        previous = snapshot.get("rep_override")
-        if override is not None:
-            rep_lever = next(
-                (l for l in levers if l.get("kind") == params.LEVER_REP_RANGE), None
-            )
-            written = (rep_lever or {}).get("detail") or {}
-            written_value = (written.get("rep_min"), written.get("rep_max"))
-            if (override.rep_min, override.rep_max) != written_value:
-                kept.append("rep_override")    # пользователь сам поменял диапазон после применения
-            elif previous is None:
-                await session.delete(override)
-            else:
-                override.rep_min, override.rep_max = previous["rep_min"], previous["rep_max"]
-
-    # 4. Схема прогрессии — та же дисциплина, что у диапазона повторов выше:
+    # 2. Схема прогрессии — та же дисциплина, что у преференции выше:
     # владение решает присутствие ключа "scheme" в snapshot (ИСПРАВЛЕНО,
     # ревью Задачи 10 Task-10, Critical 1 — раньше владение проверялось тем,
     # что exercise_id вообще ЕСТЬ в overrides сейчас, то есть текущим
@@ -1485,7 +1156,7 @@ async def undo_goal_decision(
             profile.settings = settings
             flag_modified(profile, "settings")
 
-    # 5. Дни календаря — вернуть снятые координаты.
+    # 3. Дни календаря — вернуть снятые координаты.
     for row in snapshot.get("days") or []:
         target = date.fromisoformat(row["target_date"])
         day = (await session.execute(
@@ -1505,13 +1176,13 @@ async def undo_goal_decision(
         day.is_rest_day = row["is_rest_day"]
         day.block_id = proposal.block_id
 
-    # 6. Фантомные дни — снести то, что регенерация ПРИДУМАЛА, а снимок
+    # 4. Фантомные дни — снести то, что регенерация ПРИДУМАЛА, а снимок
     # никогда не видел (ревью Задачи 15, Critical 1). _apply_structural идёт
     # через _generate_future_calendar -> SchedulingEngine.generate_block_days,
     # а та заполняет КАЖДУЮ дату от snapshot["first_future_date"] до
     # block.planned_end_date включительно — в том числе даты, для которых до
     # применения не было ни одной строки UserCalendarDay вовсе. Такие даты не
-    # попадают в snapshot["days"] (там нечего было зафиксировать), и шаг 5
+    # попадают в snapshot["days"] (там нечего было зафиксировать), и шаг 3
     # выше их не трогает: get-or-create по snapshot["days"] создаёт только то,
     # что снимок ЗНАЕТ. Без этого шага откат оставлял бы позади ровно те дни,
     # которых не было ДО применения, — ревью воспроизвело буквально: 5
@@ -1525,7 +1196,7 @@ async def undo_goal_decision(
     #   - датирован НЕ РАНЬШЕ snapshot["first_future_date"] — до этой границы
     #     регенерация не заходила вовсе (см. её докстринг в _apply_structural);
     #   - ОТСУТСТВУЕТ в snapshot["days"] — присутствие означало бы, что строка
-    #     существовала до применения и уже обработана шагом 5 выше;
+    #     существовала до применения и уже обработана шагом 3 выше;
     #   - всё ещё "planned" и без actual_workout_session_id — день, на
     #     который уже успели записать тренировку (в т.ч. после отката соседних
     #     дней в рамках этого же вызова), несёт факт, а откат не имеет права
