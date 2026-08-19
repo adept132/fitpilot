@@ -56,6 +56,100 @@ async def seeded_future_days(test_user, active_block):
     yield
 
 
+@pytest_asyncio.fixture
+async def all_future_days_completed(test_user, active_block):
+    """ВЕСЬ диапазон [first_future, block.planned_end_date] блока заполнен
+    completed-днями — ни одного дня, который _wipe_future_calendar реально
+    тронула бы, И ни одной ДЫРЫ, которую SchedulingEngine.generate_block_days
+    заполнила бы с нуля (см. её `existing_dates` — она пропускает даты, для
+    которых строка УЖЕ есть). Диапазон обязан быть заполнен ПОЛНОСТЬЮ, а не
+    частично: несколько completed-дней с дырой после них означало бы, что
+    регенерация всё равно создала бы новые дни в дыре, и рычаг честно
+    применился бы (см. has_gap в _apply_structural) — это НЕ тот случай,
+    который проверяет финальное ревью, Critical 3, часть 1: "структурный
+    рычаг, который ДЕЙСТВИТЕЛЬНО ничего не тронул, обязан честно сообщить об
+    этом", а не отрапортовать "применено" на пустом множестве touched-дней.
+    """
+    first_future = date.today() + timedelta(days=1)
+    span = (active_block.planned_end_date - first_future).days + 1
+    async with SessionLocal() as db:
+        for i in range(span):
+            db.add(UserCalendarDay(
+                app_user_id=test_user.id,
+                target_date=first_future + timedelta(days=i),
+                block_id=active_block.id, day_tag="push",
+                micro_tag="medium", meso_tag="medium",
+                is_rest_day=False, is_blackout=False,
+                status="completed",
+            ))
+        await db.commit()
+    yield
+
+
+async def test_structural_lever_touching_nothing_reports_not_applied(
+    test_user, fresh_exercise, active_block, all_future_days_completed
+):
+    """Финальное ревью, Critical 3, часть 1: _apply_structural раньше
+    возвращала True БЕЗУСЛОВНО, даже когда ни один будущий день не был
+    реально тронут регенерацией (все уже completed) — ответ наружу лгал
+    "применено", снимок бы claim-ил structural_applied=True с пустым/
+    нетронутым "days", can_undo экрана включился бы, а откат ничего не
+    восстановил бы. Теперь рычаг обязан сообщить "не применилось": пустой
+    applied[], status == declined (диспетчер periodization.service.
+    apply_decision понижает status при пустом applied — здесь проверяем
+    ЧАСТЬ, за которую отвечает apply_goal_decision, — сам факт, что рычаг
+    не попал в applied), snapshot остаётся ТЕМ ЖЕ, что было до вызова
+    (payload["applied_snapshot"] всё ещё None — эта функция ничего не
+    записала)."""
+    async with SessionLocal() as db:
+        proposal = PeriodizationProposal(
+            app_user_id=test_user.id, block_id=active_block.id,
+            kind=periodization_params.KIND_GOAL_PLAN, reason_code="pace_behind",
+            payload={
+                "goal_id": 1, "exercise_id": fresh_exercise.id,
+                "levers": [{"index": 0, "kind": "lift_frequency",
+                            "reason_code": "pace_behind", "effect_slope": 0.3,
+                            "effect_days": 12, "detail": {"delta_sessions": 1}}],
+                "applied_snapshot": None,
+            },
+            status=periodization_params.STATUS_PENDING,
+        )
+        db.add(proposal)
+        await db.commit()
+        await db.refresh(proposal)
+
+        result = await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0]},
+        )
+        await db.commit()
+        pid = proposal.id
+
+    first_future = date.today() + timedelta(days=1)
+    expected_span = (active_block.planned_end_date - first_future).days + 1
+
+    assert result["status"] == "declined"
+    assert result["applied"] == []
+    assert result["skipped_days"] == expected_span
+
+    async with SessionLocal() as db:
+        row = await db.get(PeriodizationProposal, pid)
+    # Ничего не применилось -> снимок не записан вовсе, а не "применён с
+    # пустым содержимым".
+    assert row.payload["applied_snapshot"] is None
+
+    async with SessionLocal() as db:
+        # Ни один из completed-дней не тронут: регенерация не позвана.
+        still_completed = (await db.execute(
+            select(UserCalendarDay).where(
+                UserCalendarDay.app_user_id == test_user.id,
+                UserCalendarDay.block_id == active_block.id,
+                UserCalendarDay.status == "completed",
+            )
+        )).scalars().all()
+    assert len(still_completed) == expected_span
+
+
 async def test_completed_days_survive_regeneration(
     test_user, fresh_exercise, active_block, seeded_future_days
 ):

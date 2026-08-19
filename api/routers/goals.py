@@ -90,6 +90,9 @@ async def create_goal(
 
     # P0-12: создание цели — изменились срок, целевое значение или признак
     # ведущей, автопилот пересчитывает предложение немедленно.
+    # refresh_goal_proposals коммитит СЕБЯ САМА на каждом пути записи (см. её
+    # докстринг, финальное ревью Important 9) — второго commit() здесь не
+    # нужно и не нужен после этого вызова.
     from api.services.goal.service import refresh_goal_proposals
     from api.services.volume.repository import guarded, utc_today
 
@@ -177,6 +180,9 @@ async def update_goal(
 
     # P0-12: правка цели — изменились срок, целевое значение или признак
     # ведущей, автопилот пересчитывает предложение немедленно.
+    # refresh_goal_proposals коммитит СЕБЯ САМА на каждом пути записи (см. её
+    # докстринг, финальное ревью Important 9) — второго commit() здесь не
+    # нужно и не нужен после этого вызова.
     from api.services.goal.service import refresh_goal_proposals
     from api.services.volume.repository import guarded, utc_today
 

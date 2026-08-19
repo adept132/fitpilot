@@ -1,4 +1,5 @@
 """Откат применённого предложения (P0-12, Задача 10)."""
+import uuid
 from datetime import date, timedelta
 
 import pytest
@@ -9,16 +10,55 @@ from sqlalchemy.orm.attributes import flag_modified
 from api.services.goal.service import apply_goal_decision, undo_goal_decision
 from api.services.models import (
     AppUserProfile,
+    Exercise,
     PeriodizationProposal,
     UserCalendarDay,
     UserExercisePreference,
     UserExerciseRepOverride,
+    WorkoutPlan,
+    WorkoutPlanExercise,
 )
 from api.services.periodization import params as periodization_params
 from api.services.periodization.service import apply_decision
 from app.database import SessionLocal
 
 pytestmark = pytest.mark.asyncio
+
+
+async def _exercise_with_plan(test_user, target_sets: int = 3):
+    """Упражнение на грудь + план, в котором оно стоит — нужно тестам рычага
+    LEVER_SETS после финального ревью (Critical 2): _apply_sets теперь
+    трогает только дни, чей plan_id ведёт на план с ЭТИМ упражнением (см.
+    tests/integration/test_goal_apply_soft.py::_exercise_with_plan — та же
+    фикстура, продублирована здесь, чтобы не тянуть кросс-модульный импорт
+    тестового хелпера)."""
+    marker = uuid.uuid4().hex[:8]
+    async with SessionLocal() as db:
+        ex = Exercise(
+            name=f"Жим для sets-рычага {marker}",
+            category="base",
+            main_muscle_group="chest",
+            difficulty="beginner",
+            equipment_needed=[],
+            source="custom",
+            app_user_id=test_user.id,
+        )
+        db.add(ex)
+        await db.flush()
+
+        plan = WorkoutPlan(
+            app_user_id=test_user.id, name=f"План {marker}",
+            day_tag="push", micro_tag="medium", meso_tag="medium",
+        )
+        db.add(plan)
+        await db.flush()
+        db.add(WorkoutPlanExercise(
+            plan_id=plan.id, exercise_id=ex.id, target_sets=target_sets, order_index=0,
+        ))
+        await db.commit()
+        await db.refresh(ex)
+        await db.refresh(plan)
+        return ex, plan
 
 # active_block берётся из tests/integration/conftest.py (Minor 4, ревью
 # Задачи 10): та фикстура несёт при себе минимальный активный сплит
@@ -265,13 +305,19 @@ async def test_undo_keeps_manually_diverged_rep_range_and_scheme(
 
 
 async def test_undo_removes_only_own_volume_adjustment_keeps_volume_review(
-    test_user, fresh_exercise, active_block
+    test_user, active_block
 ):
     """Обязательный тест из спеки — сосуществование с P0-09: откат обязан
     снять ТОЛЬКО свою запись в volume_adjustments дня и оставить нетронутой
     запись, которую туда положило РЕШЕНИЕ ОБЗОРА ОБЪЁМА (volume_review) —
     тот же формат {exercise_id, delta_sets, proposal_id}, что кладёт
-    api/services/volume/service (см. её _apply_frozen_or_pick)."""
+    api/services/volume/service (см. её _apply_frozen_or_pick).
+
+    fresh_exercise (conftest.py, main_muscle_group="back") заменена на
+    _exercise_with_plan (финальное ревью, Critical 2): _apply_sets теперь
+    трогает только дни, реально несущие целевое упражнение в плане, и "back"
+    не резолвится ни одним ключом landmarks (headroom всегда был бы 0)."""
+    ex, plan = await _exercise_with_plan(test_user, target_sets=3)
     future = date.today() + timedelta(days=3)
     async with SessionLocal() as db:
         volume_review_proposal = PeriodizationProposal(
@@ -286,7 +332,7 @@ async def test_undo_removes_only_own_volume_adjustment_keeps_volume_review(
             app_user_id=test_user.id, block_id=active_block.id,
             kind=periodization_params.KIND_GOAL_PLAN, reason_code="pace_behind",
             payload={
-                "goal_id": 1, "exercise_id": fresh_exercise.id,
+                "goal_id": 1, "exercise_id": ex.id,
                 "levers": [{"index": 0, "kind": "sets", "reason_code": "pace_behind",
                             "effect_slope": 0.1, "effect_days": 14,
                             "detail": {"delta_sets": 2}}],
@@ -298,7 +344,9 @@ async def test_undo_removes_only_own_volume_adjustment_keeps_volume_review(
 
         day = UserCalendarDay(
             app_user_id=test_user.id, target_date=future,
-            block_id=active_block.id, status="planned",
+            block_id=active_block.id, plan_id=plan.id,
+            is_rest_day=False, is_blackout=False, microcycle_day_number=1,
+            status="planned",
         )
         db.add(day)
         await db.commit()
@@ -322,7 +370,7 @@ async def test_undo_removes_only_own_volume_adjustment_keeps_volume_review(
         day = await db.get(UserCalendarDay, day_id)
         adjustments = list(day.volume_adjustments or [])
         adjustments.append({
-            "exercise_id": fresh_exercise.id, "delta_sets": 1,
+            "exercise_id": ex.id, "delta_sets": 1,
             "proposal_id": volume_review_pid,
         })
         day.volume_adjustments = adjustments
@@ -338,7 +386,7 @@ async def test_undo_removes_only_own_volume_adjustment_keeps_volume_review(
     async with SessionLocal() as db:
         day = await db.get(UserCalendarDay, day_id)
     assert day.volume_adjustments == [
-        {"exercise_id": fresh_exercise.id, "delta_sets": 1, "proposal_id": volume_review_pid}
+        {"exercise_id": ex.id, "delta_sets": 1, "proposal_id": volume_review_pid}
     ]
 
 

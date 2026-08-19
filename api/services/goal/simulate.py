@@ -116,10 +116,21 @@ def run(
         if top is None:
             continue
 
+        # ИСПРАВЛЕНО (финальное ревью, Deferred Minor 3): раньше max() шёл
+        # без default по генератору, который теоретически мог оказаться
+        # пустым, — от ValueError его спасало только совпадение: top ==
+        # prescription.top_weight УЖЕ есть max() по тем же sets (см. её
+        # докстринг в progression/types.py), так что хотя бы один set с
+        # weight_kg == top гарантированно существовал. Это совпадение —
+        # случайность реализации top_weight, а не контракт этой функции;
+        # default=None делает падение невозможным явно, а не по случайности.
         top_set = max(
             (s for s in prescription.sets if s.weight_kg == top),
             key=lambda s: s.rep_max or s.rep_min,
+            default=None,
         )
+        if top_set is None:
+            continue
         current = _e1rm(top, top_set.rep_max or top_set.rep_min)
 
         facts = _synthetic_facts(prescription)

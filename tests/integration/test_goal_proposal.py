@@ -94,6 +94,66 @@ async def test_repeated_refresh_does_not_duplicate(test_user, seeded_history, ac
     assert rows[0].id == first.id
 
 
+async def test_stale_proposal_expiry_survives_hash_match_early_return(
+    test_user, seeded_history, active_block
+):
+    """Деferred Minor 6 (финальное ревью): цикл дедупа мог пометить ЧУЖОЙ
+    (по другой цели) pending-предложение expired ТОЛЬКО В ПАМЯТИ и тут же
+    вернуться на совпадении inputs_hash+goal_id — `return row` обрывал
+    функцию раньше единственного commit(), который стоял ниже по телу (у
+    создания НОВОГО предложения). Экспирация чужой строки терялась при
+    закрытии сессии. Воспроизводим буквально: сначала обычным путём
+    материализуем предложение ЭТОЙ цели (как test_repeated_refresh_does_not_
+    duplicate), затем руками подсаживаем pending-строку ДРУГОЙ (уже
+    неактуальной) цели того же пользователя, третий refresh обязан и вернуть
+    ТУ ЖЕ строку (тождество id), и — что и есть суть находки — реально
+    закоммитить экспирацию чужой строки, а не просто пометить её в памяти
+    сессии, которая тут же закрывается.
+    """
+    goal_id = await _primary_goal(test_user.id, seeded_history.id, 100.0, target_reps=1)
+    await _set_working_e1rm(test_user.id, seeded_history.id, 100.0)
+
+    async with SessionLocal() as db:
+        first = await refresh_goal_proposals(db, test_user.id, date.today())
+    assert first is not None
+
+    async with SessionLocal() as db:
+        stale = PeriodizationProposal(
+            app_user_id=test_user.id,
+            block_id=active_block.id,
+            kind=periodization_params.KIND_GOAL_PLAN,
+            reason_code="pace_behind",
+            payload={
+                "goal_id": goal_id + 10_000_000,  # заведомо чужая/несуществующая цель
+                # ДРУГОЙ exercise_id, а не seeded_history.id: uq_periodization_
+                # proposals_pending уникален по (block_id, kind,
+                # COALESCE(payload->>'exercise_id', '')) — та же тройка, что и
+                # у уже существующего pending-предложения этой цели (created
+                # выше через refresh_goal_proposals), столкнулась бы с ним.
+                "exercise_id": seeded_history.id + 10_000_000,
+                "inputs_hash": "stale-from-another-goal",
+                "applied_snapshot": None,
+            },
+            status=periodization_params.STATUS_PENDING,
+        )
+        db.add(stale)
+        await db.commit()
+        await db.refresh(stale)
+        stale_id = stale.id
+
+    async with SessionLocal() as db:
+        second = await refresh_goal_proposals(db, test_user.id, date.today())
+    assert second is not None
+    assert second.id == first.id  # то же предложение той же цели, второго не создано
+
+    # Суть находки: читаем ИЗ ФРЕШ-СЕССИИ (не той, что делала refresh) — если
+    # бы экспирация осталась только в памяти упавшей на return сессии,
+    # чужая строка здесь всё ещё была бы pending.
+    async with SessionLocal() as db:
+        stale_row = await db.get(PeriodizationProposal, stale_id)
+    assert stale_row.status == periodization_params.STATUS_EXPIRED
+
+
 # --- Сверх брифа: финиш ведущей цели снимает is_primary (спека §7) ---
 #
 # Бриф Задачи 6 этого не покрывает — требование добавлено постановщиком

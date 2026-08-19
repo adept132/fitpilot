@@ -160,3 +160,17 @@ def test_session_cap_guards_runaway_horizon():
         cap_pct=0.01, factor=None,
     )
     assert result.sessions_used <= params.MAX_SIMULATED_SESSIONS
+
+
+def test_history_keep_matches_progression_history_limit():
+    """Deferred Minor 1 (финальное ревью): simulate._HISTORY_KEEP = 12
+    дублирует progression.repository.HISTORY_LIMIT литералом, потому что
+    импорт сломал бы правило "чистое ядро без БД" (см. докстринг simulate.py
+    про _HISTORY_KEEP). Это ЕДИНСТВЕННОЕ место в проекте, которому разрешено
+    сравнить их напрямую — тест, а не модуль ядра, может импортировать
+    БД-слой. Расхождение станет красным тестом, а не тихим дрейфом двух
+    чисел, которые обязаны совпадать (rebuild_state держит ровно столько же
+    сессий, сколько simulate.run проносит между итерациями прокрутки)."""
+    from api.services.progression.repository import HISTORY_LIMIT
+
+    assert simulate._HISTORY_KEEP == HISTORY_LIMIT

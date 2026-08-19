@@ -10,6 +10,7 @@ proposal.status/decided_action/client_uuid/decided_at и коммитит ОДИ
 apply_goal_decision и желающий увидеть эффект в следующем блоке, коммитит
 явно — ровно так, как это будет делать настоящий вызывающий.
 """
+import uuid
 from datetime import date, timedelta
 
 import pytest
@@ -19,10 +20,13 @@ from sqlalchemy import delete, select
 from api.services.goal.service import apply_goal_decision
 from api.services.models import (
     AppUserProfile,
+    Exercise,
     PeriodizationProposal,
     UserCalendarDay,
     UserExercisePreference,
     UserExerciseRepOverride,
+    WorkoutPlan,
+    WorkoutPlanExercise,
 )
 from api.services.periodization import params as periodization_params
 from app.database import SessionLocal
@@ -68,6 +72,46 @@ async def active_block(test_user):
         await db.commit()
         await db.refresh(block)
         yield block
+
+
+async def _exercise_with_plan(test_user, target_sets: int = 3):
+    """Упражнение на грудь ("chest" — резолвится to_system_key напрямую, см.
+    api/services/muscle_keys.py) + план, в котором оно стоит. Нужно тестам
+    рычага LEVER_SETS (финальное ревью, Critical 2): _apply_sets теперь
+    трогает ТОЛЬКО дни, чей UserCalendarDay.plan_id ведёт на план с ЭТИМ
+    упражнением (join через WorkoutPlanExercise) — день без плана вообще не
+    попадёт в выборку. fresh_exercise (conftest.py) не годится: её
+    main_muscle_group == "back" не резолвится ни одним ключом landmarks
+    (см. api/services/muscle_keys.py — "back" нет ни в _SYSTEM_KEYS, ни в
+    RU_TO_KEY, ни в _EXTRA_TO_KEY), и headroom всегда был бы 0.
+    """
+    marker = uuid.uuid4().hex[:8]
+    async with SessionLocal() as db:
+        ex = Exercise(
+            name=f"Жим для sets-рычага {marker}",
+            category="base",
+            main_muscle_group="chest",
+            difficulty="beginner",
+            equipment_needed=[],
+            source="custom",
+            app_user_id=test_user.id,
+        )
+        db.add(ex)
+        await db.flush()
+
+        plan = WorkoutPlan(
+            app_user_id=test_user.id, name=f"План {marker}",
+            day_tag="push", micro_tag="medium", meso_tag="medium",
+        )
+        db.add(plan)
+        await db.flush()
+        db.add(WorkoutPlanExercise(
+            plan_id=plan.id, exercise_id=ex.id, target_sets=target_sets, order_index=0,
+        ))
+        await db.commit()
+        await db.refresh(ex)
+        await db.refresh(plan)
+        return ex, plan
 
 
 _DEFAULT_LEVERS = [
@@ -270,13 +314,22 @@ async def test_scheme_lever_snapshots_existing_override(
 
 
 async def test_sets_lever_writes_adjustment_to_future_planned_days(
-    test_user, fresh_exercise, active_block
+    test_user, active_block
 ):
+    """Финальное ревью, Critical 2: день обязан НЕСТИ целевое упражнение
+    (plan_id -> WorkoutPlanExercise), иначе _apply_sets его больше не
+    трогает вовсе — см. её докстринг. microcycle_day_number=1 нужен, чтобы
+    volume.repository.current_window нашёл окно на дату дня (тот же приём,
+    что и в tests/integration/test_goal_repository.py::
+    test_headroom_sets_runs_real_mrv_path_and_shrinks_with_prescribed_volume)."""
+    ex, plan = await _exercise_with_plan(test_user, target_sets=3)
     future = date.today() + timedelta(days=3)
     async with SessionLocal() as db:
         day = UserCalendarDay(
             app_user_id=test_user.id, target_date=future,
-            block_id=active_block.id, status="planned",
+            block_id=active_block.id, plan_id=plan.id,
+            is_rest_day=False, is_blackout=False, microcycle_day_number=1,
+            status="planned",
         )
         db.add(day)
         await db.commit()
@@ -287,7 +340,7 @@ async def test_sets_lever_writes_adjustment_to_future_planned_days(
         {"index": 0, "kind": "sets", "reason_code": "pace_behind",
          "effect_slope": 0.1, "effect_days": 14, "detail": {"delta_sets": 2}},
     ]
-    pid = await _proposal(test_user.id, active_block.id, fresh_exercise.id, levers)
+    pid = await _proposal(test_user.id, active_block.id, ex.id, levers)
     async with SessionLocal() as db:
         proposal = await db.get(PeriodizationProposal, pid)
         result = await apply_goal_decision(
@@ -300,23 +353,119 @@ async def test_sets_lever_writes_adjustment_to_future_planned_days(
 
     async with SessionLocal() as db:
         day = await db.get(UserCalendarDay, day_id)
+    # MRV груди для beginner (нет AppUserProfile -> level="beginner") — 14
+    # (landmarks._TABLE), предписано 3 подхода -> запас 11, дельта 2 из
+    # запаса умещается целиком.
     assert day.volume_adjustments == [
-        {"exercise_id": fresh_exercise.id, "delta_sets": 2, "proposal_id": pid}
+        {"exercise_id": ex.id, "delta_sets": 2, "proposal_id": pid}
     ]
 
 
+async def test_sets_lever_ignores_day_without_the_lift(test_user, active_block):
+    """Финальное ревью, Critical 2, требуемый тест: день БЕЗ целевого
+    упражнения в плане (пустой день — plan_id=None, как день отдыха до
+    первого сплита) не должен получить правку вовсе — раньше _apply_sets
+    штамповал АБСОЛЮТНО ЛЮБОЙ будущий день блока."""
+    ex, _plan = await _exercise_with_plan(test_user, target_sets=3)
+    future = date.today() + timedelta(days=3)
+    async with SessionLocal() as db:
+        day = UserCalendarDay(
+            app_user_id=test_user.id, target_date=future,
+            block_id=active_block.id, plan_id=None,
+            is_rest_day=False, is_blackout=False, microcycle_day_number=1,
+            status="planned",
+        )
+        db.add(day)
+        await db.commit()
+        await db.refresh(day)
+        day_id = day.id
+
+    levers = [
+        {"index": 0, "kind": "sets", "reason_code": "pace_behind",
+         "effect_slope": 0.1, "effect_days": 14, "detail": {"delta_sets": 2}},
+    ]
+    pid = await _proposal(test_user.id, active_block.id, ex.id, levers)
+    async with SessionLocal() as db:
+        proposal = await db.get(PeriodizationProposal, pid)
+        result = await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0]},
+        )
+        await db.commit()
+    # Ни одного дня, несущего лифт, не нашлось -> рычаг не применился вовсе.
+    assert result["applied"] == []
+    assert result["status"] == "declined"
+
+    async with SessionLocal() as db:
+        day = await db.get(UserCalendarDay, day_id)
+    assert not (day.volume_adjustments or [])
+
+
+async def test_sets_lever_ignores_rest_and_blackout_days(test_user, active_block):
+    """Финальное ревью, Critical 2, требуемый тест: дни отдыха/blackout не
+    получают правку, даже если по недосмотру несут plan_id с целевым
+    упражнением (is_rest_day/is_blackout — фильтр ОТДЕЛЬНЫЙ от plan_id join,
+    см. докстринг _apply_sets)."""
+    ex, plan = await _exercise_with_plan(test_user, target_sets=3)
+    future = date.today() + timedelta(days=3)
+    async with SessionLocal() as db:
+        rest_day = UserCalendarDay(
+            app_user_id=test_user.id, target_date=future,
+            block_id=active_block.id, plan_id=plan.id,
+            is_rest_day=True, is_blackout=False, microcycle_day_number=1,
+            status="planned",
+        )
+        blackout_day = UserCalendarDay(
+            app_user_id=test_user.id, target_date=future + timedelta(days=1),
+            block_id=active_block.id, plan_id=plan.id,
+            is_rest_day=False, is_blackout=True,
+            status="planned",
+        )
+        db.add_all([rest_day, blackout_day])
+        await db.commit()
+        await db.refresh(rest_day)
+        await db.refresh(blackout_day)
+        rest_id, blackout_id = rest_day.id, blackout_day.id
+
+    levers = [
+        {"index": 0, "kind": "sets", "reason_code": "pace_behind",
+         "effect_slope": 0.1, "effect_days": 14, "detail": {"delta_sets": 2}},
+    ]
+    pid = await _proposal(test_user.id, active_block.id, ex.id, levers)
+    async with SessionLocal() as db:
+        proposal = await db.get(PeriodizationProposal, pid)
+        result = await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0]},
+        )
+        await db.commit()
+    assert result["applied"] == []
+    assert result["status"] == "declined"
+
+    async with SessionLocal() as db:
+        rest_day = await db.get(UserCalendarDay, rest_id)
+        blackout_day = await db.get(UserCalendarDay, blackout_id)
+    assert not (rest_day.volume_adjustments or [])
+    assert not (blackout_day.volume_adjustments or [])
+
+
 async def test_sets_lever_skips_non_planned_day_and_counts_it(
-    test_user, fresh_exercise, active_block
+    test_user, active_block
 ):
+    ex, plan = await _exercise_with_plan(test_user, target_sets=3)
     future = date.today() + timedelta(days=3)
     async with SessionLocal() as db:
         planned_day = UserCalendarDay(
             app_user_id=test_user.id, target_date=future,
-            block_id=active_block.id, status="planned",
+            block_id=active_block.id, plan_id=plan.id,
+            is_rest_day=False, is_blackout=False, microcycle_day_number=1,
+            status="planned",
         )
         missed_day = UserCalendarDay(
             app_user_id=test_user.id, target_date=future + timedelta(days=1),
-            block_id=active_block.id, status="missed",
+            block_id=active_block.id, plan_id=plan.id,
+            is_rest_day=False, is_blackout=False,
+            status="missed",
         )
         db.add_all([planned_day, missed_day])
         await db.commit()
@@ -328,7 +477,7 @@ async def test_sets_lever_skips_non_planned_day_and_counts_it(
         {"index": 0, "kind": "sets", "reason_code": "pace_behind",
          "effect_slope": 0.1, "effect_days": 14, "detail": {"delta_sets": 2}},
     ]
-    pid = await _proposal(test_user.id, active_block.id, fresh_exercise.id, levers)
+    pid = await _proposal(test_user.id, active_block.id, ex.id, levers)
     async with SessionLocal() as db:
         proposal = await db.get(PeriodizationProposal, pid)
         result = await apply_goal_decision(
@@ -343,9 +492,122 @@ async def test_sets_lever_skips_non_planned_day_and_counts_it(
         planned_day = await db.get(UserCalendarDay, planned_id)
         missed_day = await db.get(UserCalendarDay, missed_id)
     assert planned_day.volume_adjustments == [
-        {"exercise_id": fresh_exercise.id, "delta_sets": 2, "proposal_id": pid}
+        {"exercise_id": ex.id, "delta_sets": 2, "proposal_id": pid}
     ]
     assert not (missed_day.volume_adjustments or [])
+
+
+async def test_sets_lever_caps_total_delta_within_window_headroom(
+    test_user, active_block
+):
+    """Финальное ревью, Critical 2, требуемый тест: лифт стоит ТРИЖДЫ в
+    одном микроцикле (одно окно — все три дня несут microcycle_day_number
+    внутри диапазона первого маркера, см. current_window/_window_starts) —
+    суммарная добавленная дельта по ВСЕМ трём дням не может превысить
+    запас окна, даже если наивно применить delta_sets=2 к каждому вхождению
+    дало бы 6 (втрое больше разрешённого — буквально формулировка Critical 2).
+
+    Запас окна: MRV груди для beginner = 14 (landmarks._TABLE), предписано
+    4 подхода/день * 3 дня = 12 -> headroom = 14 - 12 = 2. Headroom
+    считается ОДИН РАЗ за вызов, на первом дне окна (см. докстринг
+    _apply_sets про window_headroom_cache), и дальше только тратится: день 1
+    получает min(delta=2, room=2-0=2) = 2 (весь остаток бюджета), дни 2 и 3
+    получают min(2, room=2-2=0) = 0 каждый — бюджет уже исчерпан день 1-м.
+    Итог: 2 + 0 + 0 = 2 == весь запас окна, ни граммом больше.
+    """
+    ex, plan = await _exercise_with_plan(test_user, target_sets=4)
+    day1 = date.today() + timedelta(days=1)
+    day2 = date.today() + timedelta(days=3)
+    day3 = date.today() + timedelta(days=5)
+    async with SessionLocal() as db:
+        rows = [
+            UserCalendarDay(
+                app_user_id=test_user.id, target_date=d,
+                block_id=active_block.id, plan_id=plan.id,
+                is_rest_day=False, is_blackout=False,
+                # Один маркер начала окна на самый ранний из трёх дней —
+                # все три попадают в ОДНО и то же окно (следующего старта
+                # микроцикла в этом блоке нет вовсе).
+                microcycle_day_number=(1 if d == day1 else 2),
+                status="planned",
+            )
+            for d in (day1, day2, day3)
+        ]
+        db.add_all(rows)
+        await db.commit()
+        for row in rows:
+            await db.refresh(row)
+        day_ids = [row.id for row in rows]
+
+    levers = [
+        {"index": 0, "kind": "sets", "reason_code": "pace_behind",
+         "effect_slope": 0.1, "effect_days": 14, "detail": {"delta_sets": 2}},
+    ]
+    pid = await _proposal(test_user.id, active_block.id, ex.id, levers)
+    async with SessionLocal() as db:
+        proposal = await db.get(PeriodizationProposal, pid)
+        result = await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0]},
+        )
+        await db.commit()
+    assert result["applied"] == [0]
+    # Два из трёх дней недополучили ничего — бюджет окна кончился на первом.
+    assert result["skipped_days"] == 2
+
+    async with SessionLocal() as db:
+        days = [await db.get(UserCalendarDay, day_id) for day_id in day_ids]
+    grants = [
+        sum(a.get("delta_sets", 0) for a in (day.volume_adjustments or []))
+        for day in days
+    ]
+    assert sum(grants) <= 2, "суммарная дельта по окну не может превысить его запас"
+    assert sum(grants) == 2
+    assert grants == [2, 0, 0]
+
+
+async def test_sets_lever_skipped_and_not_applied_when_headroom_gone_at_apply_time(
+    test_user, active_block
+):
+    """Финальное ревью, Critical 2, требуемый тест: между предложением и
+    применением headroom мог исчезнуть (например решение P0-09 приехало
+    первым и уже забило окно под MRV). Рычаг обязан честно ничего не
+    сделать и сообщить об этом (skipped_days, applied=[], status=declined)
+    — а НЕ пробить потолок объёма (спека, решение 11)."""
+    # target_sets=20 > MRV(14) для beginner -> headroom = 0 сразу.
+    ex, plan = await _exercise_with_plan(test_user, target_sets=20)
+    future = date.today() + timedelta(days=3)
+    async with SessionLocal() as db:
+        day = UserCalendarDay(
+            app_user_id=test_user.id, target_date=future,
+            block_id=active_block.id, plan_id=plan.id,
+            is_rest_day=False, is_blackout=False, microcycle_day_number=1,
+            status="planned",
+        )
+        db.add(day)
+        await db.commit()
+        await db.refresh(day)
+        day_id = day.id
+
+    levers = [
+        {"index": 0, "kind": "sets", "reason_code": "pace_behind",
+         "effect_slope": 0.1, "effect_days": 14, "detail": {"delta_sets": 2}},
+    ]
+    pid = await _proposal(test_user.id, active_block.id, ex.id, levers)
+    async with SessionLocal() as db:
+        proposal = await db.get(PeriodizationProposal, pid)
+        result = await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0]},
+        )
+        await db.commit()
+    assert result["applied"] == []
+    assert result["status"] == "declined"
+    assert result["skipped_days"] == 1
+
+    async with SessionLocal() as db:
+        day = await db.get(UserCalendarDay, day_id)
+    assert not (day.volume_adjustments or [])
 
 
 async def test_replay_on_pending_proposal_keeps_original_snapshot_no_prior_carrier(
@@ -443,13 +705,16 @@ async def test_replay_on_pending_proposal_keeps_original_snapshot_with_prior_car
 
 
 async def test_sets_lever_applied_twice_does_not_double(
-    test_user, fresh_exercise, active_block
+    test_user, active_block
 ):
+    ex, plan = await _exercise_with_plan(test_user, target_sets=3)
     future = date.today() + timedelta(days=3)
     async with SessionLocal() as db:
         day = UserCalendarDay(
             app_user_id=test_user.id, target_date=future,
-            block_id=active_block.id, status="planned",
+            block_id=active_block.id, plan_id=plan.id,
+            is_rest_day=False, is_blackout=False, microcycle_day_number=1,
+            status="planned",
         )
         db.add(day)
         await db.commit()
@@ -460,7 +725,7 @@ async def test_sets_lever_applied_twice_does_not_double(
         {"index": 0, "kind": "sets", "reason_code": "pace_behind",
          "effect_slope": 0.1, "effect_days": 14, "detail": {"delta_sets": 2}},
     ]
-    pid = await _proposal(test_user.id, active_block.id, fresh_exercise.id, levers)
+    pid = await _proposal(test_user.id, active_block.id, ex.id, levers)
 
     # Первое применение.
     async with SessionLocal() as db:
@@ -489,5 +754,5 @@ async def test_sets_lever_applied_twice_does_not_double(
     async with SessionLocal() as db:
         day = await db.get(UserCalendarDay, day_id)
     assert day.volume_adjustments == [
-        {"exercise_id": fresh_exercise.id, "delta_sets": 2, "proposal_id": pid}
+        {"exercise_id": ex.id, "delta_sets": 2, "proposal_id": pid}
     ]

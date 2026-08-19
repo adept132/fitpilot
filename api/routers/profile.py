@@ -39,6 +39,9 @@ async def update_profile_me(
 
     # P0-12: расписание, оборудование и ограничения — входы плана. Их смена
     # двигает ETA цели немедленно, не дожидаясь конца недели.
+    # refresh_goal_proposals коммитит СЕБЯ САМА на каждом пути записи (см. её
+    # докстринг, финальное ревью Important 9) — второго commit() здесь не
+    # нужно и не нужен после этого вызова.
     from api.services.goal.service import refresh_goal_proposals
     from api.services.volume.repository import guarded, utc_today
 
@@ -260,6 +263,9 @@ async def update_profile_settings(
 
     # P0-12: расписание, оборудование и ограничения — входы плана. Их смена
     # двигает ETA цели немедленно, не дожидаясь конца недели.
+    # refresh_goal_proposals коммитит СЕБЯ САМА на каждом пути записи (см. её
+    # докстринг, финальное ревью Important 9) — второго commit() здесь не
+    # нужно и не нужен после этого вызова.
     from api.services.goal.service import refresh_goal_proposals
     from api.services.volume.repository import guarded, utc_today
 
@@ -368,6 +374,9 @@ async def update_custom_budget(
 
     # P0-12: расписание, оборудование и ограничения — входы плана. Их смена
     # двигает ETA цели немедленно, не дожидаясь конца недели.
+    # refresh_goal_proposals коммитит СЕБЯ САМА на каждом пути записи (см. её
+    # докстринг, финальное ревью Important 9) — второго commit() здесь не
+    # нужно и не нужен после этого вызова.
     from api.services.goal.service import refresh_goal_proposals
     from api.services.volume.repository import guarded, utc_today
 
