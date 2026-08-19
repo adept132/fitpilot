@@ -407,6 +407,13 @@ async def apply_goal_decision(
     # значение («носителя не было»), и хелперам ниже нужно различать «ключ
     # ещё не записан» от «ключ записан как None» — на заполненном словаре
     # оба случая неотличимы, и проверка «уже записано?» ничего не защищает.
+    #
+    # Это ровно то же двухуровневое правило, на которое опирается
+    # undo_goal_decision (см. её докстринг): ПРИСУТСТВИЕ ключа в снимке —
+    # единственный источник истины о том, писало ли ЭТО предложение данный
+    # носитель (preference/rep_override/scheme), а само записанное значение
+    # (включая None) — это то, что было ДО записи, по которому откат либо
+    # удаляет носителя (None), либо восстанавливает прежнее значение.
     existing_snapshot = payload.get("applied_snapshot")
     snapshot: dict = dict(existing_snapshot) if isinstance(existing_snapshot, dict) else {}
     snapshot.setdefault("days", [])
@@ -777,7 +784,8 @@ async def _apply_structural(
 
 
 async def undo_goal_decision(
-    session: AsyncSession, app_user_id: int, proposal: PeriodizationProposal
+    session: AsyncSession, app_user_id: int, proposal: PeriodizationProposal,
+    client_uuid: Optional[str] = None,
 ) -> dict:
     """Вернуть то, что автопилот сделал, — и только то.
 
@@ -795,6 +803,31 @@ async def undo_goal_decision(
     блокировал откат, хотя ни один РЕАЛЬНО регенерированный день факта не
     получил. Смотрим только на даты с touched=True — то множество, что
     зеркалит days-запрос _apply_structural и её же touched_flags.
+
+    ИСПРАВЛЕНО (ревью Задачи 10 Task-10, Critical 1 — откат мог снести
+    носителя, который это предложение никогда не писало): для preference/
+    rep_override/scheme ниже действует ДВУХУРОВНЕВОЕ правило, зеркальное
+    тому, что описано в докстринге apply_goal_decision про запись снимка:
+      1. ПРИСУТСТВИЕ ключа в snapshot решает ВЛАДЕНИЕ. Ключ отсутствует —
+         это предложение соответствующего рычага не применяло (не был
+         принят пользователем среди payload["levers"], или applied_snapshot
+         вообще пуст) — носитель не трогаем НИКАК, даже не заносим в kept:
+         его текущее значение к этому предложению отношения не имеет.
+         Раньше владение решалось равенством ТЕКУЩЕГО значения носителя
+         detail'у рычага из payload["levers"] — но тот список несёт ВСЕ
+         предложенные рычаги, а не только принятые, а decide.py вдобавок
+         детерминирован (схемный рычаг всегда предлагает percent_1rm,
+         диапазон повторов считается из неизменного target_reps) — так что
+         значение, записанное СОВСЕМ ДРУГИМ актором (пользователем вручную
+         или другим предложением), могло случайно совпасть с тем, что
+         предложил бы рычаг, и удалялось как «наше».
+      2. Ключ ПРИСУТСТВУЕТ (в т.ч. как None) — это предложение носителя
+         коснулось. None означает «носителя не было до нас» — откат его
+         удаляет; записанное значение — восстанавливаем его. Сравнение с
+         текущим значением остаётся, но ТОЛЬКО после этой проверки
+         присутствия и только чтобы поймать позднюю правку самого
+         пользователя ПОСЛЕ применения — такую правку не восстанавливаем
+         поверх, а называем в kept (см. ниже).
     """
     snapshot = (proposal.payload or {}).get("applied_snapshot")
     if not snapshot:
@@ -845,8 +878,12 @@ async def undo_goal_decision(
             day.volume_adjustments = remaining
             flag_modified(day, "volume_adjustments")
 
-    # 2. Преференция.
-    if exercise_id is not None:
+    # 2. Преференция. Владение — по присутствию ключа "preference" в
+    # snapshot (см. докстринг выше); значение constant'но ("favorite"), и
+    # именно поэтому сравнение по значению БЕЗ проверки присутствия было
+    # дырявым — совпадение с "favorite" ничего не говорит о том, кто его
+    # поставил.
+    if exercise_id is not None and "preference" in snapshot:
         pref = (await session.execute(
             select(UserExercisePreference).where(
                 UserExercisePreference.app_user_id == app_user_id,
@@ -861,15 +898,23 @@ async def undo_goal_decision(
             else:
                 pref.preference = snapshot["preference"]
 
-        # 3. Диапазон повторов — восстанавливаем ТОЛЬКО если текущее
-        # значение ещё совпадает с тем, что записал автопилот (ИСПРАВЛЕНО,
-        # ревью Задачи 10, Important 3, спека §5.5: было безусловно). Что
-        # именно записал автопилот, берём из proposal.payload["levers"] —
-        # тот же rep_min/rep_max, что _apply_rep_range взяла из detail
-        # своего lever'а. Пользователь мог отредактировать диапазон уже
-        # ПОСЛЕ применения — такую правку откат не имеет права стирать
-        # молча, ровно как и с преференцией выше: разошедшееся значение
-        # оставляем как есть и называем в kept, а не восстанавливаем поверх.
+    # 3. Диапазон повторов — та же дисциплина: владение решает присутствие
+    # ключа "rep_override" в snapshot (ИСПРАВЛЕНО, ревью Задачи 10 Task-10,
+    # Critical 1 — раньше владение проверялось равенством текущего значения
+    # detail'у рычага из payload["levers"], а тот список несёт ВСЕ
+    # предложенные рычаги, включая непринятые; decide.py к тому же считает
+    # rep_min/rep_max детерминированно из неизменного target_reps, так что
+    # значение, записанное СОВСЕМ ДРУГИМ актором, могло случайно совпасть и
+    # удалялось как «наше» — см. докстринг undo_goal_decision). Восстанавливаем
+    # ТОЛЬКО если текущее значение ещё совпадает с тем, что записал автопилот
+    # (ИСПРАВЛЕНО, ревью Задачи 10, Important 3, спека §5.5: было безусловно).
+    # Что именно записал автопилот, берём из proposal.payload["levers"] — тот
+    # же rep_min/rep_max, что _apply_rep_range взяла из detail своего
+    # lever'а; эта проверка ИДЁТ ПОСЛЕ подтверждения владения и ловит только
+    # позднюю правку самого пользователя ПОСЛЕ применения — такую правку
+    # откат не имеет права стирать молча: разошедшееся значение оставляем
+    # как есть и называем в kept, а не восстанавливаем поверх.
+    if exercise_id is not None and "rep_override" in snapshot:
         override = (await session.execute(
             select(UserExerciseRepOverride).where(
                 UserExerciseRepOverride.app_user_id == app_user_id,
@@ -890,33 +935,42 @@ async def undo_goal_decision(
             else:
                 override.rep_min, override.rep_max = previous["rep_min"], previous["rep_max"]
 
-    # 4. Схема прогрессии — та же дисциплина сравнения, что и у диапазона
-    # повторов выше (ИСПРАВЛЕНО, ревью Задачи 10, Important 3): текущее
-    # значение сверяем с detail.to_scheme того lever'а, который его записал,
-    # а не восстанавливаем безусловно.
+    # 4. Схема прогрессии — та же дисциплина, что у диапазона повторов выше:
+    # владение решает присутствие ключа "scheme" в snapshot (ИСПРАВЛЕНО,
+    # ревью Задачи 10 Task-10, Critical 1 — раньше владение проверялось тем,
+    # что exercise_id вообще ЕСТЬ в overrides сейчас, то есть текущим
+    # наличием носителя, а не тем, писало ли его ЭТО предложение; схемный
+    # рычаг к тому же детерминирован — decide.py всегда предлагает
+    # "percent_1rm", — так что чужая правка на то же значение удалялась бы
+    # как «наша», см. докстринг undo_goal_decision). Сравнение с
+    # detail.to_scheme того lever'а, который его записал (ИСПРАВЛЕНО, ревью
+    # Задачи 10, Important 3), идёт ПОСЛЕ подтверждения владения и ловит
+    # только позднюю правку самого пользователя — восстанавливаем поверх
+    # только если она не разошлась, иначе оставляем как есть и называем в
+    # kept.
     profile = (await session.execute(
         select(AppUserProfile).where(AppUserProfile.app_user_id == app_user_id)
     )).scalar_one_or_none()
-    if profile is not None and exercise_id is not None:
+    if profile is not None and exercise_id is not None and "scheme" in snapshot:
         settings = dict(profile.settings or {})
         progression = dict(settings.get("progression") or {})
         overrides = dict(progression.get("overrides") or {})
-        if str(exercise_id) in overrides:
-            scheme_lever = next(
-                (l for l in levers if l.get("kind") == params.LEVER_SCHEME), None
-            )
-            written_scheme = ((scheme_lever or {}).get("detail") or {}).get("to_scheme")
-            if overrides[str(exercise_id)] != written_scheme:
-                kept.append("scheme")    # пользователь сам поменял схему после применения
+        scheme_lever = next(
+            (l for l in levers if l.get("kind") == params.LEVER_SCHEME), None
+        )
+        written_scheme = ((scheme_lever or {}).get("detail") or {}).get("to_scheme")
+        current_scheme = overrides.get(str(exercise_id))
+        if current_scheme != written_scheme:
+            kept.append("scheme")    # пользователь сам поменял схему после применения
+        else:
+            if snapshot.get("scheme") is None:
+                overrides.pop(str(exercise_id), None)
             else:
-                if snapshot.get("scheme") is None:
-                    overrides.pop(str(exercise_id), None)
-                else:
-                    overrides[str(exercise_id)] = snapshot["scheme"]
-                progression["overrides"] = overrides
-                settings["progression"] = progression
-                profile.settings = settings
-                flag_modified(profile, "settings")
+                overrides[str(exercise_id)] = snapshot["scheme"]
+            progression["overrides"] = overrides
+            settings["progression"] = progression
+            profile.settings = settings
+            flag_modified(profile, "settings")
 
     # 5. Дни календаря — вернуть снятые координаты.
     for row in snapshot.get("days") or []:
@@ -940,6 +994,20 @@ async def undo_goal_decision(
 
     proposal.status = periodization_params.STATUS_UNDONE
     proposal.decided_action = periodization_params.ACTION_UNDO_GOAL
+    # ИСПРАВЛЕНО (ревью Задачи 10 Task-10, Important — откат не был
+    # идемпотентен по client_uuid): без этой строки proposal.client_uuid
+    # оставался тем, что записал apply_goal_decision (диспетчер выставляет
+    # его до вызова apply, см. periodization.service.apply_decision), и
+    # повтор ЭТОЙ ЖЕ отмены с тем же client_uuid из офлайн-очереди мобильного
+    # клиента не совпадал с ним — верхний гейт apply_decision отвечал
+    # conflict вместо already_applied, хотя предложение уже честно отменено.
+    # Пишем именно здесь, вместе с status/decided_action/decided_at, а не в
+    # диспетчере: на ранних return (нечего отменять / конфликт по факту)
+    # decided-поля не меняются вовсе, и client_uuid не должен меняться тоже —
+    # тот отказ ещё не решение, повтор с ЛЮБЫМ client_uuid обязан пройти
+    # сюда снова (гейт диспетчера пропускает status == accepted без сверки
+    # client_uuid, см. её докстринг).
+    proposal.client_uuid = client_uuid
     proposal.decided_at = datetime.now(timezone.utc)
     await session.flush()
     return {"status": "undone", "proposal_id": proposal.id, "kept": kept}

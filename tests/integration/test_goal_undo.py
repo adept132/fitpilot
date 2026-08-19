@@ -541,3 +541,280 @@ async def test_undo_restores_full_calendar_including_recreated_day(
         assert row.is_rest_day == original["is_rest_day"]
         assert row.plan_id == original["plan_id"]
         assert row.mesocycle_phase_number == original["mesocycle_phase_number"]
+
+
+async def test_undo_leaves_untouched_scheme_alone_even_if_value_matches_lever(
+    test_user, fresh_exercise, active_block
+):
+    """Finding 1 (ревью Задачи 10 Task-10, Critical): владение носителем
+    решает ПРИСУТСТВИЕ ключа в applied_snapshot, а не совпадение текущего
+    значения с тем, что предложил бы рычаг. Ревью воспроизвело буквально: в
+    payload["levers"] лежат ОБА кандидата — схемный (decide.py всегда
+    предлагает "percent_1rm" для тяжёлых базовых, детерминированно) и
+    диапазон повторов, — но пользователь принял только диапазон (accepted=
+    [1]); схемный рычаг НИКОГДА не применялся, и applied_snapshot несёт
+    ключ "rep_override", но не несёт ключа "scheme". Оверрайд схемы, который
+    уже стоял на "percent_1rm" (поставлен СОВСЕМ ДРУГИМ актором — не этим
+    предложением), совпадает со значением, которое предложил бы схемный
+    рычаг. Старый код сравнивал именно это значение и удалял оверрайд как
+    «свой» — откат обязан оставить его нетронутым."""
+    async with SessionLocal() as db:
+        db.add(AppUserProfile(
+            app_user_id=test_user.id,
+            settings={"progression": {"overrides": {str(fresh_exercise.id): "percent_1rm"}}},
+        ))
+        await db.commit()
+
+    levers = [
+        {"index": 0, "kind": "scheme", "reason_code": "pace_behind",
+         "effect_slope": 0.15, "effect_days": 7, "detail": {"to_scheme": "percent_1rm"}},
+        {"index": 1, "kind": "rep_range", "reason_code": "pace_behind",
+         "effect_slope": 0.1, "effect_days": 5, "detail": {"rep_min": 2, "rep_max": 5}},
+    ]
+    async with SessionLocal() as db:
+        proposal = PeriodizationProposal(
+            app_user_id=test_user.id, block_id=active_block.id,
+            kind=periodization_params.KIND_GOAL_PLAN, reason_code="pace_behind",
+            payload={
+                "goal_id": 1, "exercise_id": fresh_exercise.id,
+                "levers": levers, "applied_snapshot": None,
+            },
+            status=periodization_params.STATUS_PENDING,
+        )
+        db.add(proposal)
+        await db.commit()
+        await db.refresh(proposal)
+        pid = proposal.id
+
+        # Принят ТОЛЬКО диапазон повторов (индекс 1) — схемный рычаг
+        # (индекс 0) в accepted нет и никогда не применялся.
+        result = await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [1]},
+        )
+        await db.commit()
+    assert result["applied"] == [1]
+
+    async with SessionLocal() as db:
+        row = await db.get(PeriodizationProposal, pid)
+        snapshot = row.payload["applied_snapshot"]
+    assert "rep_override" in snapshot
+    assert "scheme" not in snapshot, "схемный рычаг не применялся — снимок не должен нести его ключ"
+
+    async with SessionLocal() as db:
+        proposal = await db.get(PeriodizationProposal, pid)
+        undo_result = await undo_goal_decision(db, test_user.id, proposal)
+        await db.commit()
+    assert undo_result["status"] == "undone"
+    assert "scheme" not in undo_result["kept"], "непринятый рычаг откат вообще не должен упоминать"
+
+    async with SessionLocal() as db:
+        profile = (await db.execute(
+            select(AppUserProfile).where(AppUserProfile.app_user_id == test_user.id)
+        )).scalar_one()
+    assert profile.settings["progression"]["overrides"][str(fresh_exercise.id)] == "percent_1rm", (
+        "оверрайд, поставленный не этим предложением, откат не имеет права снимать"
+    )
+
+
+async def test_undo_removes_freshly_created_rep_override_and_scheme(
+    test_user, fresh_exercise, active_block
+):
+    """Ключ в snapshot записан как None (носителя не было до применения) —
+    откат обязан удалить и строку оверрайда диапазона повторов, и запись
+    схемы в overrides, а не просто оставить их."""
+    async with SessionLocal() as db:
+        db.add(AppUserProfile(app_user_id=test_user.id))
+        await db.commit()
+
+    levers = [
+        {"index": 0, "kind": "rep_range", "reason_code": "pace_behind",
+         "effect_slope": 0.1, "effect_days": 5, "detail": {"rep_min": 2, "rep_max": 5}},
+        {"index": 1, "kind": "scheme", "reason_code": "pace_behind",
+         "effect_slope": 0.15, "effect_days": 7, "detail": {"to_scheme": "5x5"}},
+    ]
+    async with SessionLocal() as db:
+        proposal = PeriodizationProposal(
+            app_user_id=test_user.id, block_id=active_block.id,
+            kind=periodization_params.KIND_GOAL_PLAN, reason_code="pace_behind",
+            payload={
+                "goal_id": 1, "exercise_id": fresh_exercise.id,
+                "levers": levers, "applied_snapshot": None,
+            },
+            status=periodization_params.STATUS_PENDING,
+        )
+        db.add(proposal)
+        await db.commit()
+        await db.refresh(proposal)
+        pid = proposal.id
+
+        result = await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0, 1]},
+        )
+        await db.commit()
+    assert result["applied"] == [0, 1]
+
+    async with SessionLocal() as db:
+        proposal = await db.get(PeriodizationProposal, pid)
+        undo_result = await undo_goal_decision(db, test_user.id, proposal)
+        await db.commit()
+    assert undo_result["status"] == "undone"
+    assert undo_result["kept"] == []
+
+    async with SessionLocal() as db:
+        override = (await db.execute(
+            select(UserExerciseRepOverride).where(
+                UserExerciseRepOverride.app_user_id == test_user.id,
+                UserExerciseRepOverride.exercise_id == fresh_exercise.id,
+            )
+        )).scalar_one_or_none()
+        profile = (await db.execute(
+            select(AppUserProfile).where(AppUserProfile.app_user_id == test_user.id)
+        )).scalar_one()
+    assert override is None
+    assert str(fresh_exercise.id) not in profile.settings.get("progression", {}).get("overrides", {})
+
+
+async def test_undo_restores_preexisting_rep_override_and_scheme_values(
+    test_user, fresh_exercise, active_block
+):
+    """Ключ в snapshot записан НЕ как None (носитель уже нёс значение до
+    применения) — откат обязан вернуть именно это прежнее значение, а не
+    просто удалить носителя."""
+    async with SessionLocal() as db:
+        db.add(AppUserProfile(
+            app_user_id=test_user.id,
+            settings={"progression": {"overrides": {str(fresh_exercise.id): "3x8"}}},
+        ))
+        db.add(UserExerciseRepOverride(
+            app_user_id=test_user.id, exercise_id=fresh_exercise.id,
+            rep_min=6, rep_max=10,
+        ))
+        await db.commit()
+
+    levers = [
+        {"index": 0, "kind": "rep_range", "reason_code": "pace_behind",
+         "effect_slope": 0.1, "effect_days": 5, "detail": {"rep_min": 2, "rep_max": 5}},
+        {"index": 1, "kind": "scheme", "reason_code": "pace_behind",
+         "effect_slope": 0.15, "effect_days": 7, "detail": {"to_scheme": "5x5"}},
+    ]
+    async with SessionLocal() as db:
+        proposal = PeriodizationProposal(
+            app_user_id=test_user.id, block_id=active_block.id,
+            kind=periodization_params.KIND_GOAL_PLAN, reason_code="pace_behind",
+            payload={
+                "goal_id": 1, "exercise_id": fresh_exercise.id,
+                "levers": levers, "applied_snapshot": None,
+            },
+            status=periodization_params.STATUS_PENDING,
+        )
+        db.add(proposal)
+        await db.commit()
+        await db.refresh(proposal)
+        pid = proposal.id
+
+        result = await apply_goal_decision(
+            db, test_user.id, proposal,
+            periodization_params.ACTION_APPLY_GOAL, {"accepted": [0, 1]},
+        )
+        await db.commit()
+    assert result["applied"] == [0, 1]
+
+    # Применение действительно переписало носителей на новые значения.
+    async with SessionLocal() as db:
+        override = (await db.execute(
+            select(UserExerciseRepOverride).where(
+                UserExerciseRepOverride.app_user_id == test_user.id,
+                UserExerciseRepOverride.exercise_id == fresh_exercise.id,
+            )
+        )).scalar_one()
+        profile = (await db.execute(
+            select(AppUserProfile).where(AppUserProfile.app_user_id == test_user.id)
+        )).scalar_one()
+    assert (override.rep_min, override.rep_max) == (2, 5)
+    assert profile.settings["progression"]["overrides"][str(fresh_exercise.id)] == "5x5"
+
+    async with SessionLocal() as db:
+        proposal = await db.get(PeriodizationProposal, pid)
+        undo_result = await undo_goal_decision(db, test_user.id, proposal)
+        await db.commit()
+    assert undo_result["status"] == "undone"
+    assert undo_result["kept"] == []
+
+    async with SessionLocal() as db:
+        override = (await db.execute(
+            select(UserExerciseRepOverride).where(
+                UserExerciseRepOverride.app_user_id == test_user.id,
+                UserExerciseRepOverride.exercise_id == fresh_exercise.id,
+            )
+        )).scalar_one()
+        profile = (await db.execute(
+            select(AppUserProfile).where(AppUserProfile.app_user_id == test_user.id)
+        )).scalar_one()
+    assert (override.rep_min, override.rep_max) == (6, 10)
+    assert profile.settings["progression"]["overrides"][str(fresh_exercise.id)] == "3x8"
+
+
+async def test_undo_retry_same_client_uuid_returns_already_applied(
+    test_user, fresh_exercise, active_block
+):
+    """Finding 2 (ревью Задачи 10 Task-10, Important): контракт модуля
+    обещает, что повтор с тем же client_uuid возвращает результат первого
+    решения, а мобильный клиент офлайн-первый с очередью повторов. Ни
+    ветка диспетчера, ни undo_goal_decision раньше не проставляли
+    proposal.client_uuid при отмене — после apply -> undo -> повтор ТОЙ ЖЕ
+    отмены строка всё ещё несла client_uuid от apply, и верхний гейт
+    apply_decision отвечал conflict вместо already_applied."""
+    async with SessionLocal() as db:
+        proposal = PeriodizationProposal(
+            app_user_id=test_user.id, block_id=active_block.id,
+            kind=periodization_params.KIND_GOAL_PLAN, reason_code="lift_missing",
+            payload={
+                "goal_id": 1, "exercise_id": fresh_exercise.id,
+                "levers": [{"index": 0, "kind": "ensure_present",
+                            "reason_code": "lift_missing", "effect_slope": 0.2,
+                            "effect_days": 9, "detail": {}}],
+                "applied_snapshot": None,
+            },
+            status=periodization_params.STATUS_PENDING,
+        )
+        db.add(proposal)
+        await db.commit()
+        await db.refresh(proposal)
+        pid = proposal.id
+
+        await apply_decision(
+            db, test_user.id, pid, periodization_params.ACTION_APPLY_GOAL,
+            client_uuid="apply-1", options={"accepted": [0]},
+        )
+
+    async with SessionLocal() as db:
+        first_undo = await apply_decision(
+            db, test_user.id, pid, periodization_params.ACTION_UNDO_GOAL,
+            client_uuid="undo-1",
+        )
+    assert first_undo["status"] == "undone"
+
+    async with SessionLocal() as db:
+        row = await db.get(PeriodizationProposal, pid)
+    assert row.client_uuid == "undo-1"
+    assert row.status == periodization_params.STATUS_UNDONE
+
+    # Повтор ТОЙ ЖЕ отмены (тот же client_uuid) — already_applied, не conflict.
+    async with SessionLocal() as db:
+        retry = await apply_decision(
+            db, test_user.id, pid, periodization_params.ACTION_UNDO_GOAL,
+            client_uuid="undo-1",
+        )
+    assert retry["status"] == "already_applied"
+    assert retry["proposal_id"] == pid
+
+    # Иной client_uuid на уже решённом (undone) предложении — по-прежнему
+    # conflict: гейт не должен слабеть до "любой undo на undone проходит".
+    async with SessionLocal() as db:
+        different = await apply_decision(
+            db, test_user.id, pid, periodization_params.ACTION_UNDO_GOAL,
+            client_uuid="undo-2",
+        )
+    assert different["status"] == "conflict"

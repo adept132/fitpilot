@@ -838,7 +838,13 @@ async def apply_decision(
         from api.services.goal.service import apply_goal_decision, undo_goal_decision
 
         if action == params.ACTION_UNDO_GOAL:
-            outcome = await undo_goal_decision(session, app_user_id, proposal)
+            # ИСПРАВЛЕНО (ревью Задачи 10 Task-10, Important — откат не был
+            # идемпотентен по client_uuid): client_uuid передаём внутрь, а не
+            # проставляем здесь безусловно — undo_goal_decision пишет его
+            # ТОЛЬКО вместе с остальными decided-полями на успешном пути (см.
+            # её докстринг), а не на ранних return (нечего отменять/конфликт
+            # по факту), которые ещё не решение.
+            outcome = await undo_goal_decision(session, app_user_id, proposal, client_uuid)
             await session.commit()
             return outcome
 
