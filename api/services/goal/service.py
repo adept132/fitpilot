@@ -940,6 +940,18 @@ async def _apply_structural(
         }
         for d, touched in zip(days, touched_flags)
     ]
+    # ИСПРАВЛЕНО (ревью Задачи 15, Critical 1 — undo оставлял «фантомные» дни
+    # календаря): snapshot["days"] выше несёт координаты дней, которые СУЩЕСТВОВАЛИ
+    # на момент применения. _generate_future_calendar ниже (через
+    # SchedulingEngine.generate_block_days) заполняет КАЖДУЮ дату от first_future
+    # до block.planned_end_date включительно, вставляя НОВЫЕ строки для дат, у
+    # которых прежде вообще не было записи в UserCalendarDay, — эти даты в
+    # snapshot["days"] не попадают (их там просто не с чем зафиксировать: строки
+    # не было). undo_goal_decision обязана знать границу, откуда веерная
+    # регенерация могла что-то придумать с нуля, — фиксируем её здесь же, в
+    # той же транзакции, что и сам снимок (см. разбор про flush() ДО wipe/
+    # regenerate выше в докстринге).
+    snapshot["first_future_date"] = first_future.isoformat()
     # skipped_days считает дни СРЕДИ БУДУЩИХ дней блока, которые перегенерация
     # не тронула, потому что они уже несут факт или принятую правку — то же
     # самое множество, что молча обходит _wipe_future_calendar (см. её
@@ -976,6 +988,13 @@ async def undo_goal_decision(
     снимке, см. докстринг _apply_structural), не сменил статус и не получил
     привязанной сессии. После появления факта на ТАКОМ дне откат означал бы
     переписывание истории — вместо него честнее новое предложение.
+
+    Шаг 6 ниже (ревью Задачи 15, Critical 1) сносит ФАНТОМНЫЕ дни — строки
+    UserCalendarDay, которых не было вовсе до применения и которые
+    придумала регенерация (SchedulingEngine.generate_block_days заполняет
+    ВЕСЬ диапазон [first_future, block.planned_end_date], а не только даты,
+    отражённые в snapshot["days"]). Точное правило удаления и почему оно
+    безопасно — в комментарии над самим шагом 6.
 
     ИСПРАВЛЕНО (ревью Задачи 10, Critical 2 — ворота блокировали безопасный
     откат навсегда): snapshot["days"] несёт КАЖДЫЙ будущий день блока на
@@ -1167,6 +1186,59 @@ async def undo_goal_decision(
         day.mesocycle_phase_number = row["mesocycle_phase_number"]
         day.is_rest_day = row["is_rest_day"]
         day.block_id = proposal.block_id
+
+    # 6. Фантомные дни — снести то, что регенерация ПРИДУМАЛА, а снимок
+    # никогда не видел (ревью Задачи 15, Critical 1). _apply_structural идёт
+    # через _generate_future_calendar -> SchedulingEngine.generate_block_days,
+    # а та заполняет КАЖДУЮ дату от snapshot["first_future_date"] до
+    # block.planned_end_date включительно — в том числе даты, для которых до
+    # применения не было ни одной строки UserCalendarDay вовсе. Такие даты не
+    # попадают в snapshot["days"] (там нечего было зафиксировать), и шаг 5
+    # выше их не трогает: get-or-create по snapshot["days"] создаёт только то,
+    # что снимок ЗНАЕТ. Без этого шага откат оставлял бы позади ровно те дни,
+    # которых не было ДО применения, — ревью воспроизвело буквально: 5
+    # посеянных дней +1..+5, блок с планируемым концом +10, после apply+undo
+    # календарь держал +1..+10.
+    #
+    # Правило удаления — намеренно консервативное, снести можно ТОЛЬКО день,
+    # который одновременно:
+    #   - принадлежит ИМЕННО этому блоку (proposal.block_id) — регенерация
+    #     трогала только его дни, чужой блок за пределами этой операции;
+    #   - датирован НЕ РАНЬШЕ snapshot["first_future_date"] — до этой границы
+    #     регенерация не заходила вовсе (см. её докстринг в _apply_structural);
+    #   - ОТСУТСТВУЕТ в snapshot["days"] — присутствие означало бы, что строка
+    #     существовала до применения и уже обработана шагом 5 выше;
+    #   - всё ещё "planned" и без actual_workout_session_id — день, на
+    #     который уже успели записать тренировку (в т.ч. после отката соседних
+    #     дней в рамках этого же вызова), несёт факт, а откат не имеет права
+    #     переписывать историю (тот же принцип, что и ворота выше по функции);
+    #   - без принятых правок объёма (volume_adjustments) — там лежит решение
+    #     пользователя, а не пустое место, оставленное автопилотом.
+    # Любой день, не прошедший все пять условий разом, остаётся как есть:
+    # удаляются только строки, которые сам автопилот и создал из ничего.
+    first_future_raw = snapshot.get("first_future_date")
+    if first_future_raw is not None:
+        first_future = date.fromisoformat(first_future_raw)
+        known_dates = {
+            date.fromisoformat(row["target_date"]) for row in snapshot.get("days") or []
+        }
+        candidates = (await session.execute(
+            select(UserCalendarDay).where(
+                UserCalendarDay.app_user_id == app_user_id,
+                UserCalendarDay.block_id == proposal.block_id,
+                UserCalendarDay.target_date >= first_future,
+            )
+        )).scalars().all()
+        for day in candidates:
+            if day.target_date in known_dates:
+                continue
+            if day.status != "planned":
+                continue
+            if day.actual_workout_session_id is not None:
+                continue
+            if day.volume_adjustments:
+                continue
+            await session.delete(day)
 
     proposal.status = periodization_params.STATUS_UNDONE
     proposal.decided_action = periodization_params.ACTION_UNDO_GOAL

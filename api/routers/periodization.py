@@ -24,6 +24,7 @@ from api.services.models import (
     PeriodizationProposal,
     TrainingBlock,
 )
+from api.services.goal import params as goal_params
 from api.services.periodization import params
 from api.services.periodization.repository import get_active_block
 from api.services.periodization.service import (
@@ -36,13 +37,34 @@ from api.services.scheduling_engine import SchedulingEngine
 router = APIRouter(prefix="/periodization", tags=["Periodization"])
 
 
+# ИСПРАВЛЕНО (ревью Задачи 15, Critical 2 — карточка цели уходила на экран
+# без текста причины): у каждого вида предложения свой словарь причин —
+# params.REASON_TEXTS знает коды early_deload/postpone_deload/block_boundary/
+# structural/volume_review, а коды автопилота цели (lift_missing,
+# pace_behind, partial_catchup, no_lever_left, above_ceiling, trend_down)
+# живут в goal_params.REASON_TEXTS и с первым словарём не пересекаются
+# вовсе. _proposal_out раньше резолвил reason_text ИСКЛЮЧИТЕЛЬНО через
+# params.REASON_TEXTS для любого kind — goal_plan получал "" всегда, и
+# /periodization/context (тот самый эндпоинт, который читает карточка цели
+# на Home) отдавал пустую строку под заголовком «Цель под угрозой срока».
+# На мобильном клиенте уже был обходной локальный словарь для volume_review
+# (см. features/periodization/components/ProposalCard.tsx) — заводить
+# второй такой же обход для goal_plan не стали: чиним у источника, единым
+# правилом «словарь причин выбирается по kind предложения», чтобы текст был
+# верным для ЛЮБОГО потребителя контекста, а не только для одного экрана.
+_REASON_TEXTS_BY_KIND: dict[str, dict[str, str]] = {
+    params.KIND_GOAL_PLAN: goal_params.REASON_TEXTS,
+}
+
+
 def _proposal_out(row: PeriodizationProposal) -> ProposalRead:
+    reason_texts = _REASON_TEXTS_BY_KIND.get(row.kind, params.REASON_TEXTS)
     return ProposalRead(
         id=row.id,
         block_id=row.block_id,
         kind=row.kind,
         reason_code=row.reason_code,
-        reason_text=params.REASON_TEXTS.get(row.reason_code, ""),
+        reason_text=reason_texts.get(row.reason_code, ""),
         payload=row.payload or {},
         status=row.status,
     )

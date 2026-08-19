@@ -14,6 +14,15 @@
 apply_goal_decision/undo_goal_decision напрямую) -> день с фактом не тронут
 -> откат -> координаты дней в точности совпадают с тем, что было до
 применения — и есть предмет Задачи 15.
+
+ИСПРАВЛЕНО (ревью Задачи 15, Critical 1): раньше _fetch читал только пять
+ИЗНАЧАЛЬНО посеянных дат (+1..+5), а active_block заканчивается +10 —
+_generate_future_calendar заполняет ВЕСЬ диапазон вплоть до
+block.planned_end_date, значит regen кладёт НОВЫЕ строки на +6..+10, которых
+до применения не было вовсе. Сравнение по пяти датам этого просто не видело
+и пропустило дефект (после отката календарь держал +1..+10 — пять дней,
+которых не существовало до автопилота). Теперь сравниваем ВЕСЬ календарь
+пользователя, как и в примере брифа задачи.
 """
 from datetime import date, timedelta
 
@@ -39,12 +48,12 @@ def _coords(day: UserCalendarDay) -> tuple:
     )
 
 
-async def _fetch(db, app_user_id: int, dates: list[date]) -> dict[date, tuple]:
+async def _fetch_all(db, app_user_id: int) -> dict[date, tuple]:
+    """ВЕСЬ календарь пользователя, а не только исходно посеянные даты —
+    иначе строки, которые регенерация придумала за пределами посева (см.
+    докстринг модуля), остаются невидимыми для сравнения."""
     rows = (await db.execute(
-        select(UserCalendarDay).where(
-            UserCalendarDay.app_user_id == app_user_id,
-            UserCalendarDay.target_date.in_(dates),
-        )
+        select(UserCalendarDay).where(UserCalendarDay.app_user_id == app_user_id)
     )).scalars().all()
     return {row.target_date: _coords(row) for row in rows}
 
@@ -93,8 +102,8 @@ async def test_apply_then_undo_restores_calendar(test_user, fresh_exercise, acti
         await db.refresh(proposal)
         pid = proposal.id
 
-        before = await _fetch(db, test_user.id, dates)
-    assert len(before) == 5
+        before = await _fetch_all(db, test_user.id)
+    assert len(before) == 5  # ровно посеянные +1..+5, ничего больше
 
     async with SessionLocal() as db:
         applied = await apply_decision(
@@ -105,22 +114,32 @@ async def test_apply_then_undo_restores_calendar(test_user, fresh_exercise, acti
     assert applied["applied"] == [0]
 
     async with SessionLocal() as db:
-        after_apply = await _fetch(db, test_user.id, dates)
+        after_apply = await _fetch_all(db, test_user.id)
         row = await db.get(PeriodizationProposal, pid)
 
     # День с фактом остался нетронутым буквально — та же координата, тот же
     # статус, та же ссылка на тренировку.
     assert after_apply[fact_date] == before[fact_date]
 
-    # Остальные дни регенерация обязана была реально перезаписать — иначе
-    # тест доказывал бы совпадение на пустой выборке (рычаг ничего не
-    # сделал), а не настоящую регенерацию. day_tag "Push"/"Pull" (с большой
-    # буквы) может прийти только из настоящего SchedulingEngine.
-    # generate_block_days по сплиту active_block — посеянные дни несли
-    # day_tag="push" (нижний регистр).
+    # Остальные ИЗНАЧАЛЬНО ПОСЕЯННЫЕ дни регенерация обязана была реально
+    # перезаписать — иначе тест доказывал бы совпадение на пустой выборке
+    # (рычаг ничего не сделал), а не настоящую регенерацию. day_tag
+    # "Push"/"Pull" (с большой буквы) может прийти только из настоящего
+    # SchedulingEngine.generate_block_days по сплиту active_block —
+    # посеянные дни несли day_tag="push" (нижний регистр).
     touched_dates = {d for d in dates if d != fact_date}
     for d in touched_dates:
         assert after_apply[d] != before[d]
+        assert after_apply[d][0] in ("Push", "Pull")
+
+    # ФАНТОМНЫЕ дни (ревью Задачи 15, Critical 1): active_block кончается
+    # +10, а посев доходил только до +5 — generate_block_days обязана была
+    # заполнить +6..+10 новыми строками, которых до применения не было
+    # вовсе. Проверяем это явно: без этой проверки тест мог бы молча
+    # пройти на конфигурации, где регенерация ничего нового не создаёт.
+    phantom_dates = {date.today() + timedelta(days=i) for i in range(6, 11)}
+    assert phantom_dates <= after_apply.keys() - before.keys()
+    for d in phantom_dates:
         assert after_apply[d][0] in ("Push", "Pull")
 
     snapshot_days = row.payload["applied_snapshot"]["days"]
@@ -129,6 +148,10 @@ async def test_apply_then_undo_restores_calendar(test_user, fresh_exercise, acti
         for entry in snapshot_days if entry["touched"]
     }
     assert snapshot_touched == touched_dates
+    # Снимок обязан знать границу, откуда регенерация могла придумывать
+    # дни с нуля (см. докстринг _apply_structural) — иначе undo не смогла
+    # бы отличить фантом от дня, существовавшего до применения.
+    assert row.payload["applied_snapshot"]["first_future_date"] == dates[0].isoformat()
 
     async with SessionLocal() as db:
         undone = await apply_decision(
@@ -138,9 +161,11 @@ async def test_apply_then_undo_restores_calendar(test_user, fresh_exercise, acti
     assert undone["status"] == "undone"
 
     async with SessionLocal() as db:
-        after_undo = await _fetch(db, test_user.id, dates)
+        after_undo = await _fetch_all(db, test_user.id)
         row = await db.get(PeriodizationProposal, pid)
 
-    # Календарь на этих пяти датах — в точности то, что было ДО применения.
+    # Календарь ПОЛЬЗОВАТЕЛЯ ЦЕЛИКОМ — в точности то, что было ДО применения:
+    # и посеянные даты вернулись на прежние координаты, и фантомные +6..+10
+    # исчезли без следа (было бы 10 дат, а не 5, останься они висеть).
     assert after_undo == before
     assert row.status == periodization_params.STATUS_UNDONE

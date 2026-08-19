@@ -72,6 +72,43 @@ async def test_context_without_periodization_is_empty_not_an_error(client, test_
 
 
 @pytest.mark.asyncio
+async def test_context_resolves_goal_plan_reason_text_from_goal_dictionary(
+    client, db, test_user: AppUser
+):
+    """Ревью Задачи 15, Critical 2: _proposal_out резолвил reason_text ЛЮБОГО
+    предложения через periodization.params.REASON_TEXTS — словарь кодов
+    early_deload/postpone_deload/block_boundary/structural/volume_review, с
+    кодами автопилота цели (goal.params.REASON_TEXTS: lift_missing,
+    pace_behind, ...) не пересекающийся вовсе. goal_plan уходил на
+    /periodization/context — тот самый эндпоинт, который читает карточка
+    цели на Home-экране мобильного клиента, — с reason_text="" всегда.
+    Проверяем прямо на HTTP-контракте эндпоинта, что теперь это не так и
+    текст берётся из СВОЕГО словаря."""
+    from api.services.goal import params as goal_params
+
+    block = await _seed(db, test_user.id, date.today())
+
+    proposal = PeriodizationProposal(
+        app_user_id=test_user.id, block_id=block.id,
+        kind=params.KIND_GOAL_PLAN, reason_code="pace_behind",
+        payload={"goal_id": 1, "exercise_id": 1, "levers": []},
+        status=params.STATUS_PENDING,
+    )
+    db.add(proposal)
+    await db.commit()
+
+    response = await client.get("/periodization/context")
+
+    assert response.status_code == 200
+    body = response.json()
+    goal_rows = [p for p in body["proposals"] if p["kind"] == params.KIND_GOAL_PLAN]
+    assert len(goal_rows) == 1
+    assert goal_rows[0]["reason_code"] == "pace_behind"
+    assert goal_rows[0]["reason_text"] == goal_params.REASON_TEXTS["pace_behind"]
+    assert goal_rows[0]["reason_text"] != ""
+
+
+@pytest.mark.asyncio
 async def test_decision_endpoint_applies_and_repeats_safely(client, db, test_user: AppUser):
     block = await _seed(db, test_user.id, date.today())
     proposal = PeriodizationProposal(
