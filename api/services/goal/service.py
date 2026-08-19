@@ -306,27 +306,74 @@ async def _undo_blocked_reason(
     )
 
 
-def _milestones_with_fact(
-    milestones: list, history_points: list[tuple[date, float]]
-) -> list[dict]:
-    """Вехи симуляции против факта (P0-12, Задача 19, §6.2).
+_HISTORY_WEEKS_BACK = 16  # ~4 месяца недельных точек факта, не вся история
 
-    actual_e1rm — e1RM из истории, показанный в ту же календарную неделю
-    [week_start, week_start+7), последнее значение недели, если тренировок
-    несколько. Недели без факта отдают None, а не 0 — экран обязан читать
-    отсутствие данных как «рано», не как «упал до нуля» (history_points
-    отсортированы по возрастанию даты вызывающим кодом).
+
+def _history_weekly_points(
+    history_points: list[tuple[date, float]], today: date,
+) -> list[tuple[date, float]]:
+    """Факт e1RM по календарным неделям ВКЛЮЧАЯ сегодня (P0-12, Задача
+    19/20-фикс, §6.2): столько недель назад, сколько задаёт
+    `_HISTORY_WEEKS_BACK` — несколько месяцев, а не вся история тренировок.
+
+    Веха-факт живёт в неделе [week_start, week_start+7), последнее значение
+    недели, если тренировок несколько, — та же честность, что раньше несла
+    _milestones_with_fact: неделя без факта просто отсутствует в результате
+    (дырка в точках, а не точка на нуле). Недельная сетка привязана не к
+    `today`, а к `today + 1 день` — тренировка, завершённая СЕГОДНЯ, тоже
+    факт и обязана попасть в последнюю неделю, а не потеряться на границе;
+    сама граница (today+1) при этом не пропускает ничего датированного
+    будущим — history_points по построению (e1rm_history_points читает
+    только завершённые сессии) в будущем и не бывает, это лишь защита
+    формулы, а не ожидаемый в проде случай. Вехи симуляции по-прежнему
+    начинаются не раньше today+1 (см. repository.future_sessions: `target_
+    date > today`), так что общей недели у двух половин оси нет (history_
+    points отсортированы по возрастанию даты вызывающим кодом).
     """
-    result = []
-    for m in milestones:
-        week_end = m.week_start + timedelta(days=7)
-        in_week = [v for d, v in history_points if m.week_start <= d < week_end]
-        result.append({
-            "week_start": m.week_start.isoformat(),
-            "expected_e1rm": m.expected_e1rm,
-            "actual_e1rm": in_week[-1] if in_week else None,
-        })
+    boundary = today + timedelta(days=1)
+    result: list[tuple[date, float]] = []
+    for i in range(_HISTORY_WEEKS_BACK, 0, -1):
+        week_start = boundary - timedelta(days=7 * i)
+        week_end = week_start + timedelta(days=7)
+        in_week = [v for d, v in history_points if week_start <= d < week_end]
+        if in_week:
+            result.append((week_start, in_week[-1]))
     return result
+
+
+def _timeline_milestones(
+    milestones: list, history_points: list[tuple[date, float]], today: date,
+) -> list[dict]:
+    """Вехи симуляции против факта на одной недельной оси (P0-12, Задача
+    19/20-фикс, §6.2).
+
+    Раньше вехи (`milestones`, из simulate.run) начинались только с первой
+    БУДУЩЕЙ сессии и шли вперёд — факт по определению существует только в
+    прошлом, и потому в единственную неделю симуляции ни разу не попадал:
+    actual_e1rm был вечным None на живом эндпоинте (см. отчёт Задачи 19).
+    Чинится не подгонкой сравнения, а вторым источником точек: прошлое —
+    из истории лифта (_history_weekly_points, та же history_points, что уже
+    читает historical_trend_slope — второй, расходящийся запрос не заводим),
+    будущее — из симуляции, как и раньше. Швом служит `today`: история
+    строго до него, вехи симуляции строго от первой будущей сессии (то есть
+    от today+1 или позже, см. simulate.run/repository.future_sessions) — у
+    двух половин нет общей недели, вторая линия не задваивается.
+
+    Оба поля теперь опциональны и заполняются РОВНО одной из половин:
+    у точки факта нет expected_e1rm (симуляция для прошлого не считается),
+    у вехи плана нет actual_e1rm (факта будущего не существует по
+    определению — поле, которое не может быть заполнено НИКОГДА, здесь не
+    пишется вовсе, а не остаётся вечным null, см. отчёт задачи).
+    """
+    past = [
+        {"week_start": w.isoformat(), "actual_e1rm": v}
+        for w, v in _history_weekly_points(history_points, today)
+    ]
+    future = [
+        {"week_start": m.week_start.isoformat(), "expected_e1rm": m.expected_e1rm}
+        for m in milestones
+    ]
+    return past + future
 
 
 async def build_context(
@@ -423,7 +470,7 @@ async def build_context(
             "plan": round(state["rates"].plan, 3),
             "ceiling": round(state["rates"].ceiling, 3),
         },
-        "milestones": _milestones_with_fact(sim.milestones, history_points),
+        "milestones": _timeline_milestones(sim.milestones, history_points, today),
         "plan_ahead": {
             "target_lift_sessions": len(sessions),
             "sets_per_window": sum(s.prescription_sets for s in sessions[:4]),

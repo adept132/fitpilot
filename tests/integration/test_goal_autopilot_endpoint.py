@@ -3,7 +3,11 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from api.services.goal.service import _milestones_with_fact, build_context
+from api.services.goal.service import (
+    _history_weekly_points,
+    _timeline_milestones,
+    build_context,
+)
 from api.services.goal.types import Milestone
 from api.services.models import (
     PeriodizationProposal,
@@ -121,6 +125,43 @@ async def test_returns_full_shape_when_available(
     assert body["plan_ahead"]["target_lift_sessions"] == 0
     assert body["proposal"] is None
     assert body["last_applied"] is None
+
+
+async def test_payload_carries_past_points_for_lift_with_history(
+    client, auth_headers, test_user, seeded_history, active_block
+):
+    """P0-12, Задача 19/20-фикс, §6.2: seeded_history несёт завершённую
+    тренировку "только что" (finished_at ~30 минут назад) — её e1RM обязан
+    попасть в milestones как точка факта текущей недели, а не потеряться в
+    веках, которые раньше видели только будущее."""
+    await _set_working_e1rm(test_user.id, seeded_history.id, 100.0)
+    goal_id = await _goal(test_user.id, seeded_history.id)
+
+    r = await client.get(f"/goals/{goal_id}/autopilot", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    assert body["available"] is True
+    past = [m for m in body["milestones"] if m["actual_e1rm"] is not None]
+    assert len(past) >= 1
+    assert all(m["expected_e1rm"] is None for m in past)
+
+
+async def test_payload_carries_no_past_points_for_lift_without_history(
+    client, auth_headers, test_user, fresh_exercise, active_block
+):
+    """Тот же экран для лифта БЕЗ единой завершённой тренировки (только
+    вручную выставленный рабочий e1RM, bootstrap-путь scheme_context) не
+    имеет права нарисовать точку факта, которого не было."""
+    await _set_working_e1rm(test_user.id, fresh_exercise.id, 100.0)
+    goal_id = await _goal(test_user.id, fresh_exercise.id)
+
+    r = await client.get(f"/goals/{goal_id}/autopilot", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    assert body["available"] is True
+    assert all(m["actual_e1rm"] is None for m in body["milestones"])
 
 
 # --- can_undo обязан совпадать с воротами undo_goal_decision (Задача 10) ---
@@ -289,27 +330,66 @@ async def test_applied_proposal_of_other_goal_does_not_leak(
     assert ctx_a["last_applied"] is not None
 
 
-def test_milestones_with_fact_fills_actual_only_for_weeks_with_history():
-    """P0-12, Задача 19, §6.2: веха читает факт из истории в своей
-    календарной неделе [week_start, week_start+7); неделя без факта
-    отдаёт None, а не 0 — иначе экран читал бы "рано" как "упал"."""
-    milestones = [
-        Milestone(week_start=date(2026, 3, 2), expected_e1rm=100.0),
-        Milestone(week_start=date(2026, 3, 9), expected_e1rm=101.0),
-        Milestone(week_start=date(2026, 3, 16), expected_e1rm=102.0),
-    ]
-    # Отсортированы по возрастанию — контракт функции (сортирует вызывающий
-    # код, см. build_context).
+# --- P0-12, Задача 19/20-фикс, §6.2: вехи симуляции начинаются только с
+# первой БУДУЩЕЙ сессии — факт по определению существует лишь в прошлом, и
+# потому со старой by-week-matching-логикой actual_e1rm был вечным None на
+# живом эндпоинте (см. отчёт Задачи 19). Чинится вторым источником точек:
+# прошлое — из истории лифта (_history_weekly_points), будущее — из
+# симуляции как и раньше; шов — today.
+
+def test_history_weekly_points_returns_empty_without_history():
+    """Лифт без истории не получает ни одной точки факта — не "рано", а
+    честно "нечего показать"."""
+    assert _history_weekly_points([], date(2026, 3, 20)) == []
+
+
+def test_history_weekly_points_buckets_weekly_before_today():
+    """Недельная сетка привязана к today+1 (последняя неделя — [today-6,
+    today+1)) — тренировка, завершённая СЕГОДНЯ, тоже факт и обязана
+    попасть в последнюю неделю, а не потеряться на границе. Внутри недели
+    побеждает последнее по дате значение; дата на/после today+1 (защита от
+    будущего, которого в history_points в проде не бывает) и глубже
+    _HISTORY_WEEKS_BACK недель назад — не берутся вовсе."""
+    today = date(2026, 3, 20)
     history_points = [
-        (date(2026, 3, 3), 99.0),
-        (date(2026, 3, 5), 100.5),  # та же неделя 1, позже — побеждает как факт
-        (date(2026, 3, 20), 103.0),  # неделя 3
+        (date(2026, 3, 10), 98.0),   # неделя [3-07, 3-14)
+        (date(2026, 3, 19), 100.5),  # неделя [3-14, 3-21) — вчера, попадает в текущую
+        (date(2026, 3, 21), 999.0),  # завтра — за границей today+1, исключается
+        (date(2020, 1, 1), 1.0),     # далеко за пределами lookback-окна
     ]
 
-    result = _milestones_with_fact(milestones, history_points)
+    points = _history_weekly_points(history_points, today)
 
-    assert result[0]["week_start"] == "2026-03-02"
-    assert result[0]["expected_e1rm"] == 100.0
-    assert result[0]["actual_e1rm"] == 100.5
-    assert result[1]["actual_e1rm"] is None
-    assert result[2]["actual_e1rm"] == 103.0
+    assert points == [
+        (date(2026, 3, 7), 98.0),
+        (date(2026, 3, 14), 100.5),
+    ]
+
+
+def test_timeline_milestones_past_and_future_meet_at_today_without_overlap():
+    """Факт (из истории) и план (вехи симуляции) — на одной недельной оси,
+    шов — today: ни одна неделя факта не залезает в будущее, ни одна веха
+    плана не начинается раньше today — иначе график задваивал бы линию.
+    Каждая точка несёт РОВНО одно из двух полей — то, что заполнить нельзя
+    никогда, отсутствует, а не остаётся вечным null."""
+    today = date(2026, 3, 20)
+    history_points = [(date(2026, 3, 10), 98.0), (date(2026, 3, 17), 99.5)]
+    milestones = [
+        Milestone(week_start=date(2026, 3, 23), expected_e1rm=100.0),
+        Milestone(week_start=date(2026, 3, 30), expected_e1rm=101.0),
+    ]
+
+    result = _timeline_milestones(milestones, history_points, today)
+
+    past = [r for r in result if r.get("actual_e1rm") is not None]
+    future = [r for r in result if r.get("expected_e1rm") is not None]
+
+    assert {r["week_start"] for r in past} == {"2026-03-07", "2026-03-14"}
+    assert {r["week_start"] for r in future} == {"2026-03-23", "2026-03-30"}
+    assert not ({r["week_start"] for r in past} & {r["week_start"] for r in future})
+    assert all(date.fromisoformat(r["week_start"]) < today for r in past)
+    assert all(date.fromisoformat(r["week_start"]) >= today for r in future)
+    assert "expected_e1rm" not in past[0]
+    assert "actual_e1rm" not in future[0]
+    # Прошлое перед будущим, обе половины по возрастанию недели.
+    assert [r["week_start"] for r in result] == sorted(r["week_start"] for r in result)

@@ -74,8 +74,16 @@ class GoalRates(BaseModel):
 
 
 class GoalMilestone(BaseModel):
+    """Точка недельной оси «план против факта» (P0-12, §6.2).
+
+    Ровно одно из двух значений заполнено: expected_e1rm — веха симуляции
+    (только будущее), actual_e1rm — факт из истории лифта (только прошлое
+    строго до сегодня). Поле, которое для этой половины оси не может быть
+    заполнено никогда, остаётся null, а не подделывается нулём (см.
+    api/services/goal/service.py::_timeline_milestones).
+    """
     week_start: str
-    expected_e1rm: float
+    expected_e1rm: Optional[float] = None
     actual_e1rm: Optional[float] = None
 
 
