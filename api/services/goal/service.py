@@ -226,7 +226,7 @@ async def evaluate(
 
 
 UNAVAILABLE_NOT_STRENGTH = "Эта цель вне контура плана: её ведёт питание, а не тренировки"
-UNAVAILABLE_NO_DEADLINE = "У цели нет срока — автопилоту нечему не успевать"
+UNAVAILABLE_NO_DEADLINE = "У цели нет срока — успевать не к чему"
 UNAVAILABLE_NO_HISTORY = "Нужно несколько тренировок с этим упражнением, чтобы построить прогноз"
 UNAVAILABLE_NO_BLOCK = "Автопилоту нужен план: разверните блок"
 
