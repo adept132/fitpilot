@@ -1,5 +1,7 @@
 from datetime import datetime, date
-from typing import Optional, List
+from typing import Optional, List, Literal
+
+ExercisePreferenceValue = Literal["favorite", "disliked"]
 
 from pydantic import BaseModel, Field
 
@@ -18,6 +20,9 @@ class ExerciseListItemResponse(BaseModel):
     image_approx: bool = False  # True — фото родственника (техника примерная)
 
 
+    preference: ExercisePreferenceValue | None = None
+
+
 class ExerciseDetailResponse(BaseModel):
     id: int
     name: str
@@ -32,6 +37,19 @@ class ExerciseDetailResponse(BaseModel):
     image_urls: list[str] = []  # Абсолютные URL картинок техники (start/end)
     image_approx: bool = False  # True — картинка родственника (техника примерная)
     note: str | None = None  # Личная заметка текущего пользователя
+
+
+    preference: ExercisePreferenceValue | None = None
+
+
+class ExercisePreferenceRequest(BaseModel):
+    preference: ExercisePreferenceValue
+
+
+class ExercisePreferenceResponse(BaseModel):
+    exercise_id: int
+    exercise_name: str
+    preference: ExercisePreferenceValue
 
 
 class ExerciseNoteRequest(BaseModel):
@@ -96,10 +114,14 @@ class ExerciseSearchItem(BaseModel):
     main_muscle_group: str
     secondary_muscle_groups: Optional[List[str]] = []
     category: str
+    fatigue_tier: int = 2
     equipment_needed: Optional[List[str]] = None
     source: str
     image_url: str | None = None  # Миниатюра техники (первое фото), абсолютный URL
     image_approx: bool = False  # True — фото родственника (техника примерная)
+
+
+    preference: ExercisePreferenceValue | None = None
 
 
 class MuscleGroupItem(BaseModel):
@@ -122,12 +144,16 @@ class ExerciseAlternativeResponse(BaseModel):
     name: str
     main_muscle_group: str
     equipment_needed: List[str]
+    fatigue_tier: int
+    secondary_muscle_groups: List[str] = []
     match_score: int  # <-- Сюда бэкенд положит баллы совпадения
     # Причины совпадения для UI: почему это хорошая замена. Ключи из фикс.
     # набора: "pattern" (тот же паттерн), "direction" (то же направление),
     # "equipment" (пересекается оборудование). Мышца всегда совпадает (жёсткий
     # фильтр) — её фронт показывает из main_muscle_group.
     match_reasons: List[str] = []
+
+    preference: ExercisePreferenceValue | None = None
 
     class Config:
         from_attributes = True

@@ -1038,7 +1038,7 @@ async def get_volume_targets(
 
     if not muscles_in_day:
         # Если по тегу ничего не нашли, отдаем пустой результат, чтобы фронт не упал
-        return VolumeTargetsResponse(day_tag=day_tag, split_duration=blueprint.length_days, targets={})
+        return VolumeTargetsResponse(day_tag=day_tag, split_duration=blueprint.length_days, targets={}, experience_level=profile.experience_level)
 
     targets_response = {}
 
@@ -1056,12 +1056,15 @@ async def get_volume_targets(
             continue
 
         # Формула: (Недельный объем * (Длина сплита / 7)) / Частота активации
-        raw_session_target = (target_weekly_sets * (blueprint.length_days / 7.0)) / frequency
+        cycle_share = blueprint.length_days / 7.0
+        raw_session_target = (target_weekly_sets * cycle_share) / frequency
+        raw_session_floor = (min_floor * cycle_share) / frequency
 
         rounded_target = round(raw_session_target)
+        rounded_floor = round(raw_session_floor)
 
-        # Валидация: не меньше min_floor и не больше max_session_cap
-        final_target = max(min_floor, min(max_session_cap, rounded_target))
+        # Ограничиваем пересчитанным минимумом на сессию и сессионным максимумом.
+        final_target = max(rounded_floor, min(max_session_cap, rounded_target))
 
         targets_response[muscle] = MuscleTarget(
             target_sets=final_target,
@@ -1071,7 +1074,8 @@ async def get_volume_targets(
     return VolumeTargetsResponse(
         day_tag=day_tag,
         split_duration=blueprint.length_days,
-        targets=targets_response
+        targets=targets_response,
+        experience_level=profile.experience_level,
     )
 
 

@@ -642,8 +642,8 @@ class UserRecord(Base):
     __tablename__ = 'user_records'
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False)
-    exercise_id: Mapped[Optional[int]] = mapped_column(ForeignKey('exercises.id'))
-    user_exercise_id: Mapped[Optional[int]] = mapped_column(ForeignKey('user_exercises.id'))
+    exercise_id: Mapped[Optional[int]] = mapped_column(ForeignKey('exercises.id', ondelete='CASCADE'))
+    user_exercise_id: Mapped[Optional[int]] = mapped_column(ForeignKey('user_exercises.id', ondelete='CASCADE'))
     exercise_name: Mapped[str] = mapped_column(String(200), nullable=False)
     record_type: Mapped[str] = mapped_column(nullable=False)  # max_weight, max_reps
     value: Mapped[float] = mapped_column(nullable=False)
@@ -669,6 +669,8 @@ class UserExercisePreference(Base):
     user_exercise: Mapped[Optional["UserExercise"]] = relationship("UserExercise", back_populates="user_preferences")
 
     __table_args__ = (
+        CheckConstraint("preference IN ('favorite', 'disliked')", name='ck_exercise_preference_value'),
+        CheckConstraint('(exercise_id IS NOT NULL) <> (user_exercise_id IS NOT NULL)', name='ck_exercise_preference_target'),
         UniqueConstraint('app_user_id', 'exercise_id', name='unique_user_exercise_pref_ex'),
         UniqueConstraint('app_user_id', 'user_exercise_id', name='unique_user_exercise_pref_user_ex'),
     )

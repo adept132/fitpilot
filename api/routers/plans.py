@@ -1,4 +1,6 @@
 from typing import Optional as _Optional
+from dataclasses import replace
+import copy
 from datetime import date as _date
 from fastapi import APIRouter, Depends, status, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,19 +13,28 @@ from api.services.models import Mesocycle, MesocyclePhase, WorkoutPlan, AppUserP
     WorkoutSession, WorkoutSessionExercise, WorkoutSessionSet
 from api.services.validator import AntiSuicideValidator, PlanExerciseInput
 from api.services.scheduling_engine import SchedulingEngine
-from api.services.models import UserSplit, SplitBlueprint, SplitDaySlot, DayBlueprint, Exercise, UserCalendarDay
+from api.services.models import UserSplit, SplitBlueprint, SplitDaySlot, DayBlueprint, Exercise, UserCalendarDay, UserExercisePreference, AppUserMicrocycle, AdvancedGeneratorPreset
 from api.services.volume_service import VolumeService
 from api.services.plan_generator_service import build_day
+from api.services.plan_generation_insights import (
+    compare_generated_day, explain_day, missing_requested_day_issue,
+    missing_volume_targets_issue,
+)
 from api.services.muscle_keys import key_for_muscle
-from api.services.exercise_selection_engine import SelectionConfig, SelectionPolicy
+from api.services.exercise_selection_engine import SelectionConfig, SelectionPolicy, SelectedExercise
+from api.services.plan_duration import DurationConfig, estimate_duration_seconds, fit_to_duration
 from api.services.progression import repository as progression_repo
 from api.services.progression.engine import plan_exercise
 from api.services.progression.resolve import override_for
 from api.schemas.plan import (
     GeneratePlanRequest, GeneratePlanResponse, GeneratedDayOut, GeneratedExerciseOut,
-    ConfirmPlanRequest, ConfirmPlanResponse,
+    ConfirmPlanRequest, ConfirmPlanResponse, GenerationInputSummary,
+    GenerationComparison, GeneratePlanPreviewRequest, GeneratePlanPreviewResponse,
+    GeneratorPresetCreate, GeneratorPresetUpdate, GeneratorPresetOut,
 )
-from api.schemas.commands import (ApplyCommandsRequest, ApplyCommandsResponse, CommandOut, ClarifyOut)
+from api.schemas.commands import (ApplyCommandsRequest, ApplyCommandsResponse, CommandOut, ClarifyOut,
+                                  GeneratorRuleCreate, GeneratorRuleOut, GeneratorRuleUpdate)
+import uuid
 from api.services.commands.schema import Command, CommandType
 from api.services.commands.parser import parse as parse_comment
 from api.services.commands.executor import apply as apply_commands_exec
@@ -81,6 +92,64 @@ def _allowed_equipment(locations) -> _Optional[set]:
     return allowed or None
 
 
+async def _day_effort_by_tag(db: AsyncSession, app_user_id: int) -> dict[str, str]:
+    """Resolve the active microcycle's tactical effort for generated day tags."""
+    result = await db.execute(select(AppUserMicrocycle).where(
+        AppUserMicrocycle.app_user_id == app_user_id,
+        AppUserMicrocycle.is_active.is_(True),
+    ))
+    microcycle = result.scalars().first()
+    efforts: dict[str, str] = {}
+    if not microcycle:
+        return efforts
+    effort_rank = {"deload": 0, "easy": 1, "medium": 2, "hard": 3, "prefailure": 4, "failure": 5}
+    for value in (microcycle.days_mapping or {}).values():
+        if not isinstance(value, dict):
+            continue
+        tag = str(value.get("tag") or "").strip().lower()
+        effort = str(value.get("type") or "medium").strip().lower()
+        if tag and effort != "rest":
+            efforts[tag] = effort
+            # Repeated-day labels such as "Upper #2" share the generated plan.
+            base_tag = tag.split(" #", 1)[0]
+            current = efforts.get(base_tag)
+            if current is None or effort_rank.get(effort, 2) > effort_rank.get(current, 2):
+                # A shared plan must fit its most demanding occurrence. Separate
+                # repeated-day plans will use their exact tags once enabled.
+                efforts[base_tag] = effort
+    return efforts
+
+
+def _base_day_tag(tag: str) -> str:
+    value = str(tag or "").strip()
+    head, marker, tail = value.rpartition(" #")
+    return head if marker and tail.isdigit() else value
+
+
+async def _day_occurrences(db: AsyncSession, app_user_id: int) -> dict[str, list[tuple[str, str]]]:
+    """Return the actual repeated day labels and effort from the active microcycle."""
+    result = await db.execute(select(AppUserMicrocycle).where(
+        AppUserMicrocycle.app_user_id == app_user_id,
+        AppUserMicrocycle.is_active.is_(True),
+    ))
+    microcycle = result.scalars().first()
+    occurrences: dict[str, list[tuple[str, str]]] = {}
+    if not microcycle:
+        return occurrences
+    for _, value in sorted(
+        (microcycle.days_mapping or {}).items(),
+        key=lambda item: int(item[0]) if str(item[0]).isdigit() else 10_000,
+    ):
+        if not isinstance(value, dict):
+            continue
+        tag = str(value.get("tag") or "").strip()
+        effort = str(value.get("type") or "medium").strip().lower()
+        if not tag or effort == "rest":
+            continue
+        occurrences.setdefault(_base_day_tag(tag).lower(), []).append((tag, effort))
+    return occurrences
+
+
 async def _load_generation_context(db, current_user, blueprint_id):
     prof_res = await db.execute(select(AppUserProfile).where(
         AppUserProfile.app_user_id == current_user.id))
@@ -97,7 +166,11 @@ async def _load_generation_context(db, current_user, blueprint_id):
         blueprint_id = active.blueprint_id
 
     bp_res = await db.execute(
-        select(SplitBlueprint).where(SplitBlueprint.id == blueprint_id).options(
+        select(SplitBlueprint).where(
+            SplitBlueprint.id == blueprint_id,
+            (SplitBlueprint.is_system == True)  # noqa: E712
+            | (SplitBlueprint.author_id == current_user.id),
+        ).options(
             selectinload(SplitBlueprint.slots).selectinload(SplitDaySlot.day)
             .selectinload(DayBlueprint.muscle_targets)))
     blueprint = bp_res.scalar_one_or_none()
@@ -110,6 +183,164 @@ async def _load_generation_context(db, current_user, blueprint_id):
     return profile, blueprint, pool
 
 
+def _generation_input_summary(profile, blueprint, request) -> GenerationInputSummary:
+    budget = profile.volume_budget or {}
+    weekly = budget.get("weekly_targets") or {}
+    weekly_targets = {
+        key: int(value.get("target_sets", 0) if isinstance(value, dict) else value)
+        for key, value in weekly.items()
+    }
+    settings = profile.settings or {}
+    locations = list(settings.get("locations") or ["gym"])
+    allowed = _allowed_equipment(locations)
+    config = request.config
+    resolved_accents = list(dict.fromkeys(
+        config.accent_muscles
+        or ([config.accent_muscle] if config.accent_muscle else [])
+        or list((budget.get("meta") or {}).get("focus_muscles") or [])
+    ))[:2]
+    return GenerationInputSummary(
+        blueprint_id=blueprint.id,
+        split_name=blueprint.name,
+        mode="single_day" if request.day_name else "full",
+        requested_day_name=request.day_name,
+        experience_level=profile.experience_level,
+        training_frequency=getattr(profile, "training_frequency", 3),
+        microcycle_length=getattr(profile, "microcycle_length", blueprint.length_days),
+        weekly_targets=weekly_targets,
+        focus_muscles=list((budget.get("meta") or {}).get("focus_muscles") or []),
+        volume_distribution=(budget.get("meta") or {}).get("distribution_type"),
+        equipment_locations=locations,
+        equipment_unrestricted=allowed is None,
+        allowed_equipment=sorted(allowed or []),
+        prehab_flags=list(settings.get("prehab_flags") or []),
+        duration_minutes=config.duration_minutes,
+        accent_muscle=config.accent_muscle,
+        accent_muscles=resolved_accents,
+        repeated_days_mode=config.repeated_days_mode,
+        use_supersets=config.use_supersets,
+        max_superset_size=config.max_superset_size,
+        timer_mode=config.timer_mode,
+        fixed_rest_seconds=config.fixed_rest_seconds,
+        day_effort=config.day_effort,
+    )
+
+
+async def _generation_comparison(db, current_user, blueprint, days, target_date, single_day=False):
+    today = _date.today()
+    applied_from = max(target_date or today, today)
+    generated_tags = {
+        tag.lower()
+        for day in days
+        for tag in (day.schedule_tags or [day.day_tag])
+    }
+
+    split_result = await db.execute(
+        select(UserSplit).where(
+            UserSplit.app_user_id == current_user.id,
+            UserSplit.is_active == True,  # noqa: E712
+            UserSplit.blueprint_id == blueprint.id,
+        )
+    )
+    user_split = split_result.scalar_one_or_none()
+    split_plan_ids: set[int] = set()
+    if user_split:
+        slot_by_tag = {
+            slot.day.name.lower(): str(slot.day_order)
+            for slot in blueprint.slots
+        }
+        selected = user_split.selected_plans or {}
+        split_plan_ids = {
+            int(selected[key])
+            for tag, key in slot_by_tag.items()
+            if tag in generated_tags and selected.get(key) is not None
+        }
+
+    calendar_days = list((await db.execute(
+        select(UserCalendarDay).where(
+            UserCalendarDay.app_user_id == current_user.id,
+            UserCalendarDay.target_date >= applied_from,
+            UserCalendarDay.is_rest_day == False,  # noqa: E712
+            UserCalendarDay.status == "planned",
+            UserCalendarDay.actual_workout_session_id.is_(None),
+            UserCalendarDay.day_tag.is_not(None),
+        )
+    )).scalars().all())
+    calendar_days.sort(key=lambda day: day.target_date)
+    calendar_plan_ids = {
+        int(day.plan_id) for day in calendar_days
+        if (day.day_tag or "").lower() in generated_tags and day.plan_id is not None
+    }
+    plan_ids = split_plan_ids | calendar_plan_ids
+    plans = []
+    if plan_ids:
+        plans = list((await db.execute(
+            select(WorkoutPlan)
+            .where(
+                WorkoutPlan.app_user_id == current_user.id,
+                WorkoutPlan.id.in_(plan_ids),
+            )
+            .options(
+                selectinload(WorkoutPlan.exercises)
+                .selectinload(WorkoutPlanExercise.exercise)
+            )
+        )).scalars().all())
+    missing_plan_ids = plan_ids - {plan.id for plan in plans}
+    if missing_plan_ids:
+        split_plan_ids -= missing_plan_ids
+        calendar_plan_ids -= missing_plan_ids
+
+    plans_by_tag: dict[str, list[WorkoutPlan]] = {}
+    for plan in plans:
+        plans_by_tag.setdefault(plan.day_tag.lower(), []).append(plan)
+    preferred_plan_by_tag = {}
+    for calendar_day in calendar_days:
+        tag = (calendar_day.day_tag or "").lower()
+        if tag in generated_tags and calendar_day.plan_id is not None:
+            preferred_plan_by_tag.setdefault(tag, int(calendar_day.plan_id))
+    for tag, grouped in plans_by_tag.items():
+        preferred_id = preferred_plan_by_tag.get(tag)
+        grouped.sort(key=lambda plan: (plan.id != preferred_id, plan.id))
+    sources = {}
+    for plan_id in plan_ids:
+        in_calendar = plan_id in calendar_plan_ids
+        in_split = plan_id in split_plan_ids
+        sources[plan_id] = (
+            "calendar_and_split" if in_calendar and in_split
+            else "calendar" if in_calendar else "split"
+        )
+    dates_by_tag: dict[str, list[_date]] = {}
+    for calendar_day in calendar_days:
+        tag = (calendar_day.day_tag or "").lower()
+        if tag in generated_tags:
+            dates_by_tag.setdefault(tag, []).append(calendar_day.target_date)
+
+    comparisons = []
+    for day in days:
+        tags = [tag.lower() for tag in (day.schedule_tags or [day.day_tag])]
+        previous_plans = []
+        affected_dates = []
+        for tag in tags:
+            previous_plans.extend(plans_by_tag.get(tag, []))
+            affected_dates.extend(dates_by_tag.get(tag, []))
+        unique_plans = list({plan.id: plan for plan in previous_plans}.values())
+        comparisons.append(compare_generated_day(
+            day, unique_plans, sources, sorted(set(affected_dates)),
+        ))
+    all_blueprint_tags = list(dict.fromkeys(
+        slot.day.name for slot in sorted(blueprint.slots, key=lambda slot: slot.day_order)
+        if slot.day.name.lower() not in generated_tags
+        and (slot.day.template_type.value if hasattr(slot.day.template_type, "value") else str(slot.day.template_type))
+        not in ("active_rest", "rest")
+    ))
+    return GenerationComparison(
+        applied_from=applied_from,
+        mode="single_day" if single_day else "full",
+        days=comparisons,
+        untouched_day_tags=all_blueprint_tags,
+    )
+
+
 @router.post("/generate", response_model=GeneratePlanResponse)
 async def generate_plan(request: GeneratePlanRequest,
                         db: AsyncSession = Depends(get_db),
@@ -119,18 +350,53 @@ async def generate_plan(request: GeneratePlanRequest,
 
     allowed = _allowed_equipment((profile.settings or {}).get("locations"))
     prehab = (profile.settings or {}).get("prehab_flags", [])
+    # Endpoint tests use a minimal sentinel instead of an AsyncSession; production
+    # always has execute(). Keeping the preference layer optional also makes the
+    # pure generator usable by scripts that do not have a user context.
+    preference_rows = []
+    if callable(getattr(db, "execute", None)):
+        preference_rows = (await db.execute(select(
+            UserExercisePreference.exercise_id, UserExercisePreference.preference
+        ).where(
+            UserExercisePreference.app_user_id == current_user.id,
+            UserExercisePreference.exercise_id.is_not(None),
+        ))).all()
+    favorite_ids = {exercise_id for exercise_id, value in preference_rows if value == "favorite"}
+    disliked_ids = {exercise_id for exercise_id, value in preference_rows if value == "disliked"}
+    resolved_accents = list(dict.fromkeys(
+        request.config.accent_muscles
+        or ([request.config.accent_muscle] if request.config.accent_muscle else [])
+        or list(((profile.volume_budget or {}).get("meta") or {}).get("focus_muscles") or [])
+    ))[:2]
     cfg = SelectionConfig(use_supersets=request.config.use_supersets,
+                          max_superset_size=request.config.max_superset_size,
                           accent_muscle=request.config.accent_muscle,
+                          accent_muscles=tuple(resolved_accents),
                           duration_minutes=request.config.duration_minutes,
-                          seed=request.config.seed)
+                          seed=request.config.seed,
+                          favorite_exercise_ids=favorite_ids,
+                          disliked_exercise_ids=disliked_ids)
+    effort_by_tag = (
+        await _day_effort_by_tag(db, current_user.id)
+        if callable(getattr(db, "execute", None)) else {}
+    )
+    occurrences_by_tag = (
+        await _day_occurrences(db, current_user.id)
+        if callable(getattr(db, "execute", None)) else {}
+    )
 
     seen: set = set()
     days_out: list[GeneratedDayOut] = []
+    original_targets_by_tag: dict[str, dict[str, int]] = {}
+    generation_issues = []
+    requested_day_exists = False
     for slot in sorted(blueprint.slots, key=lambda s: s.day_order):
         day_bp = slot.day
         # Single-day mode: skip every day except the requested one.
-        if request.day_name and day_bp.name != request.day_name:
+        if request.day_name and day_bp.name.lower() != _base_day_tag(request.day_name).lower():
             continue
+        if request.day_name:
+            requested_day_exists = True
         tmpl = day_bp.template_type.value if hasattr(day_bp.template_type, "value") else str(day_bp.template_type)
         is_rest = tmpl in ("active_rest", "rest") or not day_bp.muscle_targets
         # Dedup and tag by the day's NAME, not the template value: the scheduler
@@ -144,19 +410,268 @@ async def generate_plan(request: GeneratePlanRequest,
         targets_raw = await VolumeService.calculate_session_targets(db, current_user.id, day_bp.name)
         targets = {k: v["target_sets"] for k, v in targets_raw.items()}
         if not targets:
+            generation_issues.append(missing_volume_targets_issue(day_bp.name))
             continue
-        gen = build_day(day_bp.name, day_bp.name, targets, pool, allowed, prehab,
-                        profile.experience_level, cfg, SelectionPolicy())
-        days_out.append(GeneratedDayOut(
-            day_tag=gen.day_tag, day_name=gen.day_name, coverage=gen.coverage,
-            warnings=gen.warnings,
-            exercises=[GeneratedExerciseOut(
-                exercise_id=e.exercise_id, name=e.name, target_sets=e.sets,
-                order_index=e.order_index, superset_group_id=e.superset_group_id,
-                fatigue_tier=e.fatigue_tier, primary_muscle=e.primary_muscle,
-                secondary_muscle=e.secondary_muscle,
-                override_reps=None, override_rir=None) for e in gen.exercises]))
-    return GeneratePlanResponse(days=days_out)
+        occurrences = occurrences_by_tag.get(day_bp.name.lower()) or [
+            (day_bp.name, effort_by_tag.get(day_bp.name.lower(), request.config.day_effort))
+        ]
+        if request.day_name:
+            requested_occurrence = next(
+                (item for item in occurrences if item[0].lower() == request.day_name.lower()),
+                (request.day_name, effort_by_tag.get(request.day_name.lower(), request.config.day_effort)),
+            )
+            variants = [requested_occurrence]
+        else:
+            variants = occurrences if request.config.repeated_days_mode == "separate" else [
+                (day_bp.name, effort_by_tag.get(day_bp.name.lower(), request.config.day_effort))
+            ]
+        for variant_index, (variant_tag, effort) in enumerate(variants):
+            variant_cfg = replace(
+                cfg,
+                seed=(cfg.seed + variant_index if cfg.seed is not None else None),
+            )
+            gen = build_day(variant_tag, variant_tag, targets, pool, allowed, prehab,
+                            profile.experience_level, variant_cfg, SelectionPolicy(),
+                            timer_mode=request.config.timer_mode,
+                            fixed_rest_seconds=request.config.fixed_rest_seconds,
+                            day_effort=effort)
+            schedule_tags = [variant_tag] if request.day_name else (
+                [tag for tag, _ in occurrences]
+                if request.config.repeated_days_mode == "shared"
+                else [variant_tag]
+            )
+            original_targets_by_tag[variant_tag.lower()] = targets
+            generated_day = GeneratedDayOut(
+                day_tag=gen.day_tag, day_name=gen.day_name,
+                schedule_tags=schedule_tags,
+                coverage=gen.coverage, warnings=gen.warnings,
+                estimated_duration_seconds=gen.estimated_duration_seconds,
+                duration_limit_met=gen.duration_limit_met,
+                exercises=[GeneratedExerciseOut(
+                    exercise_id=e.exercise_id, name=e.name, target_sets=e.sets,
+                    order_index=e.order_index, superset_group_id=e.superset_group_id,
+                    fatigue_tier=e.fatigue_tier, primary_muscle=e.primary_muscle,
+                    secondary_muscle=e.secondary_muscle,
+                    override_reps=None, override_rir=None,
+                    preference="favorite" if e.exercise_id in favorite_ids else None) for e in gen.exercises])
+            days_out.append(_apply_saved_generator_rules(
+                generated_day, profile, blueprint.id, pool, allowed, prehab,
+                request.config, resolved_accents, favorite_ids, effort,
+            ))
+    inputs = _generation_input_summary(profile, blueprint, request)
+    comparison = await _generation_comparison(
+        db, current_user, blueprint, days_out, request.target_date,
+        single_day=request.day_name is not None,
+    )
+    issues = list(generation_issues)
+    if request.day_name and not requested_day_exists:
+        issues.append(missing_requested_day_issue(request.day_name))
+    for day in days_out:
+        issues.extend(explain_day(
+            day,
+            original_targets_by_tag.get(day.day_tag.lower(), {}),
+            pool,
+            allowed,
+            prehab,
+            request.config.duration_minutes,
+            resolved_accents,
+            disliked_ids,
+        ))
+    return GeneratePlanResponse(
+        days=days_out,
+        inputs=inputs,
+        comparison=comparison,
+        issues=issues,
+    )
+
+
+@router.post("/generate/preview", response_model=GeneratePlanPreviewResponse)
+async def preview_generated_plan(
+    request: GeneratePlanPreviewRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_app_user),
+):
+    """Refresh explanations after chat/manual draft edits without saving."""
+    profile, blueprint, pool = await _load_generation_context(
+        db, current_user, request.blueprint_id,
+    )
+    allowed = _allowed_equipment((profile.settings or {}).get("locations"))
+    prehab = (profile.settings or {}).get("prehab_flags", [])
+    inputs = _generation_input_summary(profile, blueprint, request)
+    comparison = await _generation_comparison(
+        db, current_user, blueprint, request.days, request.target_date,
+        single_day=request.day_name is not None,
+    )
+    issues = []
+    day_blueprints = {slot.day.name.lower(): slot.day for slot in blueprint.slots}
+    pool_by_id = {exercise.id: exercise for exercise in pool}
+    refreshed_days = []
+    effort_by_tag = await _day_effort_by_tag(db, current_user.id)
+    for day in request.days:
+        selected = [SelectedExercise(
+            exercise_id=exercise.exercise_id,
+            name=exercise.name,
+            sets=exercise.target_sets,
+            order_index=exercise.order_index,
+            superset_group_id=exercise.superset_group_id,
+            fatigue_tier=exercise.fatigue_tier,
+            primary_muscle=exercise.primary_muscle,
+            secondary_muscle=exercise.secondary_muscle,
+        ) for exercise in day.exercises]
+        if any(exercise.exercise_id not in pool_by_id for exercise in selected):
+            raise HTTPException(400, "Одно из упражнений больше недоступно в справочнике")
+        group_sizes: dict[str, int] = {}
+        for exercise in day.exercises:
+            if exercise.superset_group_id:
+                key = str(exercise.superset_group_id)
+                group_sizes[key] = group_sizes.get(key, 0) + 1
+        if any(size > request.config.max_superset_size for size in group_sizes.values()):
+            raise HTTPException(
+                400,
+                f"В одном суперсете может быть не больше {request.config.max_superset_size} упражнений",
+            )
+        AntiSuicideValidator.validate_workout_plan(
+            profile.experience_level if profile else "beginner",
+            [PlanExerciseInput(
+                exercise_id=exercise.exercise_id,
+                fatigue_tier=exercise.fatigue_tier,
+                primary_muscle=exercise.primary_muscle,
+                secondary_muscle=exercise.secondary_muscle,
+                target_sets=exercise.target_sets,
+                superset_group_id=exercise.superset_group_id,
+            ) for exercise in day.exercises],
+        )
+        effort = effort_by_tag.get(_base_day_tag(day.day_tag).lower(), request.config.day_effort)
+        estimated_seconds = estimate_duration_seconds(
+            selected,
+            pool_by_id,
+            DurationConfig(
+                timer_mode=request.config.timer_mode,
+                fixed_rest_seconds=request.config.fixed_rest_seconds,
+                day_effort=effort,
+            ),
+        )
+        refreshed_day = day.model_copy(update={
+            "estimated_duration_seconds": estimated_seconds,
+            "duration_limit_met": request.config.duration_minutes is None
+                or estimated_seconds <= request.config.duration_minutes * 60,
+        })
+        refreshed_days.append(refreshed_day)
+        day_bp = day_blueprints.get(_base_day_tag(day.day_tag).lower())
+        targets = {}
+        if day_bp:
+            raw = await VolumeService.calculate_session_targets(
+                db, current_user.id, day_bp.name,
+            )
+            targets = {key: value["target_sets"] for key, value in raw.items()}
+        issues.extend(explain_day(
+            refreshed_day, targets, pool, allowed, prehab,
+            request.config.duration_minutes,
+            request.config.accent_muscles or (
+                [request.config.accent_muscle] if request.config.accent_muscle else []
+            ),
+        ))
+    return GeneratePlanPreviewResponse(
+        days=refreshed_days,
+        inputs=inputs,
+        comparison=comparison,
+        issues=issues,
+    )
+
+
+@router.get("/generate/presets", response_model=list[GeneratorPresetOut])
+async def list_generator_presets(
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_app_user),
+):
+    result = await db.execute(select(AdvancedGeneratorPreset).where(
+        AdvancedGeneratorPreset.app_user_id == current_user.id,
+    ).order_by(AdvancedGeneratorPreset.is_default.desc(), AdvancedGeneratorPreset.created_at.desc()))
+    return list(result.scalars().all())
+
+
+@router.post("/generate/presets", response_model=GeneratorPresetOut, status_code=status.HTTP_201_CREATED)
+async def create_generator_preset(
+    payload: GeneratorPresetCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_app_user),
+):
+    name = payload.name.strip()
+    existing = (await db.execute(select(AdvancedGeneratorPreset).where(
+        AdvancedGeneratorPreset.app_user_id == current_user.id,
+        AdvancedGeneratorPreset.name == name,
+    ))).scalar_one_or_none()
+    if existing:
+        raise HTTPException(409, "Пресет с таким названием уже существует")
+    if payload.is_default:
+        for preset in (await db.execute(select(AdvancedGeneratorPreset).where(
+            AdvancedGeneratorPreset.app_user_id == current_user.id,
+            AdvancedGeneratorPreset.is_default.is_(True),
+        ))).scalars().all():
+            preset.is_default = False
+    preset = AdvancedGeneratorPreset(
+        app_user_id=current_user.id, name=name,
+        settings=payload.settings, is_default=payload.is_default,
+    )
+    db.add(preset)
+    await db.commit()
+    await db.refresh(preset)
+    return preset
+
+
+@router.patch("/generate/presets/{preset_id}", response_model=GeneratorPresetOut)
+async def update_generator_preset(
+    preset_id: int,
+    payload: GeneratorPresetUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_app_user),
+):
+    preset = (await db.execute(select(AdvancedGeneratorPreset).where(
+        AdvancedGeneratorPreset.id == preset_id,
+        AdvancedGeneratorPreset.app_user_id == current_user.id,
+    ))).scalar_one_or_none()
+    if not preset:
+        raise HTTPException(404, "Пресет не найден")
+    if payload.name is not None:
+        name = payload.name.strip()
+        duplicate = (await db.execute(select(AdvancedGeneratorPreset).where(
+            AdvancedGeneratorPreset.app_user_id == current_user.id,
+            AdvancedGeneratorPreset.name == name,
+            AdvancedGeneratorPreset.id != preset_id,
+        ))).scalar_one_or_none()
+        if duplicate:
+            raise HTTPException(409, "Пресет с таким названием уже существует")
+        preset.name = name
+    if payload.settings is not None:
+        preset.settings = payload.settings
+    if payload.is_default is not None:
+        if payload.is_default:
+            for other in (await db.execute(select(AdvancedGeneratorPreset).where(
+                AdvancedGeneratorPreset.app_user_id == current_user.id,
+                AdvancedGeneratorPreset.is_default.is_(True),
+                AdvancedGeneratorPreset.id != preset_id,
+            ))).scalars().all():
+                other.is_default = False
+        preset.is_default = payload.is_default
+    await db.commit()
+    await db.refresh(preset)
+    return preset
+
+
+@router.delete("/generate/presets/{preset_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_generator_preset(
+    preset_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_app_user),
+):
+    preset = (await db.execute(select(AdvancedGeneratorPreset).where(
+        AdvancedGeneratorPreset.id == preset_id,
+        AdvancedGeneratorPreset.app_user_id == current_user.id,
+    ))).scalar_one_or_none()
+    if not preset:
+        raise HTTPException(404, "Пресет не найден")
+    await db.delete(preset)
+    await db.commit()
 
 @router.get("/")
 def get_plans(db: Session = Depends(get_db), current_user=Depends(get_current_app_user)):
@@ -227,7 +742,8 @@ async def create_workout_plan(  # <--- СДЕЛАЛИ ASYNC
         new_ex = WorkoutPlanExercise(
             plan_id=new_plan.id, exercise_id=ex.exercise_id,
             order_index=ex.order_index, superset_group_id=ex.superset_group_id,
-            target_sets=ex.target_sets
+            target_sets=ex.target_sets, override_reps=ex.override_reps,
+            override_rir=ex.override_rir,
         )
         db.add(new_ex)
 
@@ -270,7 +786,8 @@ def update_workout_plan(plan_id: int, plan_data: WorkoutPlanCreate, db: Session 
         new_ex = WorkoutPlanExercise(
             plan_id=plan.id, exercise_id=ex.exercise_id,
             order_index=ex.order_index, superset_group_id=ex.superset_group_id,
-            target_sets=ex.target_sets
+            target_sets=ex.target_sets, override_reps=ex.override_reps,
+            override_rir=ex.override_rir,
         )
         db.add(new_ex)
 
@@ -296,6 +813,156 @@ async def _load_commands_context(db, current_user, blueprint_id):
     pool_res = await db.execute(select(Exercise).where(
         (Exercise.source == "default") | (Exercise.app_user_id == current_user.id)))
     return profile, list(pool_res.scalars().all())
+
+
+def _profile_generator_rules(profile) -> list[dict]:
+    return copy.deepcopy((((profile.settings or {}) if profile else {}).get("generator_rules") or []))
+
+
+def _rule_matches(rule: dict, blueprint_id, day_tag: str) -> bool:
+    if not rule.get("enabled", True):
+        return False
+    scope = rule.get("scope")
+    if scope == "all":
+        return True
+    if scope == "split":
+        return str(rule.get("blueprint_id") or "") == str(blueprint_id or "")
+    if scope == "day":
+        return (
+            str(rule.get("blueprint_id") or "") == str(blueprint_id or "")
+            and _base_day_tag(rule.get("day_tag") or "").lower() == _base_day_tag(day_tag).lower()
+        )
+    return False
+
+
+def _coverage_after_commands(base_coverage: dict, exercises: list[dict]) -> dict:
+    filled_by_key: dict[str, int] = {}
+    for exercise in exercises:
+        key = key_for_muscle(exercise.get("primary_muscle"))
+        if key:
+            filled_by_key[key] = filled_by_key.get(key, 0) + int(exercise.get("target_sets") or 0)
+    coverage = {
+        key: {"target": value.get("target", 0), "filled": filled_by_key.get(key, 0)}
+        for key, value in (base_coverage or {}).items()
+    }
+    for key, filled in filled_by_key.items():
+        coverage.setdefault(key, {"target": 0, "filled": filled})
+    return coverage
+
+
+def _apply_saved_generator_rules(
+    day: GeneratedDayOut, profile, blueprint_id, pool, allowed, prehab,
+    generation_config=None, accent_muscles=(), favorite_ids=None, day_effort=None,
+):
+    matching = [
+        rule for rule in _profile_generator_rules(profile)
+        if _rule_matches(rule, blueprint_id, day.day_tag)
+    ]
+    if not matching:
+        return day
+    commands = [Command.from_dict(rule["command"]) for rule in matching]
+    exercises, summaries, warnings = apply_commands_exec(
+        [exercise.model_dump() for exercise in day.exercises], commands, pool,
+        {"allowed_equipment": allowed, "prehab_flags": prehab},
+        profile.experience_level if profile else "beginner",
+    )
+    estimated_seconds = day.estimated_duration_seconds
+    duration_limit_met = day.duration_limit_met
+    if generation_config is not None:
+        selected = [SelectedExercise(
+            exercise_id=exercise["exercise_id"], name=exercise["name"],
+            sets=exercise["target_sets"], order_index=exercise["order_index"],
+            superset_group_id=exercise.get("superset_group_id"),
+            fatigue_tier=exercise["fatigue_tier"], primary_muscle=exercise["primary_muscle"],
+            secondary_muscle=exercise.get("secondary_muscle"),
+        ) for exercise in exercises]
+        pool_by_id = {exercise.id: exercise for exercise in pool}
+        if all(exercise.exercise_id in pool_by_id for exercise in selected):
+            duration_result = fit_to_duration(
+                selected, pool_by_id, generation_config.duration_minutes,
+                DurationConfig(
+                    timer_mode=generation_config.timer_mode,
+                    fixed_rest_seconds=generation_config.fixed_rest_seconds,
+                    day_effort=day_effort or generation_config.day_effort,
+                ),
+                accent_muscles=accent_muscles,
+                favorite_ids=favorite_ids or set(),
+            )
+            exercise_by_id = {exercise["exercise_id"]: exercise for exercise in exercises}
+            exercises = [{
+                **exercise_by_id[row.exercise_id],
+                "target_sets": row.sets,
+                "order_index": row.order_index,
+                "superset_group_id": row.superset_group_id,
+            } for row in duration_result.exercises]
+            estimated_seconds = duration_result.estimated_seconds
+            duration_limit_met = duration_result.limit_met
+    applied = [f"Постоянное правило: {summary}" for summary in summaries if summary]
+    return GeneratedDayOut(
+        day_tag=day.day_tag,
+        day_name=day.day_name,
+        schedule_tags=day.schedule_tags,
+        exercises=exercises,
+        coverage=_coverage_after_commands(day.coverage, exercises),
+        warnings=[*day.warnings, *applied, *warnings],
+        estimated_duration_seconds=estimated_seconds,
+        duration_limit_met=duration_limit_met,
+    )
+
+
+@router.get("/commands/rules", response_model=list[GeneratorRuleOut])
+async def list_generator_rules(db: AsyncSession = Depends(get_db), current_user=Depends(get_current_app_user)):
+    profile = (await db.execute(select(AppUserProfile).where(
+        AppUserProfile.app_user_id == current_user.id,
+    ))).scalar_one_or_none()
+    return _profile_generator_rules(profile)
+
+
+@router.post("/commands/rules", response_model=GeneratorRuleOut, status_code=status.HTTP_201_CREATED)
+async def create_generator_rule(payload: GeneratorRuleCreate, db: AsyncSession = Depends(get_db), current_user=Depends(get_current_app_user)):
+    profile = (await db.execute(select(AppUserProfile).where(
+        AppUserProfile.app_user_id == current_user.id,
+    ))).scalar_one_or_none()
+    if not profile:
+        raise HTTPException(404, "Профиль не найден")
+    if payload.scope in ("day", "split") and not payload.blueprint_id:
+        raise HTTPException(400, "Для этой области нужен сплит")
+    if payload.scope == "day" and not payload.day_tag:
+        raise HTTPException(400, "Для правила дня нужен тип дня")
+    rule = {
+        "id": str(uuid.uuid4()), "command": payload.command.model_dump(),
+        "scope": payload.scope, "blueprint_id": payload.blueprint_id,
+        "day_tag": payload.day_tag, "enabled": True,
+    }
+    settings = dict(profile.settings or {})
+    settings["generator_rules"] = [*_profile_generator_rules(profile), rule]
+    profile.settings = settings
+    await db.commit()
+    return rule
+
+
+@router.patch("/commands/rules/{rule_id}", response_model=GeneratorRuleOut)
+async def update_generator_rule(rule_id: str, payload: GeneratorRuleUpdate, db: AsyncSession = Depends(get_db), current_user=Depends(get_current_app_user)):
+    profile = (await db.execute(select(AppUserProfile).where(AppUserProfile.app_user_id == current_user.id))).scalar_one_or_none()
+    rules = _profile_generator_rules(profile)
+    rule = next((item for item in rules if item.get("id") == rule_id), None)
+    if not rule:
+        raise HTTPException(404, "Правило не найдено")
+    rule["enabled"] = payload.enabled
+    settings = dict(profile.settings or {}); settings["generator_rules"] = rules; profile.settings = settings
+    await db.commit()
+    return rule
+
+
+@router.delete("/commands/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_generator_rule(rule_id: str, db: AsyncSession = Depends(get_db), current_user=Depends(get_current_app_user)):
+    profile = (await db.execute(select(AppUserProfile).where(AppUserProfile.app_user_id == current_user.id))).scalar_one_or_none()
+    rules = _profile_generator_rules(profile)
+    filtered = [item for item in rules if item.get("id") != rule_id]
+    if len(filtered) == len(rules):
+        raise HTTPException(404, "Правило не найдено")
+    settings = dict(profile.settings or {}); settings["generator_rules"] = filtered; profile.settings = settings
+    await db.commit()
 
 
 @router.post("/commands/apply", response_model=ApplyCommandsResponse)
@@ -331,17 +998,7 @@ async def apply_commands(request: ApplyCommandsRequest, db: AsyncSession = Depen
     # key_for_muscle) to that EN system key. Each base-coverage key keeps its
     # original (fixed) target; keys that only appear post-edit (e.g. via
     # ADD_MUSCLE) are added with target=0 so newly-covered muscles show up too.
-    base_coverage = request.base_draft.coverage or {}
-    filled_by_key: dict = {}
-    for e in final_ex:
-        k = key_for_muscle(e.get("primary_muscle"))
-        if k:
-            filled_by_key[k] = filled_by_key.get(k, 0) + (e.get("target_sets") or 0)
-    coverage = {key: {"target": val.get("target", 0), "filled": filled_by_key.get(key, 0)}
-                for key, val in base_coverage.items()}
-    for key, filled in filled_by_key.items():
-        if key not in coverage:
-            coverage[key] = {"target": 0, "filled": filled}
+    coverage = _coverage_after_commands(request.base_draft.coverage, final_ex)
 
     # NOTE: pydantic v2's `model_copy(update=...)` does NOT validate/coerce the
     # updated fields, and BaseModel construction skips re-validating a field
@@ -542,7 +1199,11 @@ async def confirm_generated_plan(request: ConfirmPlanRequest,
             _bind_generated_plans_to_split(user_split, created_plans)
         # Назначаем только созданные типы дней и только начиная с выбранной
         # даты. Остальные планы и прошлые дни остаются нетронутыми.
-        by_tag = {plan.day_tag.lower(): plan.id for plan in created_plans}
+        by_tag = {
+            tag.lower(): plan.id
+            for day, plan in zip(request.days, created_plans)
+            for tag in (day.schedule_tags or [day.day_tag])
+        }
         calendar_days = list((await db.execute(
             select(UserCalendarDay).where(
                 UserCalendarDay.app_user_id == current_user.id,
@@ -564,5 +1225,7 @@ async def confirm_generated_plan(request: ConfirmPlanRequest,
         status="success",
         created_plan_ids=created,
         applied_from=applied_from,
-        updated_day_tags=[day.day_tag for day in request.days],
+        updated_day_tags=list(dict.fromkeys(
+            tag for day in request.days for tag in (day.schedule_tags or [day.day_tag])
+        )),
     )

@@ -37,6 +37,36 @@ def test_forms_multiple_supersets_partners_adjacent():
         assert idxs[-1] - idxs[0] == len(idxs) - 1  # members are consecutive
 
 
+def test_triple_superset_requires_pairwise_muscle_compatibility():
+    items = [
+        sel(1, 2, "Грудь", "Трицепс"),
+        sel(2, 3, "Средняя часть спины", "Бицепс"),
+        sel(3, 3, "Икры"),
+        # Overlaps the first member through triceps, so it cannot be the third.
+        sel(4, 3, "Трицепс"),
+    ]
+    out = group_supersets(items, random.Random(4), max_size=3)
+    groups = {}
+    for row in out:
+        if row.superset_group_id:
+            groups.setdefault(row.superset_group_id, []).append(row)
+
+    triple = next(members for members in groups.values() if len(members) == 3)
+    assert {row.exercise_id for row in triple} == {1, 2, 3}
+    assert all(row.exercise_id != 4 for row in triple)
+
+
+def test_triple_mode_falls_back_to_pair_when_no_third_is_compatible():
+    items = [
+        sel(1, 2, "Грудь"),
+        sel(2, 3, "Средняя часть спины"),
+        sel(3, 3, "Грудь"),
+    ]
+    out = group_supersets(items, random.Random(4), max_size=3)
+    grouped = [row for row in out if row.superset_group_id]
+    assert len(grouped) == 2
+
+
 def test_supersets_via_select_exercises_are_adjacent():
     from types import SimpleNamespace
     from api.services.exercise_pattern_tags import ExerciseAction

@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 
 from api.services import equipment
 from api.services.exercise_utils import get_base_exercise_query
-from api.services.models import Exercise, WorkoutSession, WorkoutSessionExercise
+from api.services.models import Exercise, WorkoutSession, WorkoutSessionExercise, UserExercisePreference
 from api.services.exercise_matcher import ExerciseMatcher
 
 
@@ -55,6 +55,32 @@ def matches_equipment_filter(equipment_needed, equipment_filter: str | None) -> 
 
 
 class ExerciseSearchService:
+    @staticmethod
+    async def preference_map(session: AsyncSession, user_id: int) -> dict[int, str]:
+        result = await session.execute(
+            select(UserExercisePreference.exercise_id, UserExercisePreference.preference).where(
+                UserExercisePreference.app_user_id == user_id,
+                UserExercisePreference.exercise_id.is_not(None),
+            )
+        )
+        return {exercise_id: preference for exercise_id, preference in result.all()}
+
+    @staticmethod
+    def sort_and_mark_preferences(items, preferences: dict[int, str]):
+        """Stable partition that preserves relevance inside each preference group."""
+        rank = {"favorite": 0, None: 1, "disliked": 2}
+        marked = []
+        for index, item in enumerate(items):
+            exercise_id = item.get("id") if isinstance(item, dict) else item.id
+            preference = preferences.get(exercise_id)
+            if isinstance(item, dict):
+                item = {**item, "preference": preference}
+            else:
+                setattr(item, "_user_preference", preference)
+            marked.append((rank.get(preference, 1), index, item))
+        marked.sort(key=lambda row: (row[0], row[1]))
+        return [row[2] for row in marked]
+
     @staticmethod
     async def _get_recent_exercise_ids(
         session: AsyncSession,
@@ -142,7 +168,8 @@ class ExerciseSearchService:
                     if item.get("source") in (source, "user")
                 ]
 
-            return filtered
+            preferences = await ExerciseSearchService.preference_map(session, user_id)
+            return ExerciseSearchService.sort_and_mark_preferences(filtered, preferences)
 
         stmt = (
             get_base_exercise_query(user_id)
@@ -198,7 +225,8 @@ class ExerciseSearchService:
                 if item.source == source
             ]
 
-        return filtered_items
+        preferences = await ExerciseSearchService.preference_map(session, user_id)
+        return ExerciseSearchService.sort_and_mark_preferences(filtered_items, preferences)
 
     @staticmethod
     async def get_muscle_groups(

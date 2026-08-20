@@ -14,7 +14,7 @@ from api.services.exercise_utils import get_base_exercise_query
 from api.services.fatigue_tiers import calculate_fatigue_tier
 from api.services.heuristics import HeuristicsEngine
 from app.database import get_session
-from api.services.models import Exercise, WorkoutSession, WorkoutSessionExercise, WorkoutSessionSet, AppUser, WorkoutPlanExercise, UserExerciseNote
+from api.services.models import Exercise, WorkoutSession, WorkoutSessionExercise, WorkoutSessionSet, AppUser, WorkoutPlanExercise, UserExerciseNote, UserExercisePreference
 from api.schemas.exercises import (
     ExerciseListItemResponse,
     ExerciseDetailResponse,
@@ -25,6 +25,7 @@ from api.schemas.exercises import (
     ExerciseAlternativeResponse, ReplaceExerciseRequest, CustomExerciseCreate,
     ExerciseNoteRequest, ExerciseNoteResponse,
     ExerciseClassifyRequest, ExerciseClassifyResponse,
+    ExercisePreferenceRequest, ExercisePreferenceResponse,
 )
 
 router = APIRouter(tags=["exercises"])
@@ -86,6 +87,7 @@ async def list_exercises(
                     source=item.get("source") or "default",
                     image_url=image_url,
                     image_approx=image_approx,
+                    preference=item.get("preference"),
                 )
             )
         else:
@@ -106,6 +108,7 @@ async def list_exercises(
                     source=item.source,
                     image_url=image_url,
                     image_approx=image_approx,
+                    preference=getattr(item, "_user_preference", None),
                 )
             )
 
@@ -134,6 +137,10 @@ async def get_exercise_detail(
         )
     )
     note = note_row.scalar_one_or_none()
+    preference = (await session.execute(select(UserExercisePreference.preference).where(
+        UserExercisePreference.app_user_id == app_user.id,
+        UserExercisePreference.exercise_id == exercise_id,
+    ))).scalar_one_or_none()
 
     # Относительные пути из БД -> абсолютные URL на нашу статику (/media/...).
     # base_url уже включает схему и хост, поэтому host в БД не хардкодим.
@@ -157,7 +164,68 @@ async def get_exercise_detail(
         image_urls=image_urls,
         image_approx=bool(exercise.image_approx),
         note=note,
+        preference=preference,
     )
+
+
+@router.get("/preferences", response_model=list[ExercisePreferenceResponse])
+async def list_exercise_preferences(
+    preference: Optional[str] = Query(None, pattern="^(favorite|disliked)$"),
+    session: AsyncSession = Depends(get_db),
+    app_user: AppUser = Depends(get_current_app_user),
+):
+    stmt = select(UserExercisePreference).where(
+        UserExercisePreference.app_user_id == app_user.id,
+        UserExercisePreference.exercise_id.is_not(None),
+    )
+    if preference:
+        stmt = stmt.where(UserExercisePreference.preference == preference)
+    rows = (await session.execute(stmt.order_by(UserExercisePreference.exercise_name))).scalars().all()
+    return [ExercisePreferenceResponse(exercise_id=row.exercise_id, exercise_name=row.exercise_name,
+                                       preference=row.preference) for row in rows]
+
+
+@router.put("/exercises/{exercise_id}/preference", response_model=ExercisePreferenceResponse)
+async def set_exercise_preference(
+    exercise_id: int,
+    payload: ExercisePreferenceRequest,
+    session: AsyncSession = Depends(get_db),
+    app_user: AppUser = Depends(get_current_app_user),
+):
+    exercise = (await session.execute(
+        get_base_exercise_query(app_user.id).where(Exercise.id == exercise_id)
+    )).scalar_one_or_none()
+    if exercise is None:
+        raise HTTPException(status_code=404, detail="Exercise not found")
+    row = (await session.execute(select(UserExercisePreference).where(
+        UserExercisePreference.app_user_id == app_user.id,
+        UserExercisePreference.exercise_id == exercise_id,
+    ))).scalar_one_or_none()
+    if row is None:
+        row = UserExercisePreference(app_user_id=app_user.id, exercise_id=exercise_id,
+                                     exercise_name=exercise.name, preference=payload.preference)
+        session.add(row)
+    else:
+        row.preference = payload.preference
+        row.exercise_name = exercise.name
+    await session.commit()
+    return ExercisePreferenceResponse(exercise_id=exercise.id, exercise_name=exercise.name,
+                                      preference=payload.preference)
+
+
+@router.delete("/exercises/{exercise_id}/preference", status_code=status.HTTP_204_NO_CONTENT)
+async def clear_exercise_preference(
+    exercise_id: int,
+    session: AsyncSession = Depends(get_db),
+    app_user: AppUser = Depends(get_current_app_user),
+):
+    row = (await session.execute(select(UserExercisePreference).where(
+        UserExercisePreference.app_user_id == app_user.id,
+        UserExercisePreference.exercise_id == exercise_id,
+    ))).scalar_one_or_none()
+    if row is not None:
+        await session.delete(row)
+        await session.commit()
 
 
 @router.put("/exercises/{exercise_id}/note", response_model=ExerciseNoteResponse)
@@ -330,9 +398,23 @@ async def get_exercise_history_workout_detail(
 )
 async def get_exercise_last_performance(
     exercise_id: int,
+    context_workout_id: Optional[int] = Query(None),
     session: AsyncSession = Depends(get_db),
     app_user: AppUser = Depends(get_current_app_user),
 ):
+    context_workout = None
+    if context_workout_id is not None:
+        context_workout = (
+            await session.execute(
+                select(WorkoutSession).where(
+                    WorkoutSession.id == context_workout_id,
+                    WorkoutSession.app_user_id == app_user.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if context_workout is None:
+            raise HTTPException(status_code=404, detail="Workout not found")
+
     stmt = (
         select(WorkoutSession)
         .join(
@@ -350,6 +432,13 @@ async def get_exercise_last_performance(
         )
         .order_by(WorkoutSession.finished_at.desc())
     )
+
+    # A planned split day must compare against the same day of the split, not
+    # simply the most recent workout that happened to contain the exercise.
+    if context_workout is not None and context_workout.split_day_id is not None:
+        stmt = stmt.where(
+            WorkoutSession.split_day_id == context_workout.split_day_id
+        )
 
     result = await session.execute(stmt)
     workout = result.scalars().first()
@@ -424,10 +513,12 @@ async def search_exercises(
                 main_muscle_group=it.get("main_muscle_group") or "unknown",
                 secondary_muscle_groups=it.get("secondary_muscle_groups") or [],
                 category=it.get("category") or "base",
+                fatigue_tier=it.get("fatigue_tier") or 2,
                 equipment_needed=it.get("equipment_needed"),
                 source=it.get("source") or "default",
                 image_url=image_url,
                 image_approx=image_approx,
+                preference=it.get("preference"),
             ))
         else:
             image_url, image_approx = _thumb_url(
@@ -439,10 +530,12 @@ async def search_exercises(
                 main_muscle_group=it.main_muscle_group,
                 secondary_muscle_groups=it.secondary_muscle_groups or [],
                 category=it.category,
+                fatigue_tier=it.fatigue_tier,
                 equipment_needed=it.equipment_needed,
                 source=it.source,
                 image_url=image_url,
                 image_approx=image_approx,
+                preference=getattr(it, "_user_preference", None),
             ))
     return items
 
@@ -500,7 +593,8 @@ async def get_last_for_context(
 @router.get("/{exercise_id}/alternatives", response_model=List[ExerciseAlternativeResponse])
 async def get_exercise_alternatives(
     exercise_id: int,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    app_user: AppUser = Depends(get_current_app_user),
 ):
     # 1. Находим исходное упражнение
     target_ex = await db.get(Exercise, exercise_id)
@@ -537,8 +631,11 @@ async def get_exercise_alternatives(
     #    осмысленного совпадения, хотя в score их равенство и даёт баллы.
     target_equipment = set(target_ex.equipment_needed or [])
 
+    preferences = await ExerciseSearchService.preference_map(db, app_user.id)
     alternatives = []
     for ex_obj, score in rows:
+        if preferences.get(ex_obj.id) == "disliked":
+            continue
         # Enum'ы наследуют str, поэтому сравнение со строкой "unknown" работает
         # и для enum-инстанса, и для сырой строки — не зависим от десериализации.
         reasons = []
@@ -554,12 +651,15 @@ async def get_exercise_alternatives(
             name=ex_obj.name,
             main_muscle_group=ex_obj.main_muscle_group,
             equipment_needed=ex_obj.equipment_needed,
+            fatigue_tier=ex_obj.fatigue_tier,
+            secondary_muscle_groups=ex_obj.secondary_muscle_groups or [],
             match_score=score,
             match_reasons=reasons,
+            preference=preferences.get(ex_obj.id),
         )
         alternatives.append(alt_data)
 
-    return alternatives
+    return sorted(alternatives, key=lambda item: (-item.match_score, 0 if item.preference == "favorite" else 1, item.name))
 
 
 @router.post("/sessions/{session_id}/exercises/{session_ex_id}/replace")

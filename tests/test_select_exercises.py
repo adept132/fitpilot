@@ -144,6 +144,63 @@ def test_prefers_distinct_action_vector_for_a_muscle():
     assert 3 in ids
 
 
+def test_favorite_wins_inside_same_structural_slot():
+    from api.services.exercise_pattern_tags import ExerciseVector
+    pool = [
+        ex(1, "Грудь", tier=2, category="Базовое", vector=ExerciseVector.horizontal),
+        ex(2, "Грудь", tier=2, category="Базовое", vector=ExerciseVector.horizontal),
+    ]
+    out = select_exercises(
+        {"chest": 4}, pool, None, [],
+        SelectionConfig(seed=1, favorite_exercise_ids={2}),
+    )
+    assert [item.exercise_id for item in out] == [2]
+
+
+def test_disliked_is_excluded_before_slot_selection():
+    pool = [
+        ex(1, "Грудь", tier=2, category="Базовое"),
+        ex(2, "Грудь", tier=2, category="Базовое"),
+    ]
+    out = select_exercises(
+        {"chest": 4}, pool, None, [],
+        SelectionConfig(seed=1, disliked_exercise_ids={1}),
+    )
+    assert [item.exercise_id for item in out] == [2]
+
+
+def test_biceps_favorite_is_not_blocked_by_single_compound_candidate():
+    pool = [
+        ex(1, "Бицепс", tier=2, action=ExerciseAction.flexion, category="Базовое"),
+        ex(2, "Бицепс", tier=3, action=ExerciseAction.flexion, category="Изолирующее"),
+        ex(3, "Бицепс", tier=3, action=ExerciseAction.flexion, category="Изолирующее"),
+    ]
+    picked = {
+        select_exercises(
+            {"biceps": 4}, pool, None, [],
+            SelectionConfig(seed=seed, favorite_exercise_ids={3}),
+        )[0].exercise_id
+        for seed in range(30)
+    }
+    assert picked == {3}
+
+
+def test_biceps_regeneration_varies_without_favorite():
+    pool = [
+        ex(1, "Бицепс", tier=2, action=ExerciseAction.flexion, category="Базовое"),
+        ex(2, "Бицепс", tier=3, action=ExerciseAction.flexion, category="Изолирующее"),
+        ex(3, "Бицепс", tier=3, action=ExerciseAction.flexion, category="Изолирующее"),
+        ex(4, "Бицепс", tier=3, action=ExerciseAction.flexion, category="Изолирующее"),
+    ]
+    picked = {
+        select_exercises(
+            {"biceps": 4}, pool, None, [], SelectionConfig(seed=seed),
+        )[0].exercise_id
+        for seed in range(30)
+    }
+    assert len(picked) > 1
+
+
 def test_tier_balance_enforced_via_swap():
     # All compounds tier-1, isolations tier-2/3. Balance must pull tier-1 <= half,
     # even at the cost of the 2:1 base:isolation ratio (balance is primary/hard).

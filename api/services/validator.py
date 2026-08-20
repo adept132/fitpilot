@@ -16,6 +16,15 @@ class PlanExerciseInput(BaseModel):
 
 class AntiSuicideValidator:
     EFFORT_ORDER = ['deload', 'easy', 'medium', 'prefailure', 'failure']
+    CAP_MAPPING = {
+        "beginner": 6,
+        "intermediate": 8,
+        "advanced": 10,
+    }
+
+    @classmethod
+    def workout_set_cap(cls, experience_level: str) -> int:
+        return cls.CAP_MAPPING.get(experience_level, 6)
 
     @classmethod
     def validate_mesocycle_sequence(cls, effort_tiers: List[str]) -> bool:
@@ -81,12 +90,7 @@ class AntiSuicideValidator:
         Проверяет тренировочный план на жесткие лимиты объемов и синергию в суперсетах.
         """
         # 1. Жесткие ограничения на количество подходов (Hard Caps) за сессию
-        CAP_MAPPING = {
-            "beginner": 6,
-            "intermediate": 8,
-            "advanced": 10
-        }
-        user_cap = CAP_MAPPING.get(experience_level, 6)
+        user_cap = cls.workout_set_cap(experience_level)
 
         muscle_volumes: Dict[str, int] = {}
         supersets: Dict[UUID, List[PlanExerciseInput]] = {}
@@ -112,7 +116,15 @@ class AntiSuicideValidator:
         # 2. Валидация суперсетов (Запрет на тяжелую базу и синергисты)
         for group_id, group_exercises in supersets.items():
             if len(group_exercises) < 2:
-                continue
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Суперсет должен содержать как минимум два упражнения."
+                )
+            if len(group_exercises) > 3:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Суперсет может содержать не больше трёх упражнений."
+                )
 
             for i in range(len(group_exercises)):
                 for j in range(i + 1, len(group_exercises)):

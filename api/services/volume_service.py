@@ -77,9 +77,15 @@ class VolumeService:
             if target_weekly_sets == 0 or frequency == 0:
                 continue
 
-            raw_session_target = (target_weekly_sets * (blueprint.length_days / 7.0)) / frequency
+            cycle_share = blueprint.length_days / 7.0
+            raw_session_target = (target_weekly_sets * cycle_share) / frequency
+            # min_floor is a weekly MEV floor, just like target_sets is a weekly
+            # target. Applying it unchanged to every session massively inflates
+            # short repeating splits.
+            raw_session_floor = (min_floor * cycle_share) / frequency
             rounded_target = round(raw_session_target)
-            final_target = max(min_floor, min(max_session_cap, rounded_target))
+            rounded_floor = round(raw_session_floor)
+            final_target = max(rounded_floor, min(max_session_cap, rounded_target))
 
             targets_response[muscle] = {
                 "target_sets": final_target,

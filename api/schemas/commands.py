@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Literal
 from api.schemas.plan import GeneratedDayOut
 
 
@@ -28,3 +28,23 @@ class ApplyCommandsResponse(BaseModel):
     parsed_commands: List[CommandOut]
     reply: str
     clarify: Optional[ClarifyOut] = None
+
+
+class GeneratorRuleCreate(BaseModel):
+    command: CommandOut
+    scope: Literal["day", "split", "all"]
+    blueprint_id: Optional[str] = None
+    day_tag: Optional[str] = None
+
+
+class GeneratorRuleOut(BaseModel):
+    id: str
+    command: CommandOut
+    scope: Literal["day", "split", "all"]
+    blueprint_id: Optional[str] = None
+    day_tag: Optional[str] = None
+    enabled: bool = True
+
+
+class GeneratorRuleUpdate(BaseModel):
+    enabled: bool
