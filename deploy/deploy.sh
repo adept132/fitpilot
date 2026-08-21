@@ -31,7 +31,7 @@ fi
 OLD_COMMIT="$(git rev-parse HEAD)"
 mkdir -p "$BACKUP_DIR"
 
-echo "[1/6] Загружаю изменения из GitHub"
+echo "[1/7] Загружаю изменения из GitHub"
 git fetch --prune origin
 NEW_COMMIT="$(git rev-parse --verify "${REF}^{commit}")"
 
@@ -40,7 +40,7 @@ if [[ "$NEW_COMMIT" == "$OLD_COMMIT" ]]; then
   exit 0
 fi
 
-echo "[2/6] Создаю резервную копию PostgreSQL"
+echo "[2/7] Создаю резервную копию PostgreSQL"
 cd "$APP_DIR"
 BACKUP_FILE="${BACKUP_DIR}/pre-deploy-$(date -u +%Y%m%dT%H%M%SZ)-${OLD_COMMIT:0:8}.dump"
 docker compose exec -T postgres pg_dump \
@@ -49,11 +49,11 @@ docker compose exec -T postgres pg_dump \
   --format=custom --no-owner --no-privileges > "$BACKUP_FILE"
 test -s "$BACKUP_FILE"
 
-echo "[3/6] Переключаю исходники на ${NEW_COMMIT}"
+echo "[3/7] Переключаю исходники на ${NEW_COMMIT}"
 cd "$SOURCE_DIR"
 git checkout --detach "$NEW_COMMIT"
 
-echo "[4/6] Собираю новый образ"
+echo "[4/7] Собираю новый образ"
 cd "$APP_DIR"
 if ! docker compose build api; then
   git -C "$SOURCE_DIR" checkout --detach "$OLD_COMMIT"
@@ -61,10 +61,18 @@ if ! docker compose build api; then
   exit 1
 fi
 
-echo "[5/6] Запускаю API"
+echo "[5/7] Применяю миграции базы данных"
+if ! docker compose run --rm --no-deps api alembic upgrade head; then
+  git -C "$SOURCE_DIR" checkout --detach "$OLD_COMMIT"
+  echo "Миграция не удалась; работающий API не изменён." >&2
+  echo "Резервная копия: $BACKUP_FILE" >&2
+  exit 1
+fi
+
+echo "[6/7] Запускаю API"
 docker compose up -d --no-deps api
 
-echo "[6/6] Проверяю публичный health endpoint"
+echo "[7/7] Проверяю публичный health endpoint"
 for attempt in $(seq 1 30); do
   if curl --fail --silent --show-error --max-time 5 "$HEALTH_URL" >/dev/null; then
     echo "Деплой успешен: ${OLD_COMMIT:0:8} -> ${NEW_COMMIT:0:8}"
