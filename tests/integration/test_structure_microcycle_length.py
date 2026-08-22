@@ -78,9 +78,8 @@ async def test_detaching_the_microcycle_is_always_allowed(client, auth_headers, 
 
 
 async def test_rejected_switch_keeps_previous_microcycle_active(client, auth_headers, test_user):
-    # Регрессия: проверка длины стоит ДО снятия is_active со всех микроциклов.
-    # Если порядок когда-нибудь переставят, неудачный switch снимет флаг
-    # с первого микроцикла и оставит пользователя вообще без активного.
+    # После отказа (409) состояние БД не должно измениться: активным остаётся первый микроцикл, и ровно один.
+    # Гарантируется: в update_workout_center_microcycle единственный коммит в конце, исключение откатывает транзакцию целиком.
     length = await _activate_seven_day_split(test_user.id)
     first_id = await _make_microcycle(test_user.id, length)
 
