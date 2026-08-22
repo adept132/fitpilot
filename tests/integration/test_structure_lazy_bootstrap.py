@@ -163,3 +163,78 @@ async def test_unassigning_mesocycle_leaves_none_active(
         )).scalars().first()
 
     assert active_meso is None
+
+
+async def test_unassigning_mesocycle_survives_reopening_the_screen(
+    client, auth_headers, test_user,
+):
+    """Правка Critical (P1-03 ч.1, Задача 8): test_unassigning_mesocycle_leaves_none_active
+    выше проверяет только ответ ТОГО ЖЕ PATCH-запроса — этого недостаточно,
+    потому что регрессия была именно в ПОВТОРНОМ GET /workout-center/context
+    (ensure_structure видела «нет активного мезоцикла» и реактивировала
+    дефолт при каждом возвращении на вкладку тренировки). Здесь после снятия
+    мезоцикла делается отдельный повторный GET, и активного по-прежнему быть
+    не должно.
+    """
+    await _activate_split(test_user.id)
+
+    async with SessionLocal() as db:
+        await ensure_structure(db, test_user.id)
+        await db.commit()
+
+    r = await client.patch(
+        "/workout-center/context/mesocycle",
+        json={"mesocycle_id": None},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+
+    r2 = await client.get("/workout-center/context", headers=auth_headers)
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["selected_periodization"] is None
+
+    async with SessionLocal() as db:
+        active_meso = (await db.execute(
+            select(AppUserMesocycle).where(
+                AppUserMesocycle.app_user_id == test_user.id,
+                AppUserMesocycle.is_active.is_(True),
+            )
+        )).scalars().first()
+
+    assert active_meso is None
+
+
+async def test_unassigning_microcycle_survives_reopening_the_screen(
+    client, auth_headers, test_user,
+):
+    """Тот же сценарий, что и test_unassigning_mesocycle_survives_reopening_the_screen,
+    для микроцикла: PATCH .../microcycle с microcycle_id=null («Без
+    микроцикла» в селекторе), затем повторный GET — активного микроцикла
+    по-прежнему быть не должно.
+    """
+    await _activate_split(test_user.id)
+
+    async with SessionLocal() as db:
+        await ensure_structure(db, test_user.id)
+        await db.commit()
+
+    r = await client.patch(
+        "/workout-center/context/microcycle",
+        json={"microcycle_id": None},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+
+    r2 = await client.get("/workout-center/context", headers=auth_headers)
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["selected_microcycle"] is None
+
+    async with SessionLocal() as db:
+        active_micro = (await db.execute(
+            select(AppUserMicrocycle).where(
+                AppUserMicrocycle.app_user_id == test_user.id,
+                AppUserMicrocycle.is_active.is_(True),
+            )
+        )).scalars().first()
+
+    assert active_micro is None

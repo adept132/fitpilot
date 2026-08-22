@@ -63,7 +63,14 @@ async def _experience_level(session: AsyncSession, app_user_id: int) -> str:
 
 
 async def _has_active_structure(session: AsyncSession, app_user_id: int) -> bool:
-    """Есть ли у пользователя ОДНОВРЕМЕННО активный мезоцикл и активный микроцикл."""
+    """Есть ли у пользователя ОДНОВРЕМЕННО активный мезоцикл и активный микроцикл.
+
+    Используется только веткой обработки гонки ниже (перепроверка после
+    отката при IntegrityError) — там нужен именно признак «конкурентная
+    транзакция уже закоммитила и активировала», а не факт существования
+    записей. Обычный путь ensure_structure своё решение строит на
+    _has_any_mesocycle/_has_any_microcycle, см. их докстринги.
+    """
     has_active_meso = (await session.execute(
         select(AppUserMesocycle.id).where(
             AppUserMesocycle.app_user_id == app_user_id,
@@ -79,6 +86,22 @@ async def _has_active_structure(session: AsyncSession, app_user_id: int) -> bool
         ).limit(1)
     )).scalars().first() is not None
     return has_active_micro
+
+
+async def _has_any_mesocycle(session: AsyncSession, app_user_id: int) -> bool:
+    """Есть ли у пользователя хоть одна ЛИЧНАЯ копия мезоцикла (активная или нет)."""
+    return (await session.execute(
+        select(Mesocycle.id).where(Mesocycle.author_id == app_user_id).limit(1)
+    )).scalars().first() is not None
+
+
+async def _has_any_microcycle(session: AsyncSession, app_user_id: int) -> bool:
+    """Есть ли у пользователя хоть один микроцикл (активный или нет)."""
+    return (await session.execute(
+        select(AppUserMicrocycle.id)
+        .where(AppUserMicrocycle.app_user_id == app_user_id)
+        .limit(1)
+    )).scalars().first() is not None
 
 
 async def ensure_structure(session: AsyncSession, app_user_id: int) -> dict:
@@ -99,16 +122,25 @@ async def ensure_structure(session: AsyncSession, app_user_id: int) -> dict:
         # Длину микроцикла неоткуда взять — заводить структуру нельзя.
         return {"mesocycles_created": 0, "microcycles_created": 0, "activated": False}
 
-    # Повторное ревью, Находка 1: если и мезоцикл, и микроцикл уже активны —
-    # структура рабочая, выходим сразу, ничего не читая и не создавая.
-    # PUT /microcycles/{id} разрешает переименовать личную копию, пока она не
-    # активна (api/routers/microcycles.py); без этого раннего выхода поиск
-    # существующих микроциклов по AppUserMicrocycle.name ниже не находил бы
-    # переименованную строку и заводил бы шестую копию при каждом повторном
-    # вызове. Ранний выход не ломает самовосстановление: если пользователь
-    # удалил все свои микроциклы (или мезоциклы), активного нет, и функция
-    # идёт дальше как обычно и пересоздаёт структуру.
-    if await _has_active_structure(session, app_user_id):
+    # Задача 8, правка Critical: признак «пора заводить структуру» — не
+    # «нет АКТИВНОГО мезоцикла/микроцикла», а «нет НИ ОДНОЙ записи вовсе»,
+    # отдельно для каждого типа. Активный мезоцикл/микроцикл — это выбор
+    # пользователя (в том числе выбор снять его опцией «Без мезоцикла»/«Без
+    # микроцикла» в селекторе), а не признак того, заводить ли структуру
+    # заново. Раз хоть одна личная копия есть — пресеты уже применены когда-то,
+    # и трогать активацию нельзя, что бы сейчас ни было активным.
+    #
+    # Этот же признак закрывает и прежнюю Находку 1 (переименование неактивной
+    # копии PUT /microcycles/{id} не должно заводить шестую копию при поиске
+    # по имени) — «есть хоть одна запись» истинно и для переименованной
+    # строки, отдельная проверка на активность для этого была не нужна.
+    #
+    # Самовосстановление сохранено: если пользователь удалил ВСЕ свои
+    # микроциклы (или мезоциклы), записей для этого типа больше нет, и
+    # функция идёт дальше как обычно и пересоздаёт недостающее.
+    had_mesocycles = await _has_any_mesocycle(session, app_user_id)
+    had_microcycles = await _has_any_microcycle(session, app_user_id)
+    if had_mesocycles and had_microcycles:
         return {"mesocycles_created": 0, "microcycles_created": 0, "activated": True}
 
     length = len(slots)
@@ -206,14 +238,12 @@ async def ensure_structure(session: AsyncSession, app_user_id: int) -> dict:
         }
 
     # --- Активация ---
-    has_active_meso = (await session.execute(
-        select(AppUserMesocycle).where(
-            AppUserMesocycle.app_user_id == app_user_id,
-            AppUserMesocycle.is_active.is_(True),
-        )
-    )).scalars().first() is not None
-
-    if not has_active_meso:
+    # Активируем дефолт только для типа, у которого до этого вызова не было
+    # НИ ОДНОЙ записи (had_mesocycles/had_microcycles выше) — тот же признак,
+    # что и в раннем выходе, здесь просто его отрицание. Если записи уже
+    # были (пусть и без активной — пользователь явно снял выбор), ничего не
+    # активируем: это и есть исправление регрессии с «Без мезоцикла».
+    if not had_mesocycles:
         code = (
             meso_presets.DEFAULT_FOR_BEGINNER if beginner
             else meso_presets.DEFAULT_FOR_EXPERIENCED
@@ -228,8 +258,7 @@ async def ensure_structure(session: AsyncSession, app_user_id: int) -> dict:
             current_phase=1,
         ))
 
-    has_active_micro = any(row.is_active for row in existing_micro.values())
-    if not has_active_micro:
+    if not had_microcycles:
         code = (
             micro_profiles.DEFAULT_FOR_BEGINNER if beginner
             else micro_profiles.DEFAULT_FOR_EXPERIENCED
