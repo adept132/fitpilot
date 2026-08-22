@@ -99,28 +99,6 @@ async def build_context(
         session: AsyncSession,
         app_user: AppUser,
 ) -> WorkoutCenterContextRead:
-    # P1-03 ч.1, §5.5: пользователь с активным сплитом, но без мезо и микро,
-    # не получил бы блока вовсе (ensure_active_block вернул бы None), а вместе
-    # с ним не работали бы P0-08, P0-09 и P0-12. Чиним здесь, а не миграцией:
-    # идемпотентно и не трогает того, у кого структура уже есть.
-    #
-    # Место вызова — самое начало build_context, ДО guarded(mark_missed_days...)
-    # ниже, а не перед загрузкой мезоциклов: ensure_structure может откатить
-    # транзакцию сессии (session.rollback() в ветке гонки, см. её докстринг,
-    # тот же контракт, что и у ensure_active_block в
-    # api/services/periodization/repository.py). mark_missed_days делает
-    # session.execute(update(...)) и не гарантированно коммитится раньше этой
-    # точки — refresh_goal_proposals коммитит сессию сама, но только на путях,
-    # где что-то записала (см. её докстринг); для пользователя без ведущей
-    # цели коммита не происходит вовсе, и апдейт пропущенных дней остался бы
-    # висеть в той же транзакции, которую откат ensure_structure унёс бы с
-    # собой молча. Вызов должен стоять раньше первого session.add/execute
-    # с записью в этой функции.
-    from api.services.structure.bootstrap import ensure_structure
-
-    await ensure_structure(session, app_user.id)
-    await session.commit()
-
     # P0-09: пропуски проставляются лениво, при обращении. guarded()
     # изолирует падение в SAVEPOINT — голого try/except мало: работа идёт в
     # той же сессии, которую эндпоинт потом коммитит, и ошибка уровня DBAPI
@@ -150,13 +128,15 @@ async def build_context(
     # P0-12: автопилот цели просыпается на той же точке — окно объёма уже
     # закрыто вызовом выше, значит есть новый факт и новый тренд.
     # refresh_goal_proposals коммитит СЕБЯ САМА на каждом пути записи (см. её
-    # докстринг, финальное ревью Important 9). До P1-03 ч.1 (Задача 8) это был
-    # единственный commit во всём build_context; теперь есть более ранний
-    # await session.commit() после ensure_structure в начале функции, но роль
-    # этого вызова не изменилась — на путях без ведущей цели (или без записи)
-    # именно он, последний в цепочке, делает долговечными mark_missed_days и
+    # докстринг, финальное ревью Important 9). Это единственный commit во
+    # всём build_context — на путях без ведущей цели (или без записи) именно
+    # он, последний в цепочке, делает долговечными mark_missed_days и
     # refresh_volume_proposals выше — осознанно, тем же приёмом, что и
-    # periodization.service.refresh_proposals.
+    # periodization.service.refresh_proposals. (Ревью Задачи 8, P1-03 ч.1:
+    # раньше здесь же в начале функции стоял ещё и ensure_structure со своим
+    # commit — теперь он переехал в обработчик GET /workout-center/context,
+    # см. его докстринг; build_context сам по себе больше ничего, кроме этого
+    # пути, не коммитит.)
     from api.services.goal.service import refresh_goal_proposals
 
     await guarded(
@@ -363,6 +343,36 @@ async def get_workout_center_context(
         app_user: AppUser = Depends(get_current_app_user),
         session: AsyncSession = Depends(get_db),
 ):
+    # P1-03 ч.1, §5.5, ревью Задачи 8: ensure_structure стоит ЗДЕСЬ, в
+    # обработчике конкретного эндпоинта, а не в build_context — хотя
+    # build_context дёргают семь эндпоинтов. Смысл ensure_structure —
+    # «дочинить структуру при открытии экрана тренировки» (пользователь с
+    # активным сплитом, но без мезо и микро, не получил бы блока вовсе:
+    # ensure_active_block вернул бы None, а вместе с ним не работали бы
+    # P0-08, P0-09 и P0-12), а не «на любое обращение к контексту». Раньше
+    # вызов сидел в начале build_context и это давало регрессию: PATCH
+    # /workout-center/context/mesocycle с mesocycle_id=null — легальный
+    # способ снять мезоцикл («Без мезоцикла» в селекторе мобильного клиента,
+    # см. update_workout_center_mesocycle ниже) — деактивирует все записи,
+    # коммитит и зовёт build_context за свежим контекстом. Сидя внутри
+    # build_context, ensure_structure видела отсутствие активного мезоцикла и
+    # тут же реактивировала дефолтный пресет — в ответе ТОГО ЖЕ запроса
+    # пользователь получал мезоцикл обратно, хотя явно его снял. GET
+    # /workout-center/context — единственный из семи эндпоинтов, который по
+    # смыслу и есть «открытие экрана тренировки», поэтому вызов переехал
+    # сюда одного.
+    #
+    # Вызов — первая строка обработчика, ДО build_context: ensure_structure
+    # умеет откатить транзакцию сессии в ветке гонки (session.rollback() в
+    # обработчике IntegrityError, см. её докстринг, тот же контракт, что и у
+    # ensure_active_block в api/services/periodization/repository.py) — до
+    # неё в этой сессии не должно быть незакоммиченных изменений, а в начале
+    # обработчика их и нет.
+    from api.services.structure.bootstrap import ensure_structure
+
+    await ensure_structure(session, app_user.id)
+    await session.commit()
+
     return await build_context(session, app_user)
 
 
