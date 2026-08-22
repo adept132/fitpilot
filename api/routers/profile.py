@@ -386,3 +386,19 @@ async def update_custom_budget(
     )
 
     return profile.volume_budget
+
+
+@router.post("/profile/structure/bootstrap")
+async def bootstrap_structure(
+        current_user: AppUser = Depends(get_current_app_user),
+        db: AsyncSession = Depends(get_db),
+):
+    """Завести мезоциклы и микроциклы из пресетов и активировать по одному.
+
+    Идемпотентно: повторный вызов ничего не создаёт и не переключает активные.
+    """
+    from api.services.structure.bootstrap import ensure_structure
+
+    result = await ensure_structure(db, current_user.id)
+    await db.commit()
+    return result
