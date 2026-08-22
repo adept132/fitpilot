@@ -99,6 +99,28 @@ async def build_context(
         session: AsyncSession,
         app_user: AppUser,
 ) -> WorkoutCenterContextRead:
+    # P1-03 ч.1, §5.5: пользователь с активным сплитом, но без мезо и микро,
+    # не получил бы блока вовсе (ensure_active_block вернул бы None), а вместе
+    # с ним не работали бы P0-08, P0-09 и P0-12. Чиним здесь, а не миграцией:
+    # идемпотентно и не трогает того, у кого структура уже есть.
+    #
+    # Место вызова — самое начало build_context, ДО guarded(mark_missed_days...)
+    # ниже, а не перед загрузкой мезоциклов: ensure_structure может откатить
+    # транзакцию сессии (session.rollback() в ветке гонки, см. её докстринг,
+    # тот же контракт, что и у ensure_active_block в
+    # api/services/periodization/repository.py). mark_missed_days делает
+    # session.execute(update(...)) и не гарантированно коммитится раньше этой
+    # точки — refresh_goal_proposals коммитит сессию сама, но только на путях,
+    # где что-то записала (см. её докстринг); для пользователя без ведущей
+    # цели коммита не происходит вовсе, и апдейт пропущенных дней остался бы
+    # висеть в той же транзакции, которую откат ensure_structure унёс бы с
+    # собой молча. Вызов должен стоять раньше первого session.add/execute
+    # с записью в этой функции.
+    from api.services.structure.bootstrap import ensure_structure
+
+    await ensure_structure(session, app_user.id)
+    await session.commit()
+
     # P0-09: пропуски проставляются лениво, при обращении. guarded()
     # изолирует падение в SAVEPOINT — голого try/except мало: работа идёт в
     # той же сессии, которую эндпоинт потом коммитит, и ошибка уровня DBAPI
@@ -128,11 +150,13 @@ async def build_context(
     # P0-12: автопилот цели просыпается на той же точке — окно объёма уже
     # закрыто вызовом выше, значит есть новый факт и новый тренд.
     # refresh_goal_proposals коммитит СЕБЯ САМА на каждом пути записи (см. её
-    # докстринг, финальное ревью Important 9) — ЭТО ЕДИНСТВЕННЫЙ commit во
-    # всём build_context: GET /workout-center/context не коммитит сама ни до,
-    # ни после, поэтому именно этот вызов, последний в цепочке, делает
-    # долговечными и mark_missed_days, и refresh_volume_proposals выше —
-    # осознанно, тем же приёмом, что и periodization.service.refresh_proposals.
+    # докстринг, финальное ревью Important 9). До P1-03 ч.1 (Задача 8) это был
+    # единственный commit во всём build_context; теперь есть более ранний
+    # await session.commit() после ensure_structure в начале функции, но роль
+    # этого вызова не изменилась — на путях без ведущей цели (или без записи)
+    # именно он, последний в цепочке, делает долговечными mark_missed_days и
+    # refresh_volume_proposals выше — осознанно, тем же приёмом, что и
+    # periodization.service.refresh_proposals.
     from api.services.goal.service import refresh_goal_proposals
 
     await guarded(
