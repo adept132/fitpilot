@@ -239,6 +239,34 @@ async def test_block_is_created_after_bootstrap(test_user):
     assert block_after is not None
 
 
+async def test_microcycle_name_unique_per_user(test_user):
+    """uq_app_user_microcycle_name: ensure_structure's race protection (см.
+    докстринг в bootstrap.py и в миграции 20260822_02) держится на том, что
+    второй микроцикл с тем же именем у того же пользователя не проходит
+    INSERT."""
+    await _activate_split(test_user.id)
+
+    async with SessionLocal() as db:
+        result = await ensure_structure(db, test_user.id)
+        await db.commit()
+    assert result["microcycles_created"] == 5
+
+    async with SessionLocal() as db:
+        existing = (await db.execute(
+            select(AppUserMicrocycle).where(
+                AppUserMicrocycle.app_user_id == test_user.id,
+            ).limit(1)
+        )).scalars().first()
+        db.add(AppUserMicrocycle(
+            app_user_id=test_user.id,
+            name=existing.name,
+            length_days=existing.length_days,
+            days_mapping={},
+        ))
+        with pytest.raises(IntegrityError):
+            await db.commit()
+
+
 async def test_endpoint_runs_bootstrap(client, auth_headers, test_user):
     await _activate_split(test_user.id)
 

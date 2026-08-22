@@ -969,6 +969,7 @@ class AppUserMicrocycle(Base):
 
     __table_args__ = (
         CheckConstraint("length_days > 0", name="ck_microcycles_length_positive"),
+        UniqueConstraint("app_user_id", "name", name="uq_app_user_microcycle_name"),
     )
 
 
