@@ -74,12 +74,32 @@ async def test_bootstrap_creates_five_of_each_and_activates_one(test_user):
     assert active_micro.length_days == length
 
 
+async def _active_ids(user_id: int) -> tuple:
+    async with SessionLocal() as db:
+        active_meso = (await db.execute(
+            select(AppUserMesocycle).where(
+                AppUserMesocycle.app_user_id == user_id,
+                AppUserMesocycle.is_active.is_(True),
+            )
+        )).scalars().first()
+        active_micro = (await db.execute(
+            select(AppUserMicrocycle).where(
+                AppUserMicrocycle.app_user_id == user_id,
+                AppUserMicrocycle.is_active.is_(True),
+            )
+        )).scalars().first()
+    return active_meso.id, active_micro.id
+
+
 async def test_bootstrap_is_idempotent(test_user):
     await _activate_split(test_user.id)
 
     async with SessionLocal() as db:
         await ensure_structure(db, test_user.id)
         await db.commit()
+
+    first_active_meso_id, first_active_micro_id = await _active_ids(test_user.id)
+
     async with SessionLocal() as db:
         second = await ensure_structure(db, test_user.id)
         await db.commit()
@@ -87,6 +107,83 @@ async def test_bootstrap_is_idempotent(test_user):
     assert second["mesocycles_created"] == 0
     assert second["microcycles_created"] == 0
     assert await _counts(test_user.id) == (5, 5)
+
+    # Повторный вызов не только не создаёт лишних строк, но и не переключает
+    # активные — это должны остаться РОВНО те же записи, что и после первого.
+    second_active_meso_id, second_active_micro_id = await _active_ids(test_user.id)
+    assert second_active_meso_id == first_active_meso_id
+    assert second_active_micro_id == first_active_micro_id
+
+
+async def test_bootstrap_renaming_active_microcycle_does_not_duplicate(test_user):
+    """Повторное ревью, Находка 1: PUT /microcycles/{id} разрешает переименовать
+    личную копию, пока она не активна. Раньше ensure_structure искала
+    существующие микроциклы по имени и заводила шестую копию, не найдя старое
+    имя пресета. Ранний выход по паре активных мезо/микро закрывает это."""
+    await _activate_split(test_user.id)
+
+    async with SessionLocal() as db:
+        await ensure_structure(db, test_user.id)
+        await db.commit()
+
+    async with SessionLocal() as db:
+        micros = (await db.execute(
+            select(AppUserMicrocycle).where(
+                AppUserMicrocycle.app_user_id == test_user.id,
+                AppUserMicrocycle.is_active.is_(False),
+            )
+        )).scalars().all()
+        target = micros[0]
+        target.name = "Переименованный вручную профиль"
+        await db.commit()
+
+    async with SessionLocal() as db:
+        second = await ensure_structure(db, test_user.id)
+        await db.commit()
+
+    assert second == {
+        "mesocycles_created": 0, "microcycles_created": 0, "activated": True,
+    }
+    assert await _counts(test_user.id) == (5, 5)
+
+
+async def test_bootstrap_recreates_microcycles_after_all_deleted(test_user):
+    """Самовосстановление (спека §5.5) должно пережить ранний выход из
+    Находки 1: если пользователь удалил ВСЕ свои микроциклы, активного нет,
+    и структура пересоздаётся заново."""
+    await _activate_split(test_user.id)
+
+    async with SessionLocal() as db:
+        await ensure_structure(db, test_user.id)
+        await db.commit()
+
+    async with SessionLocal() as db:
+        await db.execute(
+            AppUserMicrocycle.__table__.delete().where(
+                AppUserMicrocycle.app_user_id == test_user.id
+            )
+        )
+        await db.commit()
+
+    assert await _counts(test_user.id) == (5, 0)
+
+    async with SessionLocal() as db:
+        result = await ensure_structure(db, test_user.id)
+        await db.commit()
+
+    assert result["mesocycles_created"] == 0
+    assert result["microcycles_created"] == 5
+    assert result["activated"] is True
+    assert await _counts(test_user.id) == (5, 5)
+
+    async with SessionLocal() as db:
+        active_micro = (await db.execute(
+            select(AppUserMicrocycle).where(
+                AppUserMicrocycle.app_user_id == test_user.id,
+                AppUserMicrocycle.is_active.is_(True),
+            )
+        )).scalars().first()
+    assert active_micro is not None
 
 
 async def test_bootstrap_without_an_active_split_does_nothing(test_user):

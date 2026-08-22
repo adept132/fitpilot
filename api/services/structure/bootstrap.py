@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -61,74 +62,132 @@ async def _experience_level(session: AsyncSession, app_user_id: int) -> str:
     return (getattr(profile, "experience_level", None) or "beginner").strip().lower()
 
 
+async def _has_active_structure(session: AsyncSession, app_user_id: int) -> bool:
+    """Есть ли у пользователя ОДНОВРЕМЕННО активный мезоцикл и активный микроцикл."""
+    has_active_meso = (await session.execute(
+        select(AppUserMesocycle.id).where(
+            AppUserMesocycle.app_user_id == app_user_id,
+            AppUserMesocycle.is_active.is_(True),
+        ).limit(1)
+    )).scalars().first() is not None
+    if not has_active_meso:
+        return False
+    has_active_micro = (await session.execute(
+        select(AppUserMicrocycle.id).where(
+            AppUserMicrocycle.app_user_id == app_user_id,
+            AppUserMicrocycle.is_active.is_(True),
+        ).limit(1)
+    )).scalars().first() is not None
+    return has_active_micro
+
+
 async def ensure_structure(session: AsyncSession, app_user_id: int) -> dict:
     """Создать недостающие копии пресетов и активировать по одной.
 
     Идемпотентна: повторный вызов ничего не создаёт и не переключает активные.
     Не коммитит — это забота вызывающей стороны, как и в остальном модуле.
+
+    ВНИМАНИЕ: функция может откатить транзакцию сессии (см. session.rollback()
+    в обработчике IntegrityError ниже, повторное ревью, Находка 2) — как и
+    ensure_active_block (api/services/periodization/repository.py), вызывать
+    её нужно ДО того, как вызывающий код начал накапливать собственные
+    незакоммиченные изменения в этой сессии, иначе они уедут в откат вместе с
+    неудачной попыткой создать копии.
     """
     slots = await _active_split_slots(session, app_user_id)
     if slots is None:
         # Длину микроцикла неоткуда взять — заводить структуру нельзя.
         return {"mesocycles_created": 0, "microcycles_created": 0, "activated": False}
 
+    # Повторное ревью, Находка 1: если и мезоцикл, и микроцикл уже активны —
+    # структура рабочая, выходим сразу, ничего не читая и не создавая.
+    # PUT /microcycles/{id} разрешает переименовать личную копию, пока она не
+    # активна (api/routers/microcycles.py); без этого раннего выхода поиск
+    # существующих микроциклов по AppUserMicrocycle.name ниже не находил бы
+    # переименованную строку и заводил бы шестую копию при каждом повторном
+    # вызове. Ранний выход не ломает самовосстановление: если пользователь
+    # удалил все свои микроциклы (или мезоциклы), активного нет, и функция
+    # идёт дальше как обычно и пересоздаёт структуру.
+    if await _has_active_structure(session, app_user_id):
+        return {"mesocycles_created": 0, "microcycles_created": 0, "activated": True}
+
     length = len(slots)
     level = await _experience_level(session, app_user_id)
     beginner = level == "beginner"
 
-    # --- Мезоциклы ---
-    existing_meso = {
-        row.code: row
-        for row in (await session.execute(
-            select(Mesocycle).where(Mesocycle.author_id == app_user_id)
-        )).scalars().all()
-    }
-    mesocycles_created = 0
-    for preset in meso_presets.MESOCYCLE_PRESETS:
-        if preset.code in existing_meso:
-            continue
-        meso = Mesocycle(
-            author_id=app_user_id,
-            name=preset.name,
-            code=preset.code,
-            description=preset.description,
-            phases_in_cycle=len(preset.tiers),
-        )
-        session.add(meso)
-        await session.flush()
-        for number, tier in enumerate(preset.tiers, start=1):
-            session.add(MesocyclePhase(
-                mesocycle_id=meso.id,
-                phase_number=number,
-                name=meso_presets.phase_name(tier),
-                effort_tier=tier,
-            ))
-        existing_meso[preset.code] = meso
-        mesocycles_created += 1
-
-    # --- Микроциклы ---
-    existing_micro = {
-        row.name: row
-        for row in (await session.execute(
-            select(AppUserMicrocycle).where(
-                AppUserMicrocycle.app_user_id == app_user_id
+    try:
+        # --- Мезоциклы ---
+        existing_meso = {
+            row.code: row
+            for row in (await session.execute(
+                select(Mesocycle).where(Mesocycle.author_id == app_user_id)
+            )).scalars().all()
+        }
+        mesocycles_created = 0
+        for preset in meso_presets.MESOCYCLE_PRESETS:
+            if preset.code in existing_meso:
+                continue
+            meso = Mesocycle(
+                author_id=app_user_id,
+                name=preset.name,
+                code=preset.code,
+                description=preset.description,
+                phases_in_cycle=len(preset.tiers),
             )
-        )).scalars().all()
-    }
-    microcycles_created = 0
-    for profile in micro_profiles.MICROCYCLE_PROFILES:
-        if profile.name in existing_micro:
-            continue
-        micro = AppUserMicrocycle(
-            app_user_id=app_user_id,
-            name=profile.name,
-            length_days=length,
-            days_mapping=micro_profiles.build_days_mapping(profile.code, slots),
-        )
-        session.add(micro)
-        await session.flush()
-        existing_micro[profile.name] = micro
-        microcycles_created += 1
+            session.add(meso)
+            await session.flush()
+            for number, tier in enumerate(preset.tiers, start=1):
+                session.add(MesocyclePhase(
+                    mesocycle_id=meso.id,
+                    phase_number=number,
+                    name=meso_presets.phase_name(tier),
+                    effort_tier=tier,
+                ))
+            existing_meso[preset.code] = meso
+            mesocycles_created += 1
+
+        # --- Микроциклы ---
+        existing_micro = {
+            row.name: row
+            for row in (await session.execute(
+                select(AppUserMicrocycle).where(
+                    AppUserMicrocycle.app_user_id == app_user_id
+                )
+            )).scalars().all()
+        }
+        microcycles_created = 0
+        for profile in micro_profiles.MICROCYCLE_PROFILES:
+            if profile.name in existing_micro:
+                continue
+            micro = AppUserMicrocycle(
+                app_user_id=app_user_id,
+                name=profile.name,
+                length_days=length,
+                days_mapping=micro_profiles.build_days_mapping(profile.code, slots),
+            )
+            session.add(micro)
+            existing_micro[profile.name] = micro
+            microcycles_created += 1
+    except IntegrityError:
+        # Повторное ревью, Находка 2: два параллельных POST /profile/structure/bootstrap
+        # (мобильный клиент умеет дублировать запросы) гоняются за одними и
+        # теми же 5 пресетами мезоциклов. Мезоциклы защищены уникальным
+        # индексом uq_mesocycle_author_code — проигравшая транзакция получает
+        # IntegrityError прямо на INSERT, ДО того как успевает дойти до цикла
+        # микроциклов (он строго после мезоциклов в этом же try) — поэтому
+        # один и тот же except закрывает и мезоциклы, и микроциклы, хотя у
+        # микроциклов своего уникального индекса нет и не будет (схему не
+        # трогаем — тихий дубль-race там структурно возможен только если обе
+        # стороны успели МИНОВАТЬ цикл мезоциклов одновременно, а это как раз
+        # то, что здесь ловится). Откатываем свою неудачную вставку и
+        # возвращаем факт: победившая транзакция уже сделала (или вот-вот
+        # сделает) всё нужное, тот же контракт, что у ensure_active_block.
+        await session.rollback()
+        return {
+            "mesocycles_created": 0,
+            "microcycles_created": 0,
+            "activated": await _has_active_structure(session, app_user_id),
+        }
 
     # --- Активация ---
     has_active_meso = (await session.execute(
