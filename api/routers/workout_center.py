@@ -2,7 +2,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, joinedload
 
@@ -1086,6 +1086,42 @@ async def update_workout_center_microcycle(
         app_user: AppUser = Depends(get_current_app_user)
 ):
     """Переключение активного микроцикла пользователя (поддерживает null для отвязки)."""
+
+    # P1-03 ч.1, §5.4: длина микроцикла обязана совпадать с числом слотов
+    # активного сплита. SchedulingEngine считает день сплита и день микроцикла
+    # двумя независимыми модулями по одному счётчику, и при расхождении длин
+    # раскладка повторов уезжает относительно дней — молча и накопительно.
+    # Подстраивать одну сторону нельзя: days_mapping человек мог составить
+    # руками.
+    if payload.microcycle_id is not None:
+        micro = (await session.execute(
+            select(AppUserMicrocycle).where(
+                AppUserMicrocycle.id == payload.microcycle_id,
+                AppUserMicrocycle.app_user_id == app_user.id,
+            )
+        )).scalars().first()
+        if micro is None:
+            raise HTTPException(404, "Микроцикл не найден")
+
+        active_split = (await session.execute(
+            select(UserSplit).where(
+                UserSplit.app_user_id == app_user.id,
+                UserSplit.is_active.is_(True),
+            )
+        )).scalars().first()
+
+        if active_split is not None:
+            slot_count = (await session.execute(
+                select(func.count(SplitDaySlot.id))
+                .where(SplitDaySlot.blueprint_id == active_split.blueprint_id)
+            )).scalar_one()
+            if slot_count and micro.length_days != slot_count:
+                raise HTTPException(
+                    409,
+                    f"Микроцикл рассчитан на {micro.length_days} дн., "
+                    f"а активный сплит — на {slot_count}. "
+                    f"Перестройте микроцикл под сплит.",
+                )
 
     # 1. Снимаем флаг активности со всех микроциклов данного пользователя
     await session.execute(
