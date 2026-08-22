@@ -1,6 +1,7 @@
 """Bootstrap структуры: копии пресетов, активация, заведение блока (P1-03 ч.1, §5.5)."""
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from api.seed_splits import ensure_system_splits
 from api.services.models import (
@@ -194,6 +195,31 @@ async def test_bootstrap_without_an_active_split_does_nothing(test_user):
     assert result == {
         "mesocycles_created": 0, "microcycles_created": 0, "activated": False,
     }
+    assert await _counts(test_user.id) == (0, 0)
+
+
+async def test_bootstrap_reraises_integrity_error_unrelated_to_the_race(
+    test_user, monkeypatch,
+):
+    """Правка: проброс чужого IntegrityError. except IntegrityError в
+    ensure_structure раньше глотал ЛЮБОЙ IntegrityError и возвращал нулевой
+    ответ — неотличимый от легального "нет активного сплита". Симулируем
+    IntegrityError на первом session.flush() внутри цикла создания
+    мезоциклов: у пользователя нет и не появится активной структуры (сплит
+    активирован, но до создания копий дело не дошло), значит после rollback
+    _has_active_structure подтвердит, что это была не гонка, и исключение
+    обязано вылететь наружу, а не превратиться в нулевой ответ."""
+    await _activate_split(test_user.id)
+
+    async with SessionLocal() as db:
+        async def _boom(*args, **kwargs):
+            raise IntegrityError("simulated", {}, Exception("not the race"))
+
+        monkeypatch.setattr(db, "flush", _boom)
+
+        with pytest.raises(IntegrityError):
+            await ensure_structure(db, test_user.id)
+
     assert await _counts(test_user.id) == (0, 0)
 
 

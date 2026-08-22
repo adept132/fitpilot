@@ -183,10 +183,19 @@ async def ensure_structure(session: AsyncSession, app_user_id: int) -> dict:
         # возвращаем факт: победившая транзакция уже сделала (или вот-вот
         # сделает) всё нужное, тот же контракт, что у ensure_active_block.
         await session.rollback()
+        if not await _has_active_structure(session, app_user_id):
+            # Активной структуры по-прежнему нет — IntegrityError был не про
+            # эту гонку (иначе конкурентная транзакция уже успела бы
+            # закоммитить свои мезоцикл/микроцикл и их активацию), а про
+            # что-то другое: нарушение NOT NULL, битый внешний ключ, порчу
+            # данных. Маскировать чужую ошибку тем же нулевым ответом, что и
+            # легальный "у пользователя нет активного сплита", нельзя — тот
+            # же контракт, что у ensure_active_block.
+            raise
         return {
             "mesocycles_created": 0,
             "microcycles_created": 0,
-            "activated": await _has_active_structure(session, app_user_id),
+            "activated": True,
         }
 
     # --- Активация ---
