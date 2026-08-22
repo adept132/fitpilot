@@ -1,3 +1,4 @@
+import json
 import uuid
 from datetime import timedelta, datetime, time
 
@@ -13,13 +14,15 @@ from api.services.app_user_service import get_current_app_user
 # Импортируй свои зависимости (пути могут немного отличаться в зависимости от твоего проекта)
 from api.services.models import (
     AppUser, SplitBlueprint, DayBlueprint, SplitDaySlot, UserSplit, DayMuscleTarget, UserCalendarDay, AppUserMesocycle,
-    AppUserMicrocycle
+    AppUserMicrocycle, AppUserProfile
 )
 from api.schemas.splits import SplitBlueprintOut, DayBlueprintOut, ActivateSplitRequest, CreateCustomSplitRequest, \
     UpdateCustomSplitRequest, CreateCustomDayRequest, UpdateCustomDayRequest, SchedulePreviewRequest, \
-    SchedulePreviewResponse, ScheduleLaunchRequest
+    SchedulePreviewResponse, ScheduleLaunchRequest, SplitSuggestionOut
+from api.services.muscle_keys import key_for_muscle
 from api.services.periodization.service import close_block_for_split_change
 from api.services.scheduling_engine import SchedulingEngine
+from api.services.structure.suggest import DayView, SplitView, suggest_splits
 from app.database import get_session
 
 router = APIRouter(prefix="/splits", tags=["Splits Workspace"])
@@ -51,6 +54,89 @@ async def get_available_splits(
     splits = result.scalars().all()
 
     return splits
+
+
+@router.get("/suggest", response_model=List[SplitSuggestionOut])
+async def suggest_split(
+        training_frequency: int | None = None,
+        requirement: str | None = None,
+        session: AsyncSession = Depends(get_session),
+        current_user: AppUser = Depends(get_current_app_user),
+):
+    """Кандидаты сплита под профиль. Меньше трёх — нормальный ответ (§5.2)."""
+    parsed_requirement = None
+    if requirement:
+        try:
+            parsed_requirement = json.loads(requirement)
+        except ValueError:
+            raise HTTPException(400, "requirement должен быть JSON-объектом")
+        if not isinstance(parsed_requirement, dict):
+            raise HTTPException(400, "requirement должен быть JSON-объектом")
+
+    profile = (await session.execute(
+        select(AppUserProfile).where(AppUserProfile.app_user_id == current_user.id)
+    )).scalars().first()
+
+    # Частота не задана — тройка, самая безопасная для неизвестного уровня (§7).
+    frequency = training_frequency or getattr(profile, "training_frequency", None) or 3
+    # Семь тренировок в неделю без единого дня отдыха каталог не покрывает
+    # намеренно (§5.1). Спека §7 требует показать шестидневных кандидатов, а
+    # не пустой список — поэтому зажимаем, а не отсекаем.
+    frequency = max(2, min(int(frequency), 6))
+
+    focus_muscles: list[str] = []
+    if profile is not None and profile.volume_budget:
+        focus_muscles = list(
+            (profile.volume_budget.get("meta") or {}).get("focus_muscles") or []
+        )
+
+    blueprints = (await session.execute(
+        select(SplitBlueprint)
+        .where(SplitBlueprint.is_system.is_(True))
+        .options(
+            selectinload(SplitBlueprint.slots)
+            .selectinload(SplitDaySlot.day)
+            .selectinload(DayBlueprint.muscle_targets)
+        )
+    )).scalars().unique().all()
+
+    views = [
+        SplitView(
+            id=str(bp.id),
+            name=bp.name,
+            length_days=bp.length_days,
+            days=tuple(
+                DayView(
+                    template_type=slot.day.template_type.value,
+                    muscles=frozenset(
+                        key for key in (
+                            key_for_muscle(target.muscle_group_id)
+                            for target in slot.day.muscle_targets
+                        ) if key
+                    ),
+                )
+                for slot in sorted(bp.slots, key=lambda s: s.day_order)
+            ),
+        )
+        for bp in blueprints
+    ]
+
+    return [
+        SplitSuggestionOut(
+            blueprint_id=candidate.id,
+            name=candidate.name,
+            length_days=candidate.length_days,
+            training_days=candidate.training_days,
+            sessions_per_week=candidate.sessions_per_week,
+            reason=candidate.reason,
+        )
+        for candidate in suggest_splits(
+            views,
+            training_frequency=frequency,
+            focus_muscles=focus_muscles,
+            requirement=parsed_requirement,
+        )
+    ]
 
 
 @router.get("/days", response_model=List[DayBlueprintOut])
