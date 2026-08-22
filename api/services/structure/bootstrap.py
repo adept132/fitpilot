@@ -168,6 +168,13 @@ async def ensure_structure(session: AsyncSession, app_user_id: int) -> dict:
             session.add(micro)
             existing_micro[profile.name] = micro
             microcycles_created += 1
+            # Не про получение id — micro.id тут не используется. Это про то,
+            # чтобы конфликт uq_app_user_microcycle_name (app_user_id, name)
+            # от параллельного вызова всплыл INSERT'ом ВНУТРИ этого try, а не
+            # позже неявным autoflush на первом SELECT раздела «Активация»,
+            # который уже вне try/except и оставил бы IntegrityError
+            # необработанным. Не убирать.
+            await session.flush()
     except IntegrityError:
         # Повторное ревью, Находка 2: два параллельных POST /profile/structure/bootstrap
         # (мобильный клиент умеет дублировать запросы) гоняются за одними и

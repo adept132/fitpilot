@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db
@@ -33,7 +34,14 @@ async def create_microcycle(micro_data: MicrocycleCreate, db: AsyncSession = Dep
         days_mapping=jsonable_encoder(micro_data.days_mapping)
     )
     db.add(new_micro)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Микроцикл с таким именем уже есть у пользователя. Выберите другое имя."
+        )
     await db.refresh(new_micro)
     return new_micro
 
@@ -77,7 +85,14 @@ async def update_microcycle(micro_id: int, micro_data: MicrocycleCreate, db: Asy
     micro.length_days = micro_data.length_days
     micro.days_mapping = jsonable_encoder(micro_data.days_mapping)
 
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Микроцикл с таким именем уже есть у пользователя. Выберите другое имя."
+        )
     await db.refresh(micro)
     return micro
 
