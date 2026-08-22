@@ -193,9 +193,22 @@ async def activate_split(
     )
 
     session.add(new_user_split)
+    await session.flush()
+
+    # P1-03 ч.1, §5.6: микроциклы из пресетов пересобираются под новые слоты.
+    # Правленые руками не трогаем — их раскладка не совпадёт с тем, что даёт
+    # их же профиль, и rebuild_for_active_split их пропустит.
+    from api.services.structure.bootstrap import rebuild_for_active_split
+
+    rebuilt = await rebuild_for_active_split(session, current_user.id)
+
     await session.commit()
 
-    return {"status": "success", "message": f"Split '{blueprint.name}' activated."}
+    return {
+        "status": "success",
+        "message": f"Split '{blueprint.name}' activated.",
+        "microcycles_rebuilt": rebuilt,
+    }
 
 @router.post("/custom")
 async def create_custom_split(

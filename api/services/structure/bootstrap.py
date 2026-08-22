@@ -270,3 +270,52 @@ async def ensure_structure(session: AsyncSession, app_user_id: int) -> dict:
         "microcycles_created": microcycles_created,
         "activated": True,
     }
+
+
+def _slots_from_mapping(days_mapping: dict) -> list[micro_profiles.SlotView]:
+    """Слоты, из которых была построена раскладка.
+
+    Признак «правлен руками» отдельным полем не хранится: достаточно
+    восстановить прежние слоты из самой раскладки и сравнить её с тем, что
+    даёт профиль на них (§5.6).
+    """
+    slots: list[micro_profiles.SlotView] = []
+    for position in range(1, len(days_mapping) + 1):
+        entry = days_mapping.get(str(position)) or {}
+        if entry.get("type") == "rest" or not entry.get("tag"):
+            slots.append(micro_profiles.SlotView(micro_profiles.REST_TYPE))
+        else:
+            slots.append(micro_profiles.SlotView(entry["tag"]))
+    return slots
+
+
+async def rebuild_profile_microcycles(
+    session: AsyncSession, app_user_id: int, slots: list[micro_profiles.SlotView]
+) -> int:
+    """Пересобрать неправленые микроциклы под новые слоты. Возвращает их число."""
+    by_name = {p.name: p for p in micro_profiles.MICROCYCLE_PROFILES}
+    rows = (await session.execute(
+        select(AppUserMicrocycle).where(AppUserMicrocycle.app_user_id == app_user_id)
+    )).scalars().all()
+
+    rebuilt = 0
+    for row in rows:
+        profile = by_name.get(row.name)
+        if profile is None:
+            continue  # чужой микроцикл, не из пресетов
+        previous_slots = _slots_from_mapping(row.days_mapping or {})
+        expected = micro_profiles.build_days_mapping(profile.code, previous_slots)
+        if row.days_mapping != expected:
+            continue  # человек правил — не трогаем (§5.6)
+        row.days_mapping = micro_profiles.build_days_mapping(profile.code, slots)
+        row.length_days = len(slots)
+        rebuilt += 1
+    return rebuilt
+
+
+async def rebuild_for_active_split(session: AsyncSession, app_user_id: int) -> int:
+    """Перестроить микроциклы под текущий активный сплит."""
+    slots = await _active_split_slots(session, app_user_id)
+    if slots is None:
+        return 0
+    return await rebuild_profile_microcycles(session, app_user_id, slots)
