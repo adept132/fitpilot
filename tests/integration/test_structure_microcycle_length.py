@@ -75,3 +75,38 @@ async def test_detaching_the_microcycle_is_always_allowed(client, auth_headers, 
         headers=auth_headers,
     )
     assert r.status_code == 200, r.text
+
+
+async def test_rejected_switch_keeps_previous_microcycle_active(client, auth_headers, test_user):
+    # Регрессия: проверка длины стоит ДО снятия is_active со всех микроциклов.
+    # Если порядок когда-нибудь переставят, неудачный switch снимет флаг
+    # с первого микроцикла и оставит пользователя вообще без активного.
+    length = await _activate_seven_day_split(test_user.id)
+    first_id = await _make_microcycle(test_user.id, length)
+
+    r = await client.patch(
+        "/workout-center/context/microcycle",
+        json={"microcycle_id": first_id},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+
+    second_id = await _make_microcycle(test_user.id, length + 1)
+
+    r = await client.patch(
+        "/workout-center/context/microcycle",
+        json={"microcycle_id": second_id},
+        headers=auth_headers,
+    )
+    assert r.status_code == 409, r.text
+
+    # Суть теста: активным должен остаться ПЕРВЫЙ микроцикл, и ровно один.
+    async with SessionLocal() as db:
+        active = (await db.execute(
+            select(AppUserMicrocycle).where(
+                AppUserMicrocycle.app_user_id == test_user.id,
+                AppUserMicrocycle.is_active.is_(True),
+            )
+        )).scalars().all()
+        assert len(active) == 1
+        assert active[0].id == first_id
