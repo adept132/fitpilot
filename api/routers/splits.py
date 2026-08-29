@@ -19,7 +19,7 @@ from api.services.models import (
 from api.schemas.splits import SplitBlueprintOut, DayBlueprintOut, ActivateSplitRequest, CreateCustomSplitRequest, \
     UpdateCustomSplitRequest, CreateCustomDayRequest, UpdateCustomDayRequest, SchedulePreviewRequest, \
     SchedulePreviewResponse, ScheduleLaunchRequest, SplitSuggestionOut
-from api.services.muscle_keys import key_for_muscle
+from api.services.muscle_keys import to_system_key
 from api.services.periodization.service import close_block_for_split_change
 from api.services.scheduling_engine import SchedulingEngine
 from api.services.structure.suggest import DayView, SplitView, suggest_splits
@@ -110,7 +110,7 @@ async def suggest_split(
                     template_type=slot.day.template_type.value,
                     muscles=frozenset(
                         key for key in (
-                            key_for_muscle(target.muscle_group_id)
+                            to_system_key(target.muscle_group_id)
                             for target in slot.day.muscle_targets
                         ) if key
                     ),

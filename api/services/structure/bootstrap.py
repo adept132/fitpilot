@@ -62,32 +62,6 @@ async def _experience_level(session: AsyncSession, app_user_id: int) -> str:
     return (getattr(profile, "experience_level", None) or "beginner").strip().lower()
 
 
-async def _has_active_structure(session: AsyncSession, app_user_id: int) -> bool:
-    """Есть ли у пользователя ОДНОВРЕМЕННО активный мезоцикл и активный микроцикл.
-
-    Используется только веткой обработки гонки ниже (перепроверка после
-    отката при IntegrityError) — там нужен именно признак «конкурентная
-    транзакция уже закоммитила и активировала», а не факт существования
-    записей. Обычный путь ensure_structure своё решение строит на
-    _has_any_mesocycle/_has_any_microcycle, см. их докстринги.
-    """
-    has_active_meso = (await session.execute(
-        select(AppUserMesocycle.id).where(
-            AppUserMesocycle.app_user_id == app_user_id,
-            AppUserMesocycle.is_active.is_(True),
-        ).limit(1)
-    )).scalars().first() is not None
-    if not has_active_meso:
-        return False
-    has_active_micro = (await session.execute(
-        select(AppUserMicrocycle.id).where(
-            AppUserMicrocycle.app_user_id == app_user_id,
-            AppUserMicrocycle.is_active.is_(True),
-        ).limit(1)
-    )).scalars().first() is not None
-    return has_active_micro
-
-
 async def _has_any_mesocycle(session: AsyncSession, app_user_id: int) -> bool:
     """Есть ли у пользователя хоть одна ЛИЧНАЯ копия мезоцикла (активная или нет)."""
     return (await session.execute(
@@ -222,14 +196,28 @@ async def ensure_structure(session: AsyncSession, app_user_id: int) -> dict:
         # возвращаем факт: победившая транзакция уже сделала (или вот-вот
         # сделает) всё нужное, тот же контракт, что у ensure_active_block.
         await session.rollback()
-        if not await _has_active_structure(session, app_user_id):
-            # Активной структуры по-прежнему нет — IntegrityError был не про
-            # эту гонку (иначе конкурентная транзакция уже успела бы
-            # закоммитить свои мезоцикл/микроцикл и их активацию), а про
-            # что-то другое: нарушение NOT NULL, битый внешний ключ, порчу
-            # данных. Маскировать чужую ошибку тем же нулевым ответом, что и
-            # легальный "у пользователя нет активного сплита", нельзя — тот
-            # же контракт, что у ensure_active_block.
+        # Правка, финальное ревью P1-03, Important 3: раньше здесь стоял
+        # _has_active_structure (требовал АКТИВНОГО мезоцикла и микроцикла
+        # одновременно). Но легальное состояние «копии есть, ни одна не
+        # активна» существует — пользователь мог снять мезоцикл опцией «Без
+        # мезоцикла» (см. правку в разделе «Активация» выше). Проигравшая
+        # параллельная транзакция в этом состоянии видела бы is_active=False
+        # у обеих сущностей, _has_active_structure вернула бы False, и код
+        # пробрасывал бы исключение — 500 вместо благополучного возврата,
+        # хотя победившая транзакция уже создала (или создаёт) нужные записи.
+        # Проверяем факт СУЩЕСТВОВАНИЯ записей, а не их активности — тот же
+        # признак, на котором строится весь остальной ensure_structure.
+        if not (
+            await _has_any_mesocycle(session, app_user_id)
+            and await _has_any_microcycle(session, app_user_id)
+        ):
+            # Записей по-прежнему нет — IntegrityError был не про эту гонку
+            # (иначе конкурентная транзакция уже успела бы закоммитить свои
+            # мезоцикл/микроцикл), а про что-то другое: нарушение NOT NULL,
+            # битый внешний ключ, порчу данных. Маскировать чужую ошибку тем
+            # же нулевым ответом, что и легальный "у пользователя нет
+            # активного сплита", нельзя — тот же контракт, что у
+            # ensure_active_block.
             raise
         return {
             "mesocycles_created": 0,

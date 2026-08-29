@@ -410,6 +410,20 @@ async def update_workout_center_split(
         )
         session.add(user_split)
 
+    # Финальное ревью P1-03, Critical 1: это ВТОРОЙ вход смены сплита — тот
+    # же blueprint_id меняется и в POST /splits/active (splits.py), и здесь.
+    # Мобильный селектор на экране тренировки бьёт именно сюда, а не в
+    # /splits/active. Без пересборки микроциклы остаются на длине старого
+    # сплита, и scheduling_engine молча уводит раскладку повторов
+    # относительно дней нового сплита — тот самый дефект, ради которого
+    # затевалась вся эта задача. flush ДО вызова обязателен: rebuild_for_active_split
+    # читает активный UserSplit тем же SELECT в этой же сессии, и без flush
+    # он увидел бы старый blueprint_id.
+    from api.services.structure.bootstrap import rebuild_for_active_split
+
+    await session.flush()
+    await rebuild_for_active_split(session, app_user.id)
+
     await session.commit()
     return await build_context(session, app_user)
 
