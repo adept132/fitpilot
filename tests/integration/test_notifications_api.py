@@ -100,6 +100,19 @@ async def test_materializes_initial_domain_events(client, db, test_user):
     }
     assert response.json()["unread_count"] == 3
 
+    rows = (await db.execute(
+        select(AppNotification).where(AppNotification.app_user_id == test_user.id)
+    )).scalars().all()
+    semantic = {row.event_type: row for row in rows}
+    assert semantic["training_day_without_plan"].message_key == (
+        "notification.training_day_without_plan"
+    )
+    assert semantic["goal_deadline"].message_key == "notification.goal_deadline"
+    assert semantic["goal_deadline"].message_params == {"days": 2}
+    assert semantic["measurements_due"].message_key == (
+        "notification.measurements_due"
+    )
+
     # Re-projecting the same domain state must not create duplicates.
     response = await client.get(
         "/notifications", params={"local_date": today.isoformat()}

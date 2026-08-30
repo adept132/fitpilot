@@ -9,6 +9,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.i18n import TRANSLATIONS, SupportedLanguage, tr
 from api.services.models import (
     AppNotification,
     BodyMeasurement,
@@ -32,6 +33,8 @@ async def create_notification(
     entity_type: str | None = None,
     entity_id: str | int | None = None,
     payload: dict[str, Any] | None = None,
+    message_key: str | None = None,
+    message_params: dict[str, Any] | None = None,
 ) -> AppNotification:
     """Create exactly one durable event for a user and semantic dedupe key."""
 
@@ -42,6 +45,8 @@ async def create_notification(
         "entity_id": None if entity_id is None else str(entity_id),
         "title": title,
         "body": body,
+        "message_key": message_key,
+        "message_params": message_params,
         "payload": payload or {},
         "dedupe_key": dedupe_key,
     }
@@ -88,6 +93,29 @@ async def create_notification(
     return notification
 
 
+def render_notification(
+    row: AppNotification, language: SupportedLanguage
+) -> tuple[str, str]:
+    """Render semantic copy without mutating the durable notification row."""
+
+    message_key = getattr(row, "message_key", None)
+    if not message_key:
+        return row.title, row.body
+
+    title_key = f"{message_key}.title"
+    body_key = f"{message_key}.body"
+    if title_key not in TRANSLATIONS["ru"] or body_key not in TRANSLATIONS["ru"]:
+        return row.title, row.body
+
+    params = getattr(row, "message_params", None) or {}
+    if not isinstance(params, dict):
+        return row.title, row.body
+    try:
+        return tr(language, title_key, **params), tr(language, body_key, **params)
+    except (KeyError, ValueError):
+        return row.title, row.body
+
+
 async def materialize_domain_notifications(
     db: AsyncSession,
     app_user_id: int,
@@ -112,6 +140,8 @@ async def materialize_domain_notifications(
             entity_id=proposal.id,
             title="План можно адаптировать",
             body="Появилось предложение по адаптации тренировочного плана.",
+            message_key="notification.periodization_proposal",
+            message_params={},
             payload={
                 "route": "/periodization",
                 "proposalId": proposal.id,
@@ -142,6 +172,8 @@ async def materialize_domain_notifications(
             entity_id=unplanned_day.id,
             title="На сегодня нет плана",
             body="Выберите план из библиотеки или создайте его в генераторе.",
+            message_key="notification.training_day_without_plan",
+            message_params={},
             payload={
                 "route": "/plan-generator",
                 "calendarDayId": unplanned_day.id,
@@ -169,6 +201,11 @@ async def materialize_domain_notifications(
             if days_left == 0
             else f"До срока цели осталось {days_left} дн. Проверьте прогресс."
         )
+        message_key = (
+            "notification.goal_deadline_today"
+            if days_left == 0
+            else "notification.goal_deadline"
+        )
         await create_notification(
             db,
             app_user_id=app_user_id,
@@ -177,6 +214,8 @@ async def materialize_domain_notifications(
             entity_id=goal.id,
             title="Приближается срок цели",
             body=body,
+            message_key=message_key,
+            message_params={"days": days_left},
             payload={"route": "/progress", "goalId": goal.id},
             dedupe_key=f"goal_deadline:{goal.id}:{goal.deadline.isoformat()}",
         )
@@ -210,6 +249,8 @@ async def materialize_domain_notifications(
                 entity_type="body_measurements",
                 title="Пора обновить замеры",
                 body="Свежие замеры сделают динамику и прогнозы точнее.",
+                message_key="notification.measurements_due",
+                message_params={},
                 payload={"route": "/progress/body-composition"},
                 dedupe_key=f"measurements_due:{source_date}",
             )

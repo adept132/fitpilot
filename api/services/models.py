@@ -1198,6 +1198,8 @@ class AppNotification(Base):
     entity_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     title: Mapped[str] = mapped_column(String(160), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    message_key: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    message_params: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     payload: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=dict, server_default="{}"
     )

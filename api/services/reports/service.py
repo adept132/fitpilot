@@ -127,6 +127,8 @@ async def ensure_reports(
                 entity_id=report_id,
                 title=tr(language, f"report.notification.{period_type}.title"),
                 body=tr(language, "report.notification.body"),
+                message_key=f"notification.period_report.{period_type}",
+                message_params={},
                 payload={"route": f"/reports/{period_type}/{start.isoformat()}"},
                 dedupe_key=f"period_report:{period_type}:{start.isoformat()}",
             )

@@ -103,6 +103,8 @@ async def test_creates_notification_with_route_to_the_report(db, test_user):
     )).scalars().first()
     assert notification is not None
     assert notification.payload["route"] == "/reports/week/2026-08-10"
+    assert notification.message_key == "notification.period_report.week"
+    assert notification.message_params == {}
     # Тексты пушей обезличены: ни чисел, ни имён упражнений.
     assert "%" not in notification.body
 

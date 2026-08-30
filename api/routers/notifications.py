@@ -2,12 +2,13 @@
 
 from datetime import date, datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db
 from api.errors import LocalizedHTTPException
+from api.i18n import SupportedLanguage, resolve_language
 from api.schemas.notifications import (
     MarkAllReadResponse,
     NotificationBadge,
@@ -22,6 +23,7 @@ from api.services.models import AppNotification, AppUser, PushDevice
 from api.services.notification_service import (
     mark_all_read,
     materialize_domain_notifications,
+    render_notification,
     unread_count,
 )
 from api.services.push_service import disable_device, register_device
@@ -85,14 +87,23 @@ async def update_push_preferences(
     return _device_read(device)
 
 
-def _read(row: AppNotification) -> NotificationRead:
+def _request_language(request: Request) -> SupportedLanguage:
+    return getattr(
+        request.state,
+        "language",
+        resolve_language(request.headers.get("Accept-Language"), None),
+    )
+
+
+def _read(row: AppNotification, language: SupportedLanguage) -> NotificationRead:
+    title, body = render_notification(row, language)
     return NotificationRead(
         id=row.id,
         event_type=row.event_type,
         entity_type=row.entity_type,
         entity_id=row.entity_id,
-        title=row.title,
-        body=row.body,
+        title=title,
+        body=body,
         payload=row.payload or {},
         read_at=row.read_at,
         created_at=row.created_at,
@@ -101,6 +112,7 @@ def _read(row: AppNotification) -> NotificationRead:
 
 @router.get("", response_model=NotificationList)
 async def list_notifications(
+    request: Request,
     cursor: int | None = Query(default=None, ge=1),
     limit: int = Query(default=30, ge=1, le=100),
     unread_only: bool = False,
@@ -128,7 +140,7 @@ async def list_notifications(
     has_more = len(rows) > limit
     page = rows[:limit]
     return NotificationList(
-        items=[_read(row) for row in page],
+        items=[_read(row, _request_language(request)) for row in page],
         unread_count=await unread_count(db, current_user.id),
         next_cursor=page[-1].id if has_more and page else None,
     )
@@ -149,6 +161,7 @@ async def get_badge(
 
 @router.post("/{notification_id}/read", response_model=NotificationRead)
 async def mark_notification_read(
+    request: Request,
     notification_id: int,
     current_user: AppUser = Depends(get_current_app_user),
     db: AsyncSession = Depends(get_db),
@@ -169,7 +182,7 @@ async def mark_notification_read(
         notification.read_at = datetime.now(timezone.utc)
         await db.commit()
         await db.refresh(notification)
-    return _read(notification)
+    return _read(notification, _request_language(request))
 
 
 @router.post("/read-all", response_model=MarkAllReadResponse)

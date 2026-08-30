@@ -178,6 +178,8 @@ async def _apply_snapshot(
             entity_id=workout_id,
             title=tr(language, "sync.notification.conflict.title"),
             body=tr(language, "sync.notification.conflict.body"),
+            message_key="notification.sync_conflict",
+            message_params={},
             payload={
                 "route": "/workout",
                 "workoutId": workout_id,

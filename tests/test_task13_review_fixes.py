@@ -308,3 +308,5 @@ async def test_sync_conflict_notification_uses_passed_request_language(monkeypat
     notification = create_notification.await_args.kwargs
     assert notification["title"] == "Нужно проверить синхронизацию"
     assert notification["body"] == "Тренировка была изменена на другом устройстве."
+    assert notification["message_key"] == "notification.sync_conflict"
+    assert notification["message_params"] == {}

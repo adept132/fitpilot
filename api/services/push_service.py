@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.i18n import normalize_language, tr
 from api.services.models import AppNotification, AppUser, AppUserProfile, PushDelivery, PushDevice
 from api.services.notification_service import materialize_domain_notifications
 from app.database import SessionLocal
@@ -23,12 +24,31 @@ EXPO_RECEIPTS_URL = "https://exp.host/--/api/v2/push/getReceipts"
 MAX_ATTEMPTS = 5
 
 SAFE_TEMPLATES = {
-    "periodization_proposal": ("План можно адаптировать", "Откройте Eurith, чтобы проверить предложение."),
-    "training_day_without_plan": ("На сегодня нет плана", "Выберите план или создайте его в генераторе."),
-    "goal_deadline": ("Приближается срок цели", "Откройте Eurith, чтобы проверить прогресс."),
-    "measurements_due": ("Пора обновить замеры", "Свежие данные сделают динамику точнее."),
-    "sync_conflict": ("Нужно проверить синхронизацию", "Откройте Eurith, чтобы сохранить актуальные данные."),
-    "period_report": ("Отчёт готов", "Откройте Eurith, чтобы посмотреть итоги периода."),
+    event_type: f"notification.push.{event_type}"
+    for event_type in (
+        "periodization_proposal",
+        "training_day_without_plan",
+        "goal_deadline",
+        "measurements_due",
+        "sync_conflict",
+        "period_report",
+    )
+}
+
+SAFE_MESSAGE_KEYS = {
+    "periodization_proposal": {"notification.periodization_proposal"},
+    "training_day_without_plan": {"notification.training_day_without_plan"},
+    "goal_deadline": {
+        "notification.goal_deadline",
+        "notification.goal_deadline_today",
+    },
+    "measurements_due": {"notification.measurements_due"},
+    "sync_conflict": {"notification.sync_conflict"},
+    "period_report": {
+        "notification.period_report.week",
+        "notification.period_report.month",
+        "notification.period_report.year",
+    },
 }
 
 SAFE_ROUTES = {
@@ -65,9 +85,39 @@ def priority_for(event_type: str) -> str:
     return "normal" if event_type in QUIET_EVENT_TYPES else "high"
 
 
-def safe_push_content(event_type: str) -> tuple[str, str] | None:
+def safe_push_content(
+    notification_or_event_type: AppNotification | str,
+    language: str = "ru",
+) -> tuple[str, str] | None:
     """Never forward entity names, measurements or arbitrary persisted copy."""
-    return SAFE_TEMPLATES.get(event_type)
+    notification = (
+        None if isinstance(notification_or_event_type, str) else notification_or_event_type
+    )
+    event_type = (
+        notification_or_event_type
+        if isinstance(notification_or_event_type, str)
+        else notification_or_event_type.event_type
+    )
+    fallback_key = SAFE_TEMPLATES.get(event_type)
+    if fallback_key is None:
+        return None
+
+    message_key = getattr(notification, "message_key", None)
+    if notification is not None and message_key in SAFE_MESSAGE_KEYS[event_type]:
+        params = getattr(notification, "message_params", None) or {}
+        if isinstance(params, dict):
+            try:
+                return (
+                    tr(language, f"{message_key}.title", **params),
+                    tr(language, f"{message_key}.body", **params),
+                )
+            except (KeyError, ValueError):
+                pass
+
+    return (
+        tr(language, f"{fallback_key}.title"),
+        tr(language, f"{fallback_key}.body"),
+    )
 
 
 def safe_push_data(notification: AppNotification) -> dict:
@@ -181,9 +231,27 @@ async def send_pending(db: AsyncSession, limit: int = 100) -> int:
         .order_by(PushDelivery.id).limit(limit).with_for_update(skip_locked=True)
     )).all()
     sent = 0
+    language_by_user: dict[int, str] = {}
     for delivery, device, notification in rows:
-        content = safe_push_content(notification.event_type)
-        if not content or notification.event_type in (device.disabled_event_types or []):
+        if notification.event_type in (device.disabled_event_types or []):
+            delivery.status = "suppressed"
+            continue
+        if notification.app_user_id not in language_by_user:
+            profile_settings = (
+                await db.execute(
+                    select(AppUserProfile.settings).where(
+                        AppUserProfile.app_user_id == notification.app_user_id
+                    )
+                )
+            ).scalar_one_or_none()
+            profile_language = normalize_language(
+                (profile_settings or {}).get("language")
+            )
+            language_by_user[notification.app_user_id] = profile_language or "ru"
+        content = safe_push_content(
+            notification, language_by_user[notification.app_user_id]
+        )
+        if not content:
             delivery.status = "suppressed"
             continue
         delivery.attempts += 1
