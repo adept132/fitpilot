@@ -131,9 +131,14 @@ async def delete_superset(
 async def start_superset_endpoint(
     session_exercise_id: int,
     db: AsyncSession = Depends(get_db),
+    app_user: AppUser = Depends(get_current_app_user),
 ):
     try:
-        session_exercise = await WorkoutSupersetService.start_superset(db, session_exercise_id)
+        session_exercise = await WorkoutSupersetService.start_superset(
+            db,
+            session_exercise_id,
+            app_user.id,
+        )
     except ValueError:
         raise LocalizedHTTPException(404, "superset.not_found")
 

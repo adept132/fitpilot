@@ -1,11 +1,12 @@
 from datetime import date, datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db
 from api.errors import LocalizedHTTPException
+from api.i18n import SupportedLanguage, tr
 from api.schemas.reports import (
     PeriodType,
     ReportCardRead,
@@ -41,12 +42,18 @@ def _headline(payload: dict) -> list[ReportHeadlineRead]:
 
 @router.get("/reports", response_model=ReportListRead)
 async def list_reports(
+    request: Request,
     local_date: date | None = None,
     limit: int = Query(20, ge=1, le=100),
     current_user=Depends(get_current_app_user),
     db: AsyncSession = Depends(get_db),
 ) -> ReportListRead:
-    await ensure_reports(db, current_user.id, local_date or date.today())
+    await ensure_reports(
+        db,
+        current_user.id,
+        local_date or date.today(),
+        language=request.state.language,
+    )
     await db.commit()
 
     rows = (await db.execute(
@@ -96,7 +103,24 @@ async def _load(db: AsyncSession, app_user_id: int, period_type: str,
     return report
 
 
-def _to_read(report: PeriodReport) -> ReportRead:
+def _localized_actions(
+    actions: list[dict], language: SupportedLanguage
+) -> list[dict]:
+    localized = []
+    for stored_action in actions:
+        action = dict(stored_action)
+        title_key = action.get("title_key")
+        body_key = action.get("body_key")
+        params = action.get("params") or {}
+        if title_key:
+            action["title"] = tr(language, title_key, **params)
+        if body_key:
+            action["reason"] = tr(language, body_key, **params)
+        localized.append(action)
+    return localized
+
+
+def _to_read(report: PeriodReport, language: SupportedLanguage) -> ReportRead:
     return ReportRead(
         shape_version=report.shape_version,
         rules_version=report.rules_version,
@@ -106,23 +130,25 @@ def _to_read(report: PeriodReport) -> ReportRead:
         generated_at=report.generated_at,
         seen_at=report.seen_at,
         metrics=report.payload.get("metrics", {}),
-        actions=report.payload.get("actions", []),
+        actions=_localized_actions(report.payload.get("actions", []), language),
     )
 
 
 @router.get("/reports/{period_type}/{period_start}", response_model=ReportRead)
 async def get_report(
+    request: Request,
     period_type: PeriodType,
     period_start: date,
     current_user=Depends(get_current_app_user),
     db: AsyncSession = Depends(get_db),
 ) -> ReportRead:
     report = await _load(db, current_user.id, period_type, period_start)
-    return _to_read(report)
+    return _to_read(report, request.state.language)
 
 
 @router.post("/reports/{period_type}/{period_start}/seen", response_model=ReportRead)
 async def mark_report_seen(
+    request: Request,
     period_type: PeriodType,
     period_start: date,
     current_user=Depends(get_current_app_user),
@@ -135,4 +161,4 @@ async def mark_report_seen(
         report.seen_at = datetime.now(timezone.utc)
         await db.commit()
         await db.refresh(report)
-    return _to_read(report)
+    return _to_read(report, request.state.language)

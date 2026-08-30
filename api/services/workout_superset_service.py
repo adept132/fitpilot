@@ -771,10 +771,17 @@ class WorkoutSupersetService:
     async def start_superset(
             db: AsyncSession,
             session_exercise_id: int,
+            app_user_id: int,
     ) -> WorkoutSessionExercise:
         result = await db.execute(
-            select(WorkoutSessionExercise).where(
-                WorkoutSessionExercise.id == session_exercise_id
+            select(WorkoutSessionExercise)
+            .join(
+                WorkoutSession,
+                WorkoutSession.id == WorkoutSessionExercise.workout_session_id,
+            )
+            .where(
+                WorkoutSessionExercise.id == session_exercise_id,
+                WorkoutSession.app_user_id == app_user_id,
             )
         )
         session_exercise = result.scalar_one_or_none()

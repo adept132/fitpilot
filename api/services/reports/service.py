@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.i18n import resolve_language, tr
+from api.i18n import SupportedLanguage, resolve_language, tr
 from api.services.models import AppUserProfile, PeriodizationProposal, PeriodReport
 from api.services.progression.params import DEFAULT_RIR
 from api.services.reports.metrics import ReportMetrics, compute_metrics, has_activity
@@ -56,7 +56,10 @@ async def _rule_context(session: AsyncSession, app_user_id: int) -> RuleContext:
 
 
 async def ensure_reports(
-    session: AsyncSession, app_user_id: int, local_date: date
+    session: AsyncSession,
+    app_user_id: int,
+    local_date: date,
+    language: SupportedLanguage | None = None,
 ) -> int:
     """Создать недостающие отчёты за закрытые периоды. Возвращает счётчик."""
     from api.services.notification_service import create_notification
@@ -65,7 +68,9 @@ async def ensure_reports(
         select(AppUserProfile).where(AppUserProfile.app_user_id == app_user_id)
     )).scalar_one_or_none()
     level = profile.experience_level if profile else None
-    language = resolve_language(None, profile.settings if profile else None)
+    language = language or resolve_language(
+        None, profile.settings if profile else None
+    )
     context = await _rule_context(session, app_user_id)
 
     created = 0

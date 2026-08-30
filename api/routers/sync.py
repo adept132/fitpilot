@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from api.deps import get_db
-from api.i18n import resolve_language, tr
+from api.i18n import SupportedLanguage, tr
 from api.schemas.sync import (
     SyncChangesResponse,
     SyncConflictResponse,
@@ -96,20 +96,26 @@ async def sync_workout(
     (см. init_db) остаются жёсткой гарантией.
     """
     app_user_id = app_user.id
+    language = getattr(app_user, "_request_language", "en")
     try:
-        return await _apply_snapshot(db, app_user_id, payload)
+        return await _apply_snapshot(
+            db, app_user_id, payload, language=language
+        )
     except IntegrityError:
         # Гонка проскочила мимо advisory-лока (например, запросы ушли в разные
         # соединения через внешний пулер). Уникальный индекс отработал — второй
         # проход уже найдёт строку, созданную конкурентом, и обновит её.
         await db.rollback()
-        return await _apply_snapshot(db, app_user_id, payload)
+        return await _apply_snapshot(
+            db, app_user_id, payload, language=language
+        )
 
 
 async def _apply_snapshot(
     db: AsyncSession,
     app_user_id: int,
     payload: SyncWorkoutSnapshot,
+    language: SupportedLanguage = "en",
 ) -> SyncWorkoutResponse:
     # 0. Сериализуем конкурентные синки ОДНОЙ тренировки: лок держится до конца
     # транзакции, поэтому второй пуш дождётся коммита первого и увидит его строку
@@ -164,14 +170,6 @@ async def _apply_snapshot(
         workout_id = workout.id
         await db.rollback()  # снимаем advisory-лок, ничего не записав
         detail = await _load_detail(db, workout_id)
-        profile_settings = (
-            await db.execute(
-                select(AppUserProfile.settings).where(
-                    AppUserProfile.app_user_id == app_user_id
-                )
-            )
-        ).scalar_one_or_none()
-        language = resolve_language(None, profile_settings)
         await create_notification(
             db,
             app_user_id=app_user_id,
