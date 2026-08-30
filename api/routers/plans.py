@@ -23,7 +23,7 @@ from api.services.plan_generation_insights import (
 )
 from api.services.muscle_keys import key_for_muscle
 from api.services.exercise_selection_engine import SelectionConfig, SelectionPolicy, SelectedExercise
-from api.services.exercise_localization import localized_names
+from api.services.exercise_localization import localized_descriptions, localized_names
 from api.services.plan_duration import DurationConfig, estimate_duration_seconds, fit_to_duration
 from api.services.progression import repository as progression_repo
 from api.services.progression.engine import plan_exercise
@@ -456,6 +456,9 @@ async def generate_plan(request: GeneratePlanRequest,
                     exercise_id=e.exercise_id,
                     name=pool_by_id[e.exercise_id].name,
                     localized_names=localized_names(pool_by_id[e.exercise_id]),
+                    localized_descriptions=localized_descriptions(
+                        pool_by_id[e.exercise_id]
+                    ),
                     target_sets=e.sets,
                     order_index=e.order_index, superset_group_id=e.superset_group_id,
                     fatigue_tier=e.fatigue_tier, primary_muscle=e.primary_muscle,
@@ -506,21 +509,32 @@ async def preview_generated_plan(
     profile, blueprint, pool = await _load_generation_context(
         db, current_user, request.blueprint_id,
     )
+    pool_by_id = {exercise.id: exercise for exercise in pool}
+    canonical_days = []
+    for day in request.days:
+        if any(exercise.exercise_id not in pool_by_id for exercise in day.exercises):
+            raise LocalizedHTTPException(400, "plan.exercise_unavailable")
+        canonical_days.append(day.model_copy(update={
+            "exercises": [exercise.model_copy(update={
+                "name": pool_by_id[exercise.exercise_id].name,
+                "localized_names": localized_names(pool_by_id[exercise.exercise_id]),
+                "localized_descriptions": localized_descriptions(
+                    pool_by_id[exercise.exercise_id]
+                ),
+            }) for exercise in day.exercises],
+        }))
     allowed = _allowed_equipment((profile.settings or {}).get("locations"))
     prehab = (profile.settings or {}).get("prehab_flags", [])
     inputs = _generation_input_summary(profile, blueprint, request)
     comparison = await _generation_comparison(
-        db, current_user, blueprint, request.days, request.target_date,
+        db, current_user, blueprint, canonical_days, request.target_date,
         single_day=request.day_name is not None,
     )
     issues = []
     day_blueprints = {slot.day.name.lower(): slot.day for slot in blueprint.slots}
-    pool_by_id = {exercise.id: exercise for exercise in pool}
     refreshed_days = []
     effort_by_tag = await _day_effort_by_tag(db, current_user.id)
-    for day in request.days:
-        if any(exercise.exercise_id not in pool_by_id for exercise in day.exercises):
-            raise LocalizedHTTPException(400, "plan.exercise_unavailable")
+    for day in canonical_days:
         selected = [SelectedExercise(
             exercise_id=exercise.exercise_id,
             name=pool_by_id[exercise.exercise_id].name,
@@ -566,6 +580,9 @@ async def preview_generated_plan(
         refreshed_exercises = [exercise.model_copy(update={
             "name": pool_by_id[exercise.exercise_id].name,
             "localized_names": localized_names(pool_by_id[exercise.exercise_id]),
+            "localized_descriptions": localized_descriptions(
+                pool_by_id[exercise.exercise_id]
+            ),
         }) for exercise in day.exercises]
         refreshed_day = day.model_copy(update={
             "exercises": refreshed_exercises,

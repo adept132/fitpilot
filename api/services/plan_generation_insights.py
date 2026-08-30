@@ -15,6 +15,7 @@ from api.schemas.plan import (
     PreviousPlanSummary,
 )
 from api.services.exercise_selection_engine import filter_pool
+from api.services.exercise_localization import localized_descriptions, localized_names
 from api.services.muscle_keys import key_for_muscle
 
 
@@ -25,6 +26,33 @@ def _exercise_rows(plan) -> list:
 def _exercise_name(row) -> str:
     exercise = getattr(row, "exercise", None)
     return getattr(exercise, "name", None) or f"Упражнение #{row.exercise_id}"
+
+
+def _compared_exercise(row) -> ComparedExercise:
+    exercise = getattr(row, "exercise", None)
+    name = (
+        getattr(exercise, "name", None)
+        or getattr(row, "name", None)
+        or _exercise_name(row)
+    )
+    names = (
+        localized_names(exercise)
+        if exercise is not None
+        else dict(getattr(row, "localized_names", {}) or {})
+    )
+    descriptions = (
+        localized_descriptions(exercise)
+        if exercise is not None
+        else dict(getattr(row, "localized_descriptions", {}) or {})
+    )
+    if not names and name:
+        names = {"ru": name}
+    return ComparedExercise(
+        exercise_id=row.exercise_id,
+        name=name,
+        localized_names=names,
+        localized_descriptions=descriptions,
+    )
 
 
 def _superset_pattern(rows: list) -> list[int | None]:
@@ -70,11 +98,11 @@ def compare_generated_day(
     old_by_id = {row.exercise_id: row for row in previous_rows}
     new_by_id = {row.exercise_id: row for row in generated_rows}
     added = [
-        ComparedExercise(exercise_id=key, name=new_by_id[key].name)
+        _compared_exercise(new_by_id[key])
         for key in new_by_id.keys() - old_by_id.keys()
     ]
     removed = [
-        ComparedExercise(exercise_id=key, name=_exercise_name(old_by_id[key]))
+        _compared_exercise(old_by_id[key])
         for key in old_by_id.keys() - new_by_id.keys()
     ]
     modified = []
@@ -86,7 +114,7 @@ def compare_generated_day(
             or getattr(old, "override_reps", None) != new.override_reps
             or getattr(old, "override_rir", None) != new.override_rir
         ):
-            modified.append(ComparedExercise(exercise_id=key, name=new.name))
+            modified.append(_compared_exercise(new))
 
     dates = sorted(set(affected_dates))
     status = "new" if not previous_plans else (

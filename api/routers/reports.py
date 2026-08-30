@@ -16,7 +16,10 @@ from api.schemas.reports import (
 )
 from api.services.app_user_service import get_current_app_user
 from api.services.models import PeriodReport
-from api.services.reports.service import ensure_reports
+from api.services.reports.service import (
+    enrich_report_record_localizations,
+    ensure_reports,
+)
 
 router = APIRouter(tags=["reports"])
 
@@ -135,7 +138,12 @@ def _localized_actions(
     return localized
 
 
-def _to_read(report: PeriodReport, language: SupportedLanguage) -> ReportRead:
+def _to_read(
+    report: PeriodReport,
+    language: SupportedLanguage,
+    *,
+    metrics: dict | None = None,
+) -> ReportRead:
     return ReportRead(
         shape_version=report.shape_version,
         rules_version=report.rules_version,
@@ -144,7 +152,7 @@ def _to_read(report: PeriodReport, language: SupportedLanguage) -> ReportRead:
         period_end=report.period_end,
         generated_at=report.generated_at,
         seen_at=report.seen_at,
-        metrics=report.payload.get("metrics", {}),
+        metrics=report.payload.get("metrics", {}) if metrics is None else metrics,
         actions=_localized_actions(report.payload.get("actions", []), language),
     )
 
@@ -158,7 +166,10 @@ async def get_report(
     db: AsyncSession = Depends(get_db),
 ) -> ReportRead:
     report = await _load(db, current_user.id, period_type, period_start)
-    return _to_read(report, request.state.language)
+    metrics = await enrich_report_record_localizations(
+        db, report.payload.get("metrics", {})
+    )
+    return _to_read(report, request.state.language, metrics=metrics)
 
 
 @router.post("/reports/{period_type}/{period_start}/seen", response_model=ReportRead)
@@ -176,4 +187,7 @@ async def mark_report_seen(
         report.seen_at = datetime.now(timezone.utc)
         await db.commit()
         await db.refresh(report)
-    return _to_read(report, request.state.language)
+    metrics = await enrich_report_record_localizations(
+        db, report.payload.get("metrics", {})
+    )
+    return _to_read(report, request.state.language, metrics=metrics)
