@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from api.deps import get_db
+from api.i18n import resolve_language, tr
 from api.schemas.sync import (
     SyncChangesResponse,
     SyncConflictResponse,
@@ -163,14 +164,22 @@ async def _apply_snapshot(
         workout_id = workout.id
         await db.rollback()  # снимаем advisory-лок, ничего не записав
         detail = await _load_detail(db, workout_id)
+        profile_settings = (
+            await db.execute(
+                select(AppUserProfile.settings).where(
+                    AppUserProfile.app_user_id == app_user_id
+                )
+            )
+        ).scalar_one_or_none()
+        language = resolve_language(None, profile_settings)
         await create_notification(
             db,
             app_user_id=app_user_id,
             event_type="sync_conflict",
             entity_type="workout",
             entity_id=workout_id,
-            title="Нужно проверить синхронизацию",
-            body="Тренировка была изменена на другом устройстве.",
+            title=tr(language, "sync.notification.conflict.title"),
+            body=tr(language, "sync.notification.conflict.body"),
             payload={
                 "route": "/workout",
                 "workoutId": workout_id,

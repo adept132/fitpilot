@@ -1,6 +1,7 @@
 from typing import List, Dict, Optional
 from uuid import UUID
-from fastapi import HTTPException, status
+from fastapi import status
+from api.errors import LocalizedHTTPException
 from pydantic import BaseModel
 
 
@@ -32,9 +33,8 @@ class AntiSuicideValidator:
         Проверяет мезоцикл на плавность прогрессии и безопасность выхода из отказа.
         """
         if not effort_tiers:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Мезоцикл не может быть пустым."
+            raise LocalizedHTTPException(
+                status.HTTP_400_BAD_REQUEST, "validator.mesocycle_empty"
             )
 
         deload_count = effort_tiers.count('deload')
@@ -51,9 +51,8 @@ class AntiSuicideValidator:
                 current_streak = 0
 
         if max_streak > 5:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Критическая перегрузка: нельзя планировать более 5 фаз нагрузки подряд без Deload."
+            raise LocalizedHTTPException(
+                status.HTTP_400_BAD_REQUEST, "validator.too_many_load_phases"
             )
 
         # Проверка по цепочке шагов
@@ -64,9 +63,9 @@ class AntiSuicideValidator:
             if current_tier == 'failure' and i < len(effort_tiers) - 1:
                 next_tier = effort_tiers[i + 1]
                 if next_tier != 'deload':
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Нарушение супер-компенсации: после отказной фазы (Failure) обязательно должна идти разгрузка (Deload)."
+                    raise LocalizedHTTPException(
+                        status.HTTP_400_BAD_REQUEST,
+                        "validator.failure_requires_deload",
                     )
 
             # Правило 2: Плавность прогрессии вверх (не более чем на 2 шага)
@@ -77,9 +76,10 @@ class AntiSuicideValidator:
                 curr_idx = cls.EFFORT_ORDER.index(current_tier)
 
                 if prev_idx != 0 and curr_idx > prev_idx and curr_idx - prev_idx > 2:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Слишком резкий скачок интенсивности: нельзя прыгать с {prev_tier} на {current_tier}."
+                    raise LocalizedHTTPException(
+                        status.HTTP_400_BAD_REQUEST,
+                        "validator.intensity_jump",
+                        {"from_tier": prev_tier, "to_tier": current_tier},
                     )
 
         return True
@@ -101,10 +101,14 @@ class AntiSuicideValidator:
 
             # Проверяем лимит
             if muscle_volumes[ex.primary_muscle] > user_cap:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Превышен жесткий лимит подходов для группы [{ex.primary_muscle}]. "
-                           f"Максимум для вашего уровня ({experience_level}): {user_cap} подходов."
+                raise LocalizedHTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "validator.volume_hard_cap",
+                    {
+                        "muscle": ex.primary_muscle,
+                        "experience_level": experience_level,
+                        "max_sets": user_cap,
+                    },
                 )
 
             # Собираем группы суперсетов для последующей проверки
@@ -116,14 +120,12 @@ class AntiSuicideValidator:
         # 2. Валидация суперсетов (Запрет на тяжелую базу и синергисты)
         for group_id, group_exercises in supersets.items():
             if len(group_exercises) < 2:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Суперсет должен содержать как минимум два упражнения."
+                raise LocalizedHTTPException(
+                    status.HTTP_400_BAD_REQUEST, "validator.superset_too_small"
                 )
             if len(group_exercises) > 3:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Суперсет может содержать не больше трёх упражнений."
+                raise LocalizedHTTPException(
+                    status.HTTP_400_BAD_REQUEST, "validator.superset_too_large"
                 )
 
             for i in range(len(group_exercises)):
@@ -133,9 +135,9 @@ class AntiSuicideValidator:
 
                     # Правило двойной базы: запрет Tier 1 + Tier 1
                     if ex1.fatigue_tier == 1 and ex2.fatigue_tier == 1:
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail="Нельзя объединять два тяжелых базовых упражнения (Tier 1) в один суперсет."
+                        raise LocalizedHTTPException(
+                            status.HTTP_400_BAD_REQUEST,
+                            "validator.superset_two_tier_one",
                         )
 
                     # Правило синергистов: проверяем пересечения целевых мышц
@@ -151,10 +153,9 @@ class AntiSuicideValidator:
 
                     # Если есть пересечение — значит, они синергисты/дублируют друг друга
                     if ex1_muscles.intersection(ex2_muscles):
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"Конфликт синергистов в суперсете! Упражнения перекрывают работу "
-                                   f"одних и тех же мышц. Разделите их."
+                        raise LocalizedHTTPException(
+                            status.HTTP_400_BAD_REQUEST,
+                            "validator.superset_synergy_conflict",
                         )
 
         return True

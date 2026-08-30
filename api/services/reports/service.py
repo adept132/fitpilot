@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.i18n import resolve_language, tr
 from api.services.models import AppUserProfile, PeriodizationProposal, PeriodReport
 from api.services.progression.params import DEFAULT_RIR
 from api.services.reports.metrics import ReportMetrics, compute_metrics, has_activity
@@ -21,9 +22,6 @@ from api.services.reports.periods import PERIOD_TYPES, closed_periods
 from api.services.reports.rules import RULES_VERSION, Action, RuleContext, build_actions
 
 REPORT_SHAPE_VERSION = 2
-
-PERIOD_TITLE = {"week": "неделю", "month": "месяц", "year": "год"}
-
 
 def build_payload(metrics: ReportMetrics, actions: list[Action]) -> dict:
     """JSON-представление снапшота. Даты — ISO-строки: payload переживает
@@ -67,6 +65,7 @@ async def ensure_reports(
         select(AppUserProfile).where(AppUserProfile.app_user_id == app_user_id)
     )).scalar_one_or_none()
     level = profile.experience_level if profile else None
+    language = resolve_language(None, profile.settings if profile else None)
     context = await _rule_context(session, app_user_id)
 
     created = 0
@@ -88,7 +87,7 @@ async def ensure_reports(
             if not has_activity(metrics):
                 continue
 
-            actions = build_actions(metrics, context)
+            actions = build_actions(metrics, context, language)
             statement = (
                 insert(PeriodReport)
                 .values(
@@ -121,8 +120,8 @@ async def ensure_reports(
                 event_type="period_report",
                 entity_type="period_report",
                 entity_id=report_id,
-                title=f"Отчёт за {PERIOD_TITLE[period_type]} готов",
-                body="Посмотрите итоги периода и что с ними делать.",
+                title=tr(language, f"report.notification.{period_type}.title"),
+                body=tr(language, "report.notification.body"),
                 payload={"route": f"/reports/{period_type}/{start.isoformat()}"},
                 dedupe_key=f"period_report:{period_type}:{start.isoformat()}",
             )

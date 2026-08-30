@@ -5,7 +5,7 @@ from collections import defaultdict
 from decimal import Decimal
 from uuid import uuid4
 
-from fastapi import HTTPException
+from api.errors import LocalizedHTTPException
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -18,10 +18,7 @@ def ensure_unique_exercise_ids_for_new_superset(
     exercise_ids = [item.exercise_id for item in session_exercises]
 
     if len(exercise_ids) != len(set(exercise_ids)):
-        raise HTTPException(
-            status_code=400,
-            detail="Нельзя создать суперсет с повторяющимися упражнениями.",
-        )
+        raise LocalizedHTTPException(400, "superset.duplicate_exercises")
 
 class WorkoutSupersetService:
     @staticmethod
@@ -184,7 +181,7 @@ class WorkoutSupersetService:
         workout = result.scalar_one_or_none()
 
         if workout is None:
-            raise HTTPException(status_code=404, detail="Workout not found")
+            raise LocalizedHTTPException(404, "workout.not_found")
 
         return sorted(workout.exercises, key=lambda ex: ex.order_index)
 
@@ -271,10 +268,7 @@ class WorkoutSupersetService:
             target_session_exercise_ids: list[int],
     ) -> str:
         if not target_session_exercise_ids:
-            raise HTTPException(
-                status_code=400,
-                detail="At least one target exercise is required",
-            )
+            raise LocalizedHTTPException(400, "superset.target_required")
 
         all_session_exercise_ids = [
             source_session_exercise_id,
@@ -282,10 +276,7 @@ class WorkoutSupersetService:
         ]
 
         if len(all_session_exercise_ids) != len(set(all_session_exercise_ids)):
-            raise HTTPException(
-                status_code=400,
-                detail="В суперсете не должно быть повторяющихся упражнений.",
-            )
+            raise LocalizedHTTPException(400, "superset.duplicate_exercises")
 
         session_exercises = await WorkoutSupersetService.get_workout_session_exercises(
             session=session,
@@ -297,25 +288,23 @@ class WorkoutSupersetService:
         source = exercises_by_id.get(source_session_exercise_id)
 
         if source is None:
-            raise HTTPException(status_code=404, detail="Source exercise not found")
+            raise LocalizedHTTPException(404, "superset.source_exercise_not_found")
 
         selected: list[WorkoutSessionExercise] = [source]
 
         for target_id in target_session_exercise_ids:
             target = exercises_by_id.get(target_id)
             if target is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Target exercise {target_id} not found",
+                raise LocalizedHTTPException(
+                    404,
+                    "superset.target_exercise_not_found",
+                    {"exercise_id": target_id},
                 )
             selected.append(target)
 
         exercise_ids = [exercise.exercise_id for exercise in selected]
         if len(exercise_ids) != len(set(exercise_ids)):
-            raise HTTPException(
-                status_code=400,
-                detail="Нельзя создать суперсет с повторяющимися упражнениями.",
-            )
+            raise LocalizedHTTPException(400, "superset.duplicate_exercises")
 
         superset_group = str(uuid4())
 
@@ -357,16 +346,13 @@ class WorkoutSupersetService:
         candidate = next((ex for ex in exercises if ex.id == session_exercise_id), None)
 
         if not group_exercises:
-            raise HTTPException(status_code=404, detail="Superset not found")
+            raise LocalizedHTTPException(404, "superset.not_found")
 
         if candidate is None:
-            raise HTTPException(status_code=404, detail="Exercise not found")
+            raise LocalizedHTTPException(404, "exercise.not_found")
 
         if candidate.workout_session_id != group_exercises[0].workout_session_id:
-            raise HTTPException(
-                status_code=400,
-                detail="Exercise belongs to another workout",
-            )
+            raise LocalizedHTTPException(400, "superset.exercise_in_another_workout")
 
         candidate.superset_group = superset_group
         candidate.order_index = max(ex.order_index for ex in group_exercises) + 1
@@ -395,7 +381,7 @@ class WorkoutSupersetService:
         members = member_result.scalars().all()
 
         if not members:
-            raise ValueError("Суперсет не найден")
+            raise LocalizedHTTPException(404, "superset.not_found")
 
         workout_session_id = members[0].workout_session_id
 
@@ -460,7 +446,7 @@ class WorkoutSupersetService:
         target = next((ex for ex in group_exercises if ex.id == session_exercise_id), None)
 
         if target is None:
-            raise HTTPException(status_code=404, detail="Exercise not found in superset")
+            raise LocalizedHTTPException(404, "superset.exercise_not_found")
 
         target.superset_group = None
 
@@ -497,7 +483,7 @@ class WorkoutSupersetService:
         exercises = result.scalars().all()
 
         if not exercises:
-            raise HTTPException(status_code=404, detail="Superset not found")
+            raise LocalizedHTTPException(404, "superset.not_found")
 
         workout_id = exercises[0].workout_session_id
 
@@ -598,7 +584,7 @@ class WorkoutSupersetService:
         exercises = result.scalars().all()
 
         if not exercises:
-            raise HTTPException(status_code=404, detail="Superset not found")
+            raise LocalizedHTTPException(404, "superset.not_found")
 
         for exercise in exercises:
             exercise.superset_group = None
@@ -669,9 +655,10 @@ class WorkoutSupersetService:
                 exercise = exercises_map.get(session_exercise_id)
 
                 if exercise is None:
-                    raise HTTPException(
-                        status_code=404,
-                        detail=f"Exercise {session_exercise_id} not found",
+                    raise LocalizedHTTPException(
+                        404,
+                        "superset.session_exercise_not_found",
+                        {"exercise_id": session_exercise_id},
                     )
 
                 exercise.order_index = next_order_index
@@ -693,9 +680,10 @@ class WorkoutSupersetService:
                     exercise = exercises_map.get(session_exercise_id)
 
                     if exercise is None:
-                        raise HTTPException(
-                            status_code=404,
-                            detail=f"Exercise {session_exercise_id} not found",
+                        raise LocalizedHTTPException(
+                            404,
+                            "superset.session_exercise_not_found",
+                            {"exercise_id": session_exercise_id},
                         )
 
                     exercise.order_index = next_order_index
@@ -706,17 +694,17 @@ class WorkoutSupersetService:
 
                 continue
 
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported item type: {item_type}",
+            raise LocalizedHTTPException(
+                400, "superset.unsupported_item_type", {"item_type": item_type}
             )
 
         # Все упражнения тренировки должны быть описаны в payload
         untouched = [ex_id for ex_id in exercises_map.keys() if ex_id not in touched_ids]
         if untouched:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Some workout exercises are missing in reorder payload: {untouched}",
+            raise LocalizedHTTPException(
+                400,
+                "superset.reorder_missing_exercises",
+                {"exercise_ids": ", ".join(map(str, untouched))},
             )
 
         await session.commit()
@@ -743,7 +731,7 @@ class WorkoutSupersetService:
 
         exercise = exercises_map.get(session_exercise_id)
         if exercise is None:
-            raise HTTPException(status_code=404, detail="Exercise not found")
+            raise LocalizedHTTPException(404, "exercise.not_found")
 
         exercise.superset_group = superset_group
         await session.commit()
@@ -769,7 +757,7 @@ class WorkoutSupersetService:
 
         exercise = exercises_map.get(session_exercise_id)
         if exercise is None:
-            raise HTTPException(status_code=404, detail="Exercise not found")
+            raise LocalizedHTTPException(404, "exercise.not_found")
 
         exercise.superset_group = None
         await session.commit()
@@ -792,7 +780,7 @@ class WorkoutSupersetService:
         session_exercise = result.scalar_one_or_none()
 
         if session_exercise is None:
-            raise ValueError("Упражнение тренировки не найдено")
+            raise LocalizedHTTPException(404, "exercise.session_not_found")
 
         if session_exercise.superset_group:
             return session_exercise

@@ -3,6 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db
+from api.errors import LocalizedHTTPException
 from api.schemas.supersets import (
     AddExerciseToSupersetRequest,
     AddNewExerciseToSupersetRequest,
@@ -53,7 +54,7 @@ async def add_existing_exercise_to_superset(
     target_exercise = result.scalar_one_or_none()
 
     if target_exercise is None:
-        raise HTTPException(status_code=404, detail="Упражнение не найдено")
+        raise LocalizedHTTPException(404, "exercise.not_found")
 
     await ensure_exercise_not_duplicated_in_superset(
         session=session,
@@ -133,8 +134,8 @@ async def start_superset_endpoint(
 ):
     try:
         session_exercise = await WorkoutSupersetService.start_superset(db, session_exercise_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError:
+        raise LocalizedHTTPException(404, "superset.not_found")
 
     return StartSupersetResponse(
         superset_group=session_exercise.superset_group,
@@ -162,7 +163,4 @@ async def ensure_exercise_not_duplicated_in_superset(
         ]
 
     if existing_items:
-        raise HTTPException(
-            status_code=400,
-            detail="Это упражнение уже добавлено в данный суперсет.",
-        )
+        raise LocalizedHTTPException(400, "superset.exercise_already_added")

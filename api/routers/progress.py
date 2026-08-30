@@ -5,6 +5,7 @@ from sqlalchemy import select, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db
+from api.errors import LocalizedHTTPException
 from api.schemas.exercises import ExerciseFullHistoryResponse
 from api.schemas.progress import (
     ExerciseForecastResponse,
@@ -239,7 +240,7 @@ async def get_exercise_history(
     )
 
     if not history_data:
-        raise HTTPException(status_code=404, detail="Упражнение не найдено или по нему нет записей")
+        raise LocalizedHTTPException(404, "progress.exercise_history_not_found")
 
     return history_data
 
@@ -264,7 +265,7 @@ async def get_exercise_forecast(
         settings=profile.settings if profile else None,
     )
     if forecast is None:
-        raise HTTPException(status_code=404, detail="Упражнение не найдено")
+        raise LocalizedHTTPException(404, "exercise.not_found")
 
     return ExerciseForecastResponse(**forecast)
 

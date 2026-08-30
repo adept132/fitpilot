@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db
+from api.errors import LocalizedHTTPException
 from api.schemas.microcycle import MicrocycleCreate
 from api.services.app_user_service import get_current_app_user
 from api.services.models import AppUserMicrocycle
@@ -38,10 +39,7 @@ async def create_microcycle(micro_data: MicrocycleCreate, db: AsyncSession = Dep
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail="Микроцикл с таким именем уже есть у пользователя. Выберите другое имя."
-        )
+        raise LocalizedHTTPException(409, "microcycle.name_conflict")
     await db.refresh(new_micro)
     return new_micro
 
@@ -57,7 +55,7 @@ async def get_microcycle(micro_id: int, db: AsyncSession = Depends(get_db), curr
     micro = result.scalar_one_or_none()
 
     if not micro:
-        raise HTTPException(status_code=404, detail="Микроцикл не найден")
+        raise LocalizedHTTPException(404, "microcycle.not_found")
     return micro
 
 
@@ -73,13 +71,10 @@ async def update_microcycle(micro_id: int, micro_data: MicrocycleCreate, db: Asy
     micro = result.scalar_one_or_none()
 
     if not micro:
-        raise HTTPException(status_code=404, detail="Микроцикл не найден")
+        raise LocalizedHTTPException(404, "microcycle.not_found")
 
     if micro.is_active:
-        raise HTTPException(
-            status_code=400,
-            detail="Нельзя редактировать активный микроцикл. Сначала деактивируйте его или создайте новый."
-        )
+        raise LocalizedHTTPException(400, "microcycle.active_edit_forbidden")
 
     micro.name = micro_data.name
     micro.length_days = micro_data.length_days
@@ -89,10 +84,7 @@ async def update_microcycle(micro_id: int, micro_data: MicrocycleCreate, db: Asy
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail="Микроцикл с таким именем уже есть у пользователя. Выберите другое имя."
-        )
+        raise LocalizedHTTPException(409, "microcycle.name_conflict")
     await db.refresh(micro)
     return micro
 
@@ -109,13 +101,10 @@ async def delete_microcycle(micro_id: int, db: AsyncSession = Depends(get_db),
     micro = result.scalar_one_or_none()
 
     if not micro:
-        raise HTTPException(status_code=404, detail="Микроцикл не найден")
+        raise LocalizedHTTPException(404, "microcycle.not_found")
 
     if micro.is_active:
-        raise HTTPException(
-            status_code=400,
-            detail="Нельзя удалить активный микроцикл."
-        )
+        raise LocalizedHTTPException(400, "microcycle.active_delete_forbidden")
 
     await db.delete(micro)
     await db.commit()

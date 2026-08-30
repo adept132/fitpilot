@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from api.deps import get_db
+from api.errors import LocalizedHTTPException
 from api.schemas.workouts import ExerciseShortResponse
 from api.services.app_user_service import get_current_app_user
 from api.services.exercise_search_service import ExerciseSearchService
@@ -127,7 +128,7 @@ async def get_exercise_detail(
     exercise = result.scalar_one_or_none()
 
     if exercise is None:
-        raise HTTPException(status_code=404, detail="Exercise not found")
+        raise LocalizedHTTPException(404, "exercise.not_found")
 
     # Личная заметка текущего пользователя к этому упражнению
     note_row = await session.execute(
@@ -196,7 +197,7 @@ async def set_exercise_preference(
         get_base_exercise_query(app_user.id).where(Exercise.id == exercise_id)
     )).scalar_one_or_none()
     if exercise is None:
-        raise HTTPException(status_code=404, detail="Exercise not found")
+        raise LocalizedHTTPException(404, "exercise.not_found")
     row = (await session.execute(select(UserExercisePreference).where(
         UserExercisePreference.app_user_id == app_user.id,
         UserExercisePreference.exercise_id == exercise_id,
@@ -240,7 +241,7 @@ async def update_exercise_note(
         get_base_exercise_query(app_user.id).where(Exercise.id == exercise_id)
     )
     if exists.scalar_one_or_none() is None:
-        raise HTTPException(status_code=404, detail="Exercise not found")
+        raise LocalizedHTTPException(404, "exercise.not_found")
 
     note_text = payload.note.strip()
 
@@ -351,7 +352,7 @@ async def get_exercise_history_workout_detail(
     workout = result.scalar_one_or_none()
 
     if workout is None:
-        raise HTTPException(status_code=404, detail="Workout not found")
+        raise LocalizedHTTPException(404, "workout.not_found")
 
     session_exercise = next(
         (item for item in workout.exercises if item.exercise_id == exercise_id),
@@ -359,10 +360,7 @@ async def get_exercise_history_workout_detail(
     )
 
     if session_exercise is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Exercise not found in this workout",
-        )
+        raise LocalizedHTTPException(404, "exercise.not_found_in_workout")
 
     completed_sets = [s for s in session_exercise.sets if s.is_completed]
     total_reps = sum(s.reps or 0 for s in completed_sets)
@@ -413,7 +411,7 @@ async def get_exercise_last_performance(
             )
         ).scalar_one_or_none()
         if context_workout is None:
-            raise HTTPException(status_code=404, detail="Workout not found")
+            raise LocalizedHTTPException(404, "workout.not_found")
 
     stmt = (
         select(WorkoutSession)
@@ -452,7 +450,7 @@ async def get_exercise_last_performance(
     )
 
     if session_exercise is None:
-        raise HTTPException(status_code=404, detail="Exercise not found in workout")
+        raise LocalizedHTTPException(404, "exercise.not_found_in_workout")
 
     completed_sets = [s for s in session_exercise.sets if s.is_completed]
 
@@ -599,7 +597,7 @@ async def get_exercise_alternatives(
     # 1. Находим исходное упражнение
     target_ex = await db.get(Exercise, exercise_id)
     if not target_ex:
-        raise HTTPException(status_code=404, detail="Упражнение не найдено")
+        raise LocalizedHTTPException(404, "exercise.not_found")
 
     # 2. Формируем логику начисления баллов (Scoring Model) прямо в SQL
     score_column = (
@@ -682,12 +680,12 @@ async def replace_session_exercise(
     target_session_ex = result.scalar_one_or_none()
 
     if not target_session_ex:
-        raise HTTPException(status_code=404, detail="Упражнение в сессии не найдено")
+        raise LocalizedHTTPException(404, "exercise.session_not_found")
 
     # 2. Проверяем, существует ли новое упражнение в БД
     new_ex = await db.get(Exercise, payload.new_exercise_id)
     if not new_ex:
-        raise HTTPException(status_code=404, detail="Новое упражнение не найдено в БД")
+        raise LocalizedHTTPException(404, "exercise.replacement_not_found")
 
     # === Защита от дубликатов ===
     duplicate_check = await db.execute(
@@ -697,10 +695,7 @@ async def replace_session_exercise(
         )
     )
     if duplicate_check.scalars().first():
-        raise HTTPException(
-            status_code=400,
-            detail="Это упражнение уже добавлено в текущую тренировку"
-        )
+        raise LocalizedHTTPException(400, "exercise.already_in_workout")
 
     # Запоминаем исходное упражнение ДО подмены — понадобится для замены в плане.
     old_exercise_id = target_session_ex.exercise_id
@@ -858,10 +853,7 @@ async def create_custom_exercise(
     )
     duplicate_result = await db.execute(duplicate_stmt)
     if duplicate_result.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Упражнение с таким названием уже существует в вашем списке."
-        )
+        raise LocalizedHTTPException(status.HTTP_409_CONFLICT, "exercise.name_conflict")
 
     # === УМНАЯ КЛАССИФИКАЦИЯ ===
 

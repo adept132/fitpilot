@@ -14,11 +14,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from api.i18n import SupportedLanguage, tr
+
 REST_DAY = "Rest"
 
 
 @dataclass(frozen=True)
 class SplitDef:
+    code: str
+    name_key: str
     name: str
     length_days: int
     schedule: tuple[str, ...]
@@ -39,36 +43,49 @@ def sessions_per_week(split: SplitDef) -> float:
 
 
 SPLITS: tuple[SplitDef, ...] = (
-    SplitDef("Full Body (2 дня)", 7, (
+    SplitDef("full_body_2", "structure.split.full_body_2.name", "Full Body (2 дня)", 7, (
         "Full Body", "Rest", "Rest", "Full Body", "Rest", "Rest", "Rest")),
-    SplitDef("Верх / низ (2 дня)", 7, (
+    SplitDef("upper_lower_2", "structure.split.upper_lower_2.name", "Верх / низ (2 дня)", 7, (
         "Upper", "Rest", "Rest", "Lower", "Rest", "Rest", "Rest")),
-    SplitDef("Full Body (3 Дня)", 7, (
+    SplitDef("full_body_3", "structure.split.full_body_3.name", "Full Body (3 Дня)", 7, (
         "Full Body", "Rest", "Full Body", "Rest", "Full Body", "Rest", "Rest")),
-    SplitDef("Верх / низ / всё тело (3 дня)", 7, (
+    SplitDef("upper_lower_full_3", "structure.split.upper_lower_full_3.name", "Верх / низ / всё тело (3 дня)", 7, (
         "Upper", "Rest", "Lower", "Rest", "Full Body", "Rest", "Rest")),
-    SplitDef("PPL (3 дня)", 7, (
+    SplitDef("ppl_3", "structure.split.ppl_3.name", "PPL (3 дня)", 7, (
         "Push", "Rest", "Pull", "Rest", "Legs", "Rest", "Rest")),
-    SplitDef("Upper / Lower (4 Дня)", 7, (
+    SplitDef("upper_lower_4", "structure.split.upper_lower_4.name", "Upper / Lower (4 Дня)", 7, (
         "Upper", "Lower", "Rest", "Upper", "Lower", "Rest", "Rest")),
-    SplitDef("Верх / низ с приоритетом низа (4 дня)", 7, (
+    SplitDef("lower_priority_4", "structure.split.lower_priority_4.name", "Верх / низ с приоритетом низа (4 дня)", 7, (
         "Lower", "Upper", "Rest", "Lower", "Rest", "Lower", "Rest")),
-    SplitDef("PPL + всё тело (4 дня)", 7, (
+    SplitDef("ppl_full_4", "structure.split.ppl_full_4.name", "PPL + всё тело (4 дня)", 7, (
         "Push", "Pull", "Rest", "Legs", "Rest", "Full Body", "Rest")),
-    SplitDef("Верх / низ на восьмидневке", 8, (
+    SplitDef("upper_lower_8d", "structure.split.upper_lower_8d.name", "Верх / низ на восьмидневке", 8, (
         "Upper", "Lower", "Rest", "Upper", "Lower", "Rest", "Rest", "Rest")),
-    SplitDef("Гибрид PHAT-style (5 Дней)", 7, (
+    SplitDef("phat_5", "structure.split.phat_5.name", "Гибрид PHAT-style (5 Дней)", 7, (
         "Upper", "Lower", "Rest", "Push", "Pull", "Legs", "Rest")),
-    SplitDef("PPL + верх / низ (5 дней)", 7, (
+    SplitDef("ppl_upper_lower_5", "structure.split.ppl_upper_lower_5.name", "PPL + верх / низ (5 дней)", 7, (
         "Push", "Pull", "Legs", "Rest", "Upper", "Lower", "Rest")),
-    SplitDef("PPL + руки и плечи (5 дней)", 7, (
+    SplitDef("ppl_arms_shoulders_5", "structure.split.ppl_arms_shoulders_5.name", "PPL + руки и плечи (5 дней)", 7, (
         "Push", "Pull", "Legs", "Arms & Shoulders", "Rest", "Full Body", "Rest")),
-    SplitDef("PPL на восьмидневке", 8, (
+    SplitDef("ppl_8d", "structure.split.ppl_8d.name", "PPL на восьмидневке", 8, (
         "Push", "Pull", "Legs", "Rest", "Push", "Pull", "Legs", "Rest")),
-    SplitDef("Верх / низ на шестидневке", 6, (
+    SplitDef("upper_lower_6d", "structure.split.upper_lower_6d.name", "Верх / низ на шестидневке", 6, (
         "Upper", "Lower", "Rest", "Upper", "Lower", "Rest")),
-    SplitDef("PPL x2 (6 Дней)", 7, (
+    SplitDef("ppl_x2_6", "structure.split.ppl_x2_6.name", "PPL x2 (6 Дней)", 7, (
         "Push", "Pull", "Legs", "Push", "Pull", "Legs", "Rest")),
-    SplitDef("Верх / низ x3 (6 дней)", 7, (
+    SplitDef("upper_lower_x3_6", "structure.split.upper_lower_x3_6.name", "Верх / низ x3 (6 дней)", 7, (
         "Upper", "Lower", "Upper", "Lower", "Upper", "Lower", "Rest")),
 )
+
+_BY_CODE = {split.code: split for split in SPLITS}
+
+
+def localized_split(code: str, language: SupportedLanguage) -> SplitDef:
+    split = _BY_CODE[code]
+    return SplitDef(
+        code=split.code,
+        name_key=split.name_key,
+        name=tr(language, split.name_key),
+        length_days=split.length_days,
+        schedule=split.schedule,
+    )

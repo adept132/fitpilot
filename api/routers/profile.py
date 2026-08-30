@@ -3,6 +3,7 @@ from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db
+from api.errors import LocalizedHTTPException
 from api.schemas.profile import ProfileResponse, UpdateProfileRequest
 from api.schemas.оnboarding import UpdateSettingsRequest, VolumeBudget, OnboardingWidgetRequest
 from api.services.app_user_service import get_current_app_user
@@ -71,7 +72,7 @@ async def get_my_profile(
     profile = profile_result.scalars().first()
 
     if not profile:
-        raise HTTPException(status_code=404, detail="Профиль не найден")
+        raise LocalizedHTTPException(404, "profile.not_found")
 
     # 2. Достаем самую свежую запись антропометрии (вес/рост)
     anthro_result = await db.execute(
@@ -114,7 +115,7 @@ async def update_profile_settings(
     profile = profile_result.scalars().first()
 
     if not profile:
-        raise HTTPException(status_code=404, detail="Профиль не найден")
+        raise LocalizedHTTPException(404, "profile.not_found")
 
     # Обновляем JSONB поле settings (частично — только переданные поля)
     current_settings = dict(profile.settings) if profile.settings else {}
@@ -185,26 +186,20 @@ async def update_profile_settings(
     # ослабнуть в будущем незаметно для этого обработчика.
     if payload.progression is not None:
         if not isinstance(payload.progression, dict):
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "Поле progression должно быть объектом (например "
-                    '{"overrides": {...}}), получено: '
-                    f"{type(payload.progression).__name__}"
-                ),
+            raise LocalizedHTTPException(
+                422,
+                "profile.progression_must_be_object",
+                {"actual_type": type(payload.progression).__name__},
             )
 
         raw_overrides = payload.progression.get("overrides")
         if raw_overrides is None:
             overrides: dict = {}
         elif not isinstance(raw_overrides, dict):
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "Поле progression.overrides должно быть объектом "
-                    "(ключ — id упражнения строкой, значение — имя схемы "
-                    f"или null), получено: {type(raw_overrides).__name__}"
-                ),
+            raise LocalizedHTTPException(
+                422,
+                "profile.progression_overrides_must_be_object",
+                {"actual_type": type(raw_overrides).__name__},
             )
         else:
             overrides = raw_overrides
@@ -214,20 +209,21 @@ async def update_profile_settings(
             if scheme is None:
                 continue  # снятие override — обрабатывается отдельно ниже
             if not isinstance(scheme, str):
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"Схема прогрессии для упражнения {exercise_key} должна быть "
-                        f"строкой (или null, чтобы снять override), получено: "
-                        f"{type(scheme).__name__}"
-                    ),
+                raise LocalizedHTTPException(
+                    422,
+                    "profile.progression_scheme_must_be_string",
+                    {
+                        "exercise_id": exercise_key,
+                        "actual_type": type(scheme).__name__,
+                    },
                 )
             if scheme not in KNOWN_SCHEMES:
                 unknown.append(scheme)
         if unknown:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Неизвестные схемы прогрессии: {', '.join(sorted(set(unknown)))}",
+            raise LocalizedHTTPException(
+                422,
+                "profile.progression_unknown_schemes",
+                {"schemes": ", ".join(sorted(set(unknown)))},
             )
 
         # Мёрджим overrides по exercise_id, а не заменяем весь словарь целиком —
@@ -249,14 +245,12 @@ async def update_profile_settings(
     # JSONB, и мусор оттуда позже вылезет 500-й, а не 422-й.
     if payload.readiness is not None:
         if not isinstance(payload.readiness, dict):
-            raise HTTPException(status_code=422, detail="readiness должен быть объектом")
+            raise LocalizedHTTPException(422, "profile.readiness_must_be_object")
         block = dict(current_settings.get("readiness") or {})
         if "checkin_enabled" in payload.readiness:
             value = payload.readiness["checkin_enabled"]
             if not isinstance(value, bool):
-                raise HTTPException(
-                    status_code=422, detail="checkin_enabled должен быть булевым"
-                )
+                raise LocalizedHTTPException(422, "profile.checkin_enabled_must_be_boolean")
             block["checkin_enabled"] = value
         current_settings["readiness"] = block
 
@@ -368,7 +362,7 @@ async def update_custom_budget(
     profile = profile_result.scalars().first()
 
     if not profile:
-        raise HTTPException(status_code=404, detail="Профиль не найден")
+        raise LocalizedHTTPException(404, "profile.not_found")
 
     # Просто перезаписываем JSONB тем, что накрутил пользователь
     profile.volume_budget = payload.model_dump()

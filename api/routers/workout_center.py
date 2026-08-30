@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, joinedload
 
 from api.deps import get_db
+from api.errors import LocalizedHTTPException
 from api.schemas.mesocycle import UpdateSelectedMesocyclePayload, UpdateMesocyclePhasePayload, \
     UpdateMesocycleContextPayload
 from api.schemas.microcycle import UpdateMicrocycleContextPayload
@@ -387,7 +388,7 @@ async def update_workout_center_split(
     blueprint = split_result.scalar_one_or_none()
 
     if not blueprint:
-        raise HTTPException(status_code=404, detail="Split blueprint not found")
+        raise LocalizedHTTPException(404, "split.blueprint_not_found")
 
     stmt = select(UserSplit).where(
         UserSplit.app_user_id == app_user.id,
@@ -442,10 +443,7 @@ async def update_workout_center_split_day(
     user_split = result.scalar_one_or_none()
 
     if not user_split:
-        raise HTTPException(
-            status_code=400,
-            detail="Active split is not selected",
-        )
+        raise LocalizedHTTPException(400, "split.active_not_selected")
 
     slot_stmt = select(SplitDaySlot).where(
         SplitDaySlot.id == payload.split_day_id,
@@ -455,7 +453,7 @@ async def update_workout_center_split_day(
     slot = slot_result.scalar_one_or_none()
 
     if not slot:
-        raise HTTPException(status_code=404, detail="Split day slot not found")
+        raise LocalizedHTTPException(404, "split.day_slot_not_found")
 
     user_split.current_day = slot.day_order
     await session.commit()
@@ -470,25 +468,22 @@ async def start_workout(
         session: AsyncSession = Depends(get_db),
 ):
     if payload.source not in {"free", "by_parameters"}:
-        raise HTTPException(status_code=400, detail="Invalid source")
+        raise LocalizedHTTPException(400, "workout.invalid_source")
 
     existing = await get_active_workout(session, app_user.id)
     if existing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Active workout already exists",
-        )
+        raise LocalizedHTTPException(status.HTTP_409_CONFLICT, "workout.active_exists")
 
     split_day_tag = None
 
     if payload.source == "by_parameters":
         if not payload.split_id or not payload.split_day_id:
-            raise HTTPException(status_code=400, detail="split_id and split_day_id are required")
+            raise LocalizedHTTPException(400, "workout.split_params_required")
 
         split_stmt = select(SplitBlueprint).where(SplitBlueprint.id == payload.split_id)
         split_result = await session.execute(split_stmt)
         if not split_result.scalar_one_or_none():
-            raise HTTPException(status_code=404, detail="Split blueprint not found")
+            raise LocalizedHTTPException(404, "split.blueprint_not_found")
 
         slot_stmt = (
             select(SplitDaySlot)
@@ -501,7 +496,7 @@ async def start_workout(
         slot_result = await session.execute(slot_stmt)
         slot = slot_result.scalar_one_or_none()
         if not slot:
-            raise HTTPException(status_code=404, detail="Split day slot not found")
+            raise LocalizedHTTPException(404, "split.day_slot_not_found")
 
         split_day_tag = slot.day.template_type.value if hasattr(slot.day.template_type, 'value') else str(
             slot.day.template_type)
@@ -738,10 +733,7 @@ async def finish_workout(
     workout = result.scalar_one_or_none()
 
     if workout is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Active workout not found",
-        )
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "workout.active_not_found")
 
     finished_at = datetime.now(timezone.utc)
     workout.status = "finished"
@@ -914,7 +906,7 @@ async def update_workout_center_plan(
     user_split = result.scalar_one_or_none()
 
     if not user_split:
-        raise HTTPException(status_code=400, detail="Сплит не выбран. Невозможно привязать план.")
+        raise LocalizedHTTPException(400, "plan.split_required_for_binding")
 
     current_day_str = str(user_split.current_day)
 
@@ -984,7 +976,7 @@ async def set_active_mesocycle_phase(
     today = date_cls.today()
     block = await get_active_block(session, app_user.id)
     if block is None:
-        raise HTTPException(status_code=404, detail="Активный блок не найден")
+        raise LocalizedHTTPException(404, "periodization.active_block_not_found")
 
     snapshot = from_json(block.phases)
     offset_days = 0
@@ -996,7 +988,7 @@ async def set_active_mesocycle_phase(
         offset_days += phase.length_days
 
     if target is None:
-        raise HTTPException(status_code=400, detail="Такой фазы нет в текущем блоке")
+        raise LocalizedHTTPException(400, "periodization.phase_not_found_in_block")
 
     block.start_date = today - timedelta(days=offset_days)
     total = sum(p.length_days for p in snapshot)
@@ -1038,7 +1030,7 @@ async def get_volume_targets(
     profile = profile_res.scalar_one_or_none()
 
     if not profile or not profile.volume_budget:
-        raise HTTPException(status_code=400, detail="Бюджет подходов (volume_budget) не настроен.")
+        raise LocalizedHTTPException(400, "profile.volume_budget_missing")
 
     volume_budget = profile.volume_budget
     constraints = volume_budget.get("constraints", {})
@@ -1061,7 +1053,7 @@ async def get_volume_targets(
     blueprint = split_res.scalar_one_or_none()
 
     if not blueprint:
-        raise HTTPException(status_code=400, detail="Активный сплит не найден.")
+        raise LocalizedHTTPException(400, "split.active_not_found")
 
     # ШАГ 3: Считаем частоту каждой мышцы в сплите и находим целевые мышцы для запрошенного дня
     muscle_frequencies = {}
@@ -1149,7 +1141,7 @@ async def update_workout_center_microcycle(
             )
         )).scalars().first()
         if micro is None:
-            raise HTTPException(404, "Микроцикл не найден")
+            raise LocalizedHTTPException(404, "microcycle.not_found")
 
         active_split = (await session.execute(
             select(UserSplit).where(
@@ -1164,11 +1156,10 @@ async def update_workout_center_microcycle(
                 .where(SplitDaySlot.blueprint_id == active_split.blueprint_id)
             )).scalar_one()
             if slot_count and micro.length_days != slot_count:
-                raise HTTPException(
+                raise LocalizedHTTPException(
                     409,
-                    f"Микроцикл рассчитан на {micro.length_days} дн., "
-                    f"а активный сплит — на {slot_count}. "
-                    f"Перестройте микроцикл под сплит.",
+                    "microcycle.split_length_mismatch",
+                    {"microcycle_days": micro.length_days, "split_days": slot_count},
                 )
 
     # 1. Снимаем флаг активности со всех микроциклов данного пользователя

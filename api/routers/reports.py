@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db
+from api.errors import LocalizedHTTPException
 from api.schemas.reports import (
     PeriodType,
     ReportCardRead,
@@ -91,7 +92,7 @@ async def _load(db: AsyncSession, app_user_id: int, period_type: str,
         )
     )).scalar_one_or_none()
     if report is None:
-        raise HTTPException(status_code=404, detail="Отчёт не найден")
+        raise LocalizedHTTPException(404, "report.not_found")
     return report
 
 

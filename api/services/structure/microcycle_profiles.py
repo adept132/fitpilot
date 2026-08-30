@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from api.i18n import SupportedLanguage, tr
+
 REST_TYPE = "active_rest"
 
 
@@ -24,6 +26,8 @@ class SlotView:
 @dataclass(frozen=True)
 class MicrocycleProfile:
     code: str
+    name_key: str
+    description_key: str
     name: str
     description: str
 
@@ -31,26 +35,36 @@ class MicrocycleProfile:
 MICROCYCLE_PROFILES: tuple[MicrocycleProfile, ...] = (
     MicrocycleProfile(
         code="even",
+        name_key="structure.microcycle.even.name",
+        description_key="structure.microcycle.even.description",
         name="Равномерный",
         description="Все тренировки в среднем диапазоне повторов. Простейший вариант.",
     ),
     MicrocycleProfile(
         code="hard_easy",
+        name_key="structure.microcycle.hard_easy.name",
+        description_key="structure.microcycle.hard_easy.description",
         name="Тяжёлый–лёгкий",
         description="Чередование малых и больших повторов — классический DUP.",
     ),
     MicrocycleProfile(
         code="one_hard",
+        name_key="structure.microcycle.one_hard.name",
+        description_key="structure.microcycle.one_hard.description",
         name="Один тяжёлый",
         description="Одна силовая тренировка в цикле, остальные средние.",
     ),
     MicrocycleProfile(
         code="strength_bias",
+        name_key="structure.microcycle.strength_bias.name",
+        description_key="structure.microcycle.strength_bias.description",
         name="Силовой уклон",
         description="Две силовые тренировки: меньше повторов, больше веса.",
     ),
     MicrocycleProfile(
         code="volume_bias",
+        name_key="structure.microcycle.volume_bias.name",
+        description_key="structure.microcycle.volume_bias.description",
         name="Объёмный уклон",
         description="Больше повторов почти во всех тренировках.",
     ),
@@ -64,6 +78,19 @@ _BY_CODE = {profile.code: profile for profile in MICROCYCLE_PROFILES}
 
 def profile_by_code(code: str) -> MicrocycleProfile:
     return _BY_CODE[code]
+
+
+def localized_profile(
+    code: str, language: SupportedLanguage
+) -> MicrocycleProfile:
+    profile = profile_by_code(code)
+    return MicrocycleProfile(
+        code=profile.code,
+        name_key=profile.name_key,
+        description_key=profile.description_key,
+        name=tr(language, profile.name_key),
+        description=tr(language, profile.description_key),
+    )
 
 
 def _type_for(profile_code: str, training_index: int) -> str:

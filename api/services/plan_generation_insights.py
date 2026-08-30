@@ -5,6 +5,7 @@ from collections import defaultdict
 from datetime import date
 from typing import Iterable
 
+from api.i18n import SupportedLanguage, tr
 from api.schemas.plan import (
     ComparedExercise,
     GeneratedDayComparison,
@@ -126,6 +127,7 @@ def explain_day(
     duration_minutes: int | None,
     accent_muscles: list[str] | tuple[str, ...] | None,
     disliked_exercise_ids: set[int] | None = None,
+    language: SupportedLanguage = "ru",
 ) -> list[GenerationIssue]:
     issues: list[GenerationIssue] = []
     for accent_muscle in dict.fromkeys(accent_muscles or []):
@@ -136,10 +138,11 @@ def explain_day(
             severity="warning",
             day_tag=day.day_tag,
             muscle=accent_muscle,
-            title="Акцент не относится к этому дню",
-            reason="Выбранная мышца отсутствует среди целей тренировочного дня.",
+            params={"muscle": accent_muscle},
+            title="",
+            reason="",
             action=GenerationIssueAction(
-                type="change_accent", label="Выбрать другой акцент",
+                type="change_accent", label="",
             ),
         ))
 
@@ -150,11 +153,15 @@ def explain_day(
             code="duration_reduced_volume",
             severity="info",
             day_tag=day.day_tag,
-            title="Объём уменьшен под длительность",
-            reason=(f"Лимит {duration_minutes} мин сократил цель с "
-                    f"{original_total} до {generated_sets} подходов."),
+            title="",
+            reason="",
+            params={
+                "duration_minutes": duration_minutes,
+                "original_sets": original_total,
+                "generated_sets": generated_sets,
+            },
             action=GenerationIssueAction(
-                type="change_duration", label="Увеличить длительность",
+                type="change_duration", label="",
                 params={"current_minutes": duration_minutes},
             ),
         ))
@@ -164,11 +171,11 @@ def explain_day(
             code="duration_limit_unreachable",
             severity="blocking",
             day_tag=day.day_tag,
-            title="Выбранной длительности недостаточно",
-            reason=(f"Даже минимально допустимый вариант занимает около "
-                    f"{minimum_minutes} мин."),
+            title="",
+            reason="",
+            params={"minimum_minutes": minimum_minutes},
             action=GenerationIssueAction(
-                type="change_duration", label="Увеличить длительность",
+                type="change_duration", label="",
                 params={"minimum_minutes": minimum_minutes},
             ),
         ))
@@ -192,32 +199,34 @@ def explain_day(
                 severity="warning" if filled else "blocking",
                 day_tag=day.day_tag,
                 muscle=muscle,
-                title=f"Цель закрыта на {filled} из {target} подходов",
-                reason="Подходящие упражнения исключены в ваших предпочтениях.",
+                title="",
+                reason="",
+                params={"filled_sets": filled, "target_sets": target, "muscle": muscle},
                 action=GenerationIssueAction(
                     type="review_preferences",
-                    label="Открыть исключённые",
+                    label="",
                     params={"day_tag": day.day_tag, "muscle": muscle},
                 ),
             ))
             continue
         blocked_by_context = muscle in all_muscles and muscle not in eligible_muscles
         action_type = "review_limitations" if blocked_by_context else "edit_day"
-        reason = (
-            "Подходящие упражнения исключены текущим оборудованием или ограничениями."
-            if blocked_by_context else
-            "В доступной библиотеке недостаточно подходящих упражнений для этой цели."
-        )
         issues.append(GenerationIssue(
             code="muscle_target_partially_covered",
             severity="warning" if filled else "blocking",
             day_tag=day.day_tag,
             muscle=muscle,
-            title=f"Цель закрыта на {filled} из {target} подходов",
-            reason=reason,
+            title="",
+            reason="",
+            body_key=(
+                "generation.muscle_target_partially_covered.context_body"
+                if blocked_by_context
+                else "generation.muscle_target_partially_covered.library_body"
+            ),
+            params={"filled_sets": filled, "target_sets": target, "muscle": muscle},
             action=GenerationIssueAction(
                 type=action_type,
-                label=("Проверить условия генерации" if blocked_by_context else "Исправить день"),
+                label="",
                 params={"day_tag": day.day_tag, "muscle": muscle},
             ),
         ))
@@ -227,39 +236,68 @@ def explain_day(
             code="empty_training_day",
             severity="blocking",
             day_tag=day.day_tag,
-            title="Не удалось собрать тренировочный день",
-            reason="После применения оборудования и ограничений не осталось подходящих упражнений.",
+            title="",
+            reason="",
+            params={"day_tag": day.day_tag},
             action=GenerationIssueAction(
-                type="review_limitations", label="Проверить оборудование и ограничения",
+                type="review_limitations", label="",
                 params={"day_tag": day.day_tag},
             ),
         ))
-    return issues
+    return [_localized_issue(issue, language) for issue in issues]
 
 
-def missing_requested_day_issue(day_name: str) -> GenerationIssue:
-    return GenerationIssue(
+def _localized_issue(
+    issue: GenerationIssue, language: SupportedLanguage
+) -> GenerationIssue:
+    title_key = issue.title_key or f"generation.{issue.code}.title"
+    body_key = issue.body_key or f"generation.{issue.code}.body"
+    action_key = issue.action.label_key or f"generation.{issue.code}.action"
+    return issue.model_copy(
+        update={
+            "title_key": title_key,
+            "body_key": body_key,
+            "title": tr(language, title_key, **issue.params),
+            "reason": tr(language, body_key, **issue.params),
+            "action": issue.action.model_copy(
+                update={
+                    "label_key": action_key,
+                    "label": tr(language, action_key, **issue.action.params),
+                }
+            ),
+        }
+    )
+
+
+def missing_requested_day_issue(
+    day_name: str, language: SupportedLanguage = "ru"
+) -> GenerationIssue:
+    return _localized_issue(GenerationIssue(
         code="requested_day_not_found",
         severity="blocking",
         day_tag=day_name,
-        title="Тренировочный день не найден в сплите",
-        reason="Выбранный день отсутствует в актуальной структуре сплита.",
+        title="",
+        reason="",
+        params={"day_name": day_name},
         action=GenerationIssueAction(
-            type="edit_split", label="Проверить структуру сплита",
+            type="edit_split", label="",
             params={"day_name": day_name},
         ),
-    )
+    ), language)
 
 
-def missing_volume_targets_issue(day_tag: str) -> GenerationIssue:
-    return GenerationIssue(
+def missing_volume_targets_issue(
+    day_tag: str, language: SupportedLanguage = "ru"
+) -> GenerationIssue:
+    return _localized_issue(GenerationIssue(
         code="missing_volume_targets",
         severity="blocking",
         day_tag=day_tag,
-        title="Для дня нет целевого объёма",
-        reason="Недельный объём не удалось распределить на этот тренировочный день.",
+        title="",
+        reason="",
+        params={"day_tag": day_tag},
         action=GenerationIssueAction(
-            type="edit_volume", label="Проверить недельный объём",
+            type="edit_volume", label="",
             params={"day_tag": day_tag},
         ),
-    )
+    ), language)

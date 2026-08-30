@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import init_db
 from api.deps import get_db
+from api.errors import LocalizedHTTPException, localized_http_exception_handler
 from api.routers.splits import router as splits_router
 from api.routers.exercises import router as exercises_router
 from api.routers.auth import router as auth_router
@@ -73,6 +74,10 @@ async def _purge_expired_accounts():
 
 
 app = FastAPI(title="Eurith API", lifespan=lifespan)
+app.add_exception_handler(
+    LocalizedHTTPException,
+    localized_http_exception_handler,
+)
 
 # Статика изображений техники (free-exercise-db) — отдаём с бэкенда, чтобы в рантайме
 # не ходить в GitHub. Файлы кладёт scripts/ingest_exercise_images.py в media/exercises/.

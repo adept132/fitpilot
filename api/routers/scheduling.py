@@ -8,6 +8,7 @@ from sqlalchemy.orm import selectinload
 
 # Импортируй свои схемы и сервисы
 from api.schemas.splits import CalendarDayPreview, SchedulePreviewResponse, SchedulePreviewRequest
+from api.errors import LocalizedHTTPException
 from api.services.app_user_service import get_current_app_user
 from api.services.models import AppUserMesocycle, Mesocycle, AppUserMicrocycle, WorkoutPlan
 from api.services.scheduling_engine import SchedulingEngine  # <-- НЕ ЗАБУДЬ ИМПОРТ
@@ -35,7 +36,7 @@ async def generate_schedule_preview(
     user_micro = micro_res.scalar_one_or_none()
 
     if not user_micro:
-        raise HTTPException(status_code=404, detail="Сплит (микроцикл) не найден")
+        raise LocalizedHTTPException(404, "scheduling.microcycle_not_found")
 
     days_mapping = user_micro.days_mapping
     split_length = user_micro.length_days

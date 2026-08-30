@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db
+from api.errors import LocalizedHTTPException
 from api.schemas.periodization import (
     BlockCoordinateRead,
     BlockExerciseSummary,
@@ -146,7 +147,7 @@ async def decide_proposal(
         options=payload.options,
     )
     if result["status"] == "not_found":
-        raise HTTPException(status_code=404, detail="Предложение не найдено")
+        raise LocalizedHTTPException(404, "periodization.proposal_not_found")
     if result["status"] == "conflict":
         # Поправка 1 брифа Задачи 11: apply_decision (Задача 10) отдаёт
         # status=conflict в ДВУХ разных случаях — чужое решение по уже
@@ -178,7 +179,7 @@ async def get_block_summary(
         )
     ).scalars().first()
     if block is None:
-        raise HTTPException(status_code=404, detail="Блок не найден")
+        raise LocalizedHTTPException(404, "periodization.block_not_found")
 
     entry = block.entry_state or {}
     exit_state = block.exit_state or {}

@@ -1,12 +1,13 @@
 from datetime import datetime, timezone
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_current_firebase_claims, get_db
-from api.services.models import AppUser
+from api.i18n import resolve_language
+from api.services.models import AppUser, AppUserProfile
 
 
 async def get_or_create_app_user(
@@ -101,6 +102,7 @@ async def get_or_create_app_user(
     return app_user
 
 async def get_current_app_user_allow_pending(
+    request: Request,
     firebase_claims: dict = Depends(get_current_firebase_claims),
     db: AsyncSession = Depends(get_db),
 ) -> AppUser:
@@ -109,7 +111,27 @@ async def get_current_app_user_allow_pending(
     Нужен эндпоинтам /account: пока заявка активна, обычный доступ закрыт, но
     посмотреть статус и передумать пользователь обязан мочь.
     """
-    return await get_or_create_app_user(db=db, firebase_claims=firebase_claims)
+    app_user = await get_or_create_app_user(db=db, firebase_claims=firebase_claims)
+    await set_request_language(request, db, app_user)
+    return app_user
+
+
+async def set_request_language(
+    request: Request, db: AsyncSession, app_user: AppUser
+) -> None:
+    """Record the approved profile-first locale for downstream response rendering."""
+    profile_settings = (
+        await db.execute(
+            select(AppUserProfile.settings).where(
+                AppUserProfile.app_user_id == app_user.id
+            )
+        )
+    ).scalar_one_or_none()
+    language = resolve_language(
+        request.headers.get("Accept-Language"), profile_settings
+    )
+    request.state.language = language
+    app_user._request_language = language
 
 
 async def get_current_app_user(

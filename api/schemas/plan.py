@@ -142,6 +142,7 @@ class GenerationIssueAction(BaseModel):
         "edit_volume", "edit_split", "review_limitations", "review_preferences",
     ]
     label: str
+    label_key: str = ""
     params: Dict[str, str | int | bool] = Field(default_factory=dict)
 
 
@@ -152,6 +153,9 @@ class GenerationIssue(BaseModel):
     muscle: Optional[str] = None
     title: str
     reason: str
+    title_key: str = ""
+    body_key: str = ""
+    params: Dict[str, str | int | bool] = Field(default_factory=dict)
     action: GenerationIssueAction
 
 

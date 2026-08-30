@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db
+from api.errors import LocalizedHTTPException
 from api.schemas.notifications import (
     MarkAllReadResponse,
     NotificationBadge,
@@ -46,7 +47,7 @@ async def register_push_device(
 ) -> PushDeviceRead:
     if not (payload.expo_push_token.startswith("ExponentPushToken[") or
             payload.expo_push_token.startswith("ExpoPushToken[")):
-        raise HTTPException(status_code=422, detail="Некорректный Expo push token")
+        raise LocalizedHTTPException(422, "notification.invalid_expo_token")
     device = await register_device(db, app_user_id=current_user.id, **payload.model_dump())
     await db.commit()
     await db.refresh(device)
@@ -75,7 +76,7 @@ async def update_push_preferences(
         PushDevice.installation_id == installation_id,
     ))).scalar_one_or_none()
     if device is None:
-        raise HTTPException(status_code=404, detail="Устройство не зарегистрировано")
+        raise LocalizedHTTPException(404, "notification.device_not_registered")
     device.push_enabled = payload.push_enabled
     device.disabled_event_types = sorted(set(payload.disabled_event_types))
     device.disabled_at = None if payload.push_enabled else datetime.now(timezone.utc)
@@ -161,9 +162,8 @@ async def mark_notification_read(
         )
     ).scalar_one_or_none()
     if notification is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Уведомление не найдено",
+        raise LocalizedHTTPException(
+            status.HTTP_404_NOT_FOUND, "notification.not_found"
         )
     if notification.read_at is None:
         notification.read_at = datetime.now(timezone.utc)

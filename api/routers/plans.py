@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import select
 from api.deps import get_db
+from api.errors import LocalizedHTTPException
 from api.schemas.plan import WorkoutPlanCreate, PlanApplyRequest
 from api.services.app_user_service import get_current_app_user
 from api.services.models import Mesocycle, MesocyclePhase, WorkoutPlan, AppUserProfile, WorkoutPlanExercise, \
@@ -155,14 +156,14 @@ async def _load_generation_context(db, current_user, blueprint_id):
         AppUserProfile.app_user_id == current_user.id))
     profile = prof_res.scalar_one_or_none()
     if not profile or not profile.volume_budget:
-        raise HTTPException(400, "Онбординг не завершён: нет объёмного бюджета")
+        raise LocalizedHTTPException(400, "plan.onboarding_volume_budget_missing")
 
     if blueprint_id is None:
         us_res = await db.execute(select(UserSplit).where(
             UserSplit.app_user_id == current_user.id, UserSplit.is_active == True))  # noqa: E712
         active = us_res.scalar_one_or_none()
         if not active:
-            raise HTTPException(400, "Нет активного сплита и не передан blueprint_id")
+            raise LocalizedHTTPException(400, "plan.active_split_or_blueprint_required")
         blueprint_id = active.blueprint_id
 
     bp_res = await db.execute(
@@ -175,7 +176,7 @@ async def _load_generation_context(db, current_user, blueprint_id):
             .selectinload(DayBlueprint.muscle_targets)))
     blueprint = bp_res.scalar_one_or_none()
     if not blueprint or not blueprint.slots:
-        raise HTTPException(404, "Сплит пуст или не найден")
+        raise LocalizedHTTPException(404, "split.empty_or_not_found")
 
     pool_res = await db.execute(select(Exercise).where(
         (Exercise.source == "default") | (Exercise.app_user_id == current_user.id)))
@@ -410,7 +411,9 @@ async def generate_plan(request: GeneratePlanRequest,
         targets_raw = await VolumeService.calculate_session_targets(db, current_user.id, day_bp.name)
         targets = {k: v["target_sets"] for k, v in targets_raw.items()}
         if not targets:
-            generation_issues.append(missing_volume_targets_issue(day_bp.name))
+            generation_issues.append(missing_volume_targets_issue(
+                day_bp.name, getattr(current_user, "_request_language", "ru")
+            ))
             continue
         occurrences = occurrences_by_tag.get(day_bp.name.lower()) or [
             (day_bp.name, effort_by_tag.get(day_bp.name.lower(), request.config.day_effort))
@@ -465,7 +468,9 @@ async def generate_plan(request: GeneratePlanRequest,
     )
     issues = list(generation_issues)
     if request.day_name and not requested_day_exists:
-        issues.append(missing_requested_day_issue(request.day_name))
+        issues.append(missing_requested_day_issue(
+            request.day_name, getattr(current_user, "_request_language", "ru")
+        ))
     for day in days_out:
         issues.extend(explain_day(
             day,
@@ -476,6 +481,7 @@ async def generate_plan(request: GeneratePlanRequest,
             request.config.duration_minutes,
             resolved_accents,
             disliked_ids,
+            getattr(current_user, "_request_language", "ru"),
         ))
     return GeneratePlanResponse(
         days=days_out,
@@ -519,16 +525,17 @@ async def preview_generated_plan(
             secondary_muscle=exercise.secondary_muscle,
         ) for exercise in day.exercises]
         if any(exercise.exercise_id not in pool_by_id for exercise in selected):
-            raise HTTPException(400, "Одно из упражнений больше недоступно в справочнике")
+            raise LocalizedHTTPException(400, "plan.exercise_unavailable")
         group_sizes: dict[str, int] = {}
         for exercise in day.exercises:
             if exercise.superset_group_id:
                 key = str(exercise.superset_group_id)
                 group_sizes[key] = group_sizes.get(key, 0) + 1
         if any(size > request.config.max_superset_size for size in group_sizes.values()):
-            raise HTTPException(
+            raise LocalizedHTTPException(
                 400,
-                f"В одном суперсете может быть не больше {request.config.max_superset_size} упражнений",
+                "plan.superset_size_exceeded",
+                {"max_size": request.config.max_superset_size},
             )
         AntiSuicideValidator.validate_workout_plan(
             profile.experience_level if profile else "beginner",
@@ -570,6 +577,7 @@ async def preview_generated_plan(
             request.config.accent_muscles or (
                 [request.config.accent_muscle] if request.config.accent_muscle else []
             ),
+            language=getattr(current_user, "_request_language", "ru"),
         ))
     return GeneratePlanPreviewResponse(
         days=refreshed_days,
@@ -602,7 +610,7 @@ async def create_generator_preset(
         AdvancedGeneratorPreset.name == name,
     ))).scalar_one_or_none()
     if existing:
-        raise HTTPException(409, "Пресет с таким названием уже существует")
+        raise LocalizedHTTPException(409, "plan.generator_preset_name_conflict")
     if payload.is_default:
         for preset in (await db.execute(select(AdvancedGeneratorPreset).where(
             AdvancedGeneratorPreset.app_user_id == current_user.id,
@@ -631,7 +639,7 @@ async def update_generator_preset(
         AdvancedGeneratorPreset.app_user_id == current_user.id,
     ))).scalar_one_or_none()
     if not preset:
-        raise HTTPException(404, "Пресет не найден")
+        raise LocalizedHTTPException(404, "plan.generator_preset_not_found")
     if payload.name is not None:
         name = payload.name.strip()
         duplicate = (await db.execute(select(AdvancedGeneratorPreset).where(
@@ -640,7 +648,7 @@ async def update_generator_preset(
             AdvancedGeneratorPreset.id != preset_id,
         ))).scalar_one_or_none()
         if duplicate:
-            raise HTTPException(409, "Пресет с таким названием уже существует")
+            raise LocalizedHTTPException(409, "plan.generator_preset_name_conflict")
         preset.name = name
     if payload.settings is not None:
         preset.settings = payload.settings
@@ -669,7 +677,7 @@ async def delete_generator_preset(
         AdvancedGeneratorPreset.app_user_id == current_user.id,
     ))).scalar_one_or_none()
     if not preset:
-        raise HTTPException(404, "Пресет не найден")
+        raise LocalizedHTTPException(404, "plan.generator_preset_not_found")
     await db.delete(preset)
     await db.commit()
 
@@ -698,7 +706,7 @@ async def get_plan(plan_id: int, db: AsyncSession = Depends(get_db), current_use
     plan = result.scalar_one_or_none()
 
     if not plan:
-        raise HTTPException(status_code=404, detail="План не найден")
+        raise LocalizedHTTPException(404, "plan.not_found")
 
     return plan
 
@@ -757,7 +765,7 @@ def update_workout_plan(plan_id: int, plan_data: WorkoutPlanCreate, db: Session 
     """Редактирование плана: проверяем валидатором, сносим старые упражнения, пишем новые."""
     plan = db.query(WorkoutPlan).filter(WorkoutPlan.id == plan_id, WorkoutPlan.app_user_id == current_user.id).first()
     if not plan:
-        raise HTTPException(status_code=404, detail="План не найден")
+        raise LocalizedHTTPException(404, "plan.not_found")
 
     # Валидация
     profile = db.query(AppUserProfile).filter(AppUserProfile.app_user_id == current_user.id).first()
@@ -800,7 +808,7 @@ def delete_plan(plan_id: int, db: Session = Depends(get_db), current_user=Depend
     """Удалить план."""
     plan = db.query(WorkoutPlan).filter(WorkoutPlan.id == plan_id, WorkoutPlan.app_user_id == current_user.id).first()
     if not plan:
-        raise HTTPException(status_code=404, detail="План не найден")
+        raise LocalizedHTTPException(404, "plan.not_found")
 
     db.delete(plan)
     db.commit()
@@ -924,11 +932,11 @@ async def create_generator_rule(payload: GeneratorRuleCreate, db: AsyncSession =
         AppUserProfile.app_user_id == current_user.id,
     ))).scalar_one_or_none()
     if not profile:
-        raise HTTPException(404, "Профиль не найден")
+        raise LocalizedHTTPException(404, "profile.not_found")
     if payload.scope in ("day", "split") and not payload.blueprint_id:
-        raise HTTPException(400, "Для этой области нужен сплит")
+        raise LocalizedHTTPException(400, "plan.rule_split_required")
     if payload.scope == "day" and not payload.day_tag:
-        raise HTTPException(400, "Для правила дня нужен тип дня")
+        raise LocalizedHTTPException(400, "plan.rule_day_type_required")
     rule = {
         "id": str(uuid.uuid4()), "command": payload.command.model_dump(),
         "scope": payload.scope, "blueprint_id": payload.blueprint_id,
@@ -947,7 +955,7 @@ async def update_generator_rule(rule_id: str, payload: GeneratorRuleUpdate, db: 
     rules = _profile_generator_rules(profile)
     rule = next((item for item in rules if item.get("id") == rule_id), None)
     if not rule:
-        raise HTTPException(404, "Правило не найдено")
+        raise LocalizedHTTPException(404, "plan.rule_not_found")
     rule["enabled"] = payload.enabled
     settings = dict(profile.settings or {}); settings["generator_rules"] = rules; profile.settings = settings
     await db.commit()
@@ -960,7 +968,7 @@ async def delete_generator_rule(rule_id: str, db: AsyncSession = Depends(get_db)
     rules = _profile_generator_rules(profile)
     filtered = [item for item in rules if item.get("id") != rule_id]
     if len(filtered) == len(rules):
-        raise HTTPException(404, "Правило не найдено")
+        raise LocalizedHTTPException(404, "plan.rule_not_found")
     settings = dict(profile.settings or {}); settings["generator_rules"] = filtered; profile.settings = settings
     await db.commit()
 
@@ -1043,7 +1051,7 @@ async def apply_plan_to_calendar(
     plan = result.scalar_one_or_none()
 
     if not plan:
-        raise HTTPException(status_code=404, detail="План не найден")
+        raise LocalizedHTTPException(404, "plan.not_found")
 
     # 2. Создаем новую тренировочную сессию
     new_session = WorkoutSession(
@@ -1149,9 +1157,9 @@ async def confirm_generated_plan(request: ConfirmPlanRequest,
     experience = profile.experience_level if profile else "beginner"
 
     if not request.days:
-        raise HTTPException(400, "Нет тренировочных дней для сохранения")
+        raise LocalizedHTTPException(400, "plan.no_training_days")
     if request.mode == "single_day" and len(request.days) != 1:
-        raise HTTPException(400, "Однодневный режим принимает ровно один день")
+        raise LocalizedHTTPException(400, "plan.single_day_requires_one_day")
 
     today = _date.today()
     # Генератор меняет только текущие/будущие назначения. Переданная из
