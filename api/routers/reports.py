@@ -21,7 +21,9 @@ from api.services.reports.service import ensure_reports
 router = APIRouter(tags=["reports"])
 
 
-def _headline(payload: dict) -> list[ReportHeadlineRead]:
+def _headline(
+    payload: dict, language: SupportedLanguage
+) -> list[ReportHeadlineRead]:
     """Две-три цифры для карточки. Живут на сервере, чтобы лента и пуш
     говорили об отчёте одинаково независимо от версии клиента."""
     metrics = payload.get("metrics", {})
@@ -30,13 +32,26 @@ def _headline(payload: dict) -> list[ReportHeadlineRead]:
     records = metrics.get("records", [])
     items = [
         ReportHeadlineRead(
-            label="Выполнено",
-            value=f"{adherence.get('completed_days', 0)} из {adherence.get('planned_days', 0)}",
+            label=tr(language, "report.headline.adherence.label"),
+            value=tr(
+                language,
+                "report.headline.adherence.value",
+                completed_days=adherence.get("completed_days", 0),
+                planned_days=adherence.get("planned_days", 0),
+            ),
         ),
-        ReportHeadlineRead(label="Подходов", value=str(volume.get("work_sets", 0))),
+        ReportHeadlineRead(
+            label=tr(language, "report.headline.sets.label"),
+            value=str(volume.get("work_sets", 0)),
+        ),
     ]
     if records:
-        items.append(ReportHeadlineRead(label="Рекордов", value=str(len(records))))
+        items.append(
+            ReportHeadlineRead(
+                label=tr(language, "report.headline.records.label"),
+                value=str(len(records)),
+            )
+        )
     return items
 
 
@@ -70,7 +85,7 @@ async def list_reports(
             period_end=row.period_end,
             generated_at=row.generated_at,
             seen=row.seen_at is not None,
-            headline=_headline(row.payload),
+            headline=_headline(row.payload, request.state.language),
         )
         for row in rows
     ]

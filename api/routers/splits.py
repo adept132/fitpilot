@@ -12,7 +12,6 @@ from starlette import status
 
 from api.services.app_user_service import get_current_app_user
 from api.errors import LocalizedHTTPException
-from api.i18n import tr
 # Импортируй свои зависимости (пути могут немного отличаться в зависимости от твоего проекта)
 from api.services.models import (
     AppUser, SplitBlueprint, DayBlueprint, SplitDaySlot, UserSplit, DayMuscleTarget, UserCalendarDay, AppUserMesocycle,
@@ -25,17 +24,19 @@ from api.services.muscle_keys import to_system_key
 from api.services.periodization.service import close_block_for_split_change
 from api.services.scheduling_engine import SchedulingEngine
 from api.services.structure.suggest import DayView, SplitView, suggest_splits
-from api.services.structure.split_catalog import SPLITS
+from api.services.structure.split_catalog import localized_split_name
 from app.database import get_session
 
 router = APIRouter(prefix="/splits", tags=["Splits Workspace"])
 
-_SYSTEM_SPLIT_NAME_KEYS = {split.name: split.name_key for split in SPLITS}
-
-
-def _split_name(name: str, is_system: bool, language: str) -> str:
-    key = _SYSTEM_SPLIT_NAME_KEYS.get(name) if is_system else None
-    return tr(language, key) if key else name
+def _split_out(split: SplitBlueprint, language: str) -> SplitBlueprintOut:
+    return SplitBlueprintOut.model_validate(split).model_copy(
+        update={
+            "name": localized_split_name(
+                split.name, split.is_system, language
+            )
+        }
+    )
 
 
 @router.get("/blueprints", response_model=List[SplitBlueprintOut])
@@ -66,9 +67,7 @@ async def get_available_splits(
 
     language = getattr(request.state, "language", "en")
     return [
-        SplitBlueprintOut.model_validate(split).model_copy(
-            update={"name": _split_name(split.name, split.is_system, language)}
-        )
+        _split_out(split, language)
         for split in splits
     ]
 
@@ -121,7 +120,7 @@ async def suggest_split(
     views = [
         SplitView(
             id=str(bp.id),
-            name=_split_name(
+            name=localized_split_name(
                 bp.name,
                 bp.is_system,
                 getattr(request.state, "language", "en"),
@@ -541,6 +540,7 @@ async def launch_split(
 
 @router.get("/active")
 async def get_active_split(
+    request: Request,
     session: AsyncSession = Depends(get_session),
     current_user = Depends(get_current_app_user)
 ):
@@ -567,7 +567,11 @@ async def get_active_split(
     return {
         "id": active_split.id,
         "blueprint_id": active_split.blueprint_id,
-        "blueprint_name": active_split.blueprint.name,
+        "blueprint_name": localized_split_name(
+            active_split.blueprint.name,
+            active_split.blueprint.is_system,
+            getattr(request.state, "language", "en"),
+        ),
         # Отдаем дату старта в виде строки YYYY-MM-DD
         "start_date": active_split.start_date.strftime("%Y-%m-%d"),
         "current_day": active_split.current_day,
@@ -576,6 +580,7 @@ async def get_active_split(
 
 @router.get("/{blueprint_id}", response_model=SplitBlueprintOut)
 async def get_custom_split_details(
+        request: Request,
         blueprint_id: UUID,
         session: AsyncSession = Depends(get_session),
         current_user: AppUser = Depends(get_current_app_user)
@@ -599,7 +604,7 @@ async def get_custom_split_details(
     if not split:
         raise LocalizedHTTPException(404, "split.not_found")
 
-    return split
+    return _split_out(split, getattr(request.state, "language", "en"))
 
 
 @router.post("/preview", response_model=SchedulePreviewResponse)

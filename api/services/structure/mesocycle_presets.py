@@ -104,3 +104,21 @@ def localized_preset(
         description=tr(language, preset.description_key),
         tiers=preset.tiers,
     )
+
+
+def localized_preset_fields(
+    *,
+    code: str,
+    stored_name: str,
+    stored_description: str | None,
+    is_system: bool,
+    language: SupportedLanguage,
+) -> tuple[str, str | None]:
+    """Render known global presets while preserving user and legacy rows."""
+    if not is_system:
+        return stored_name, stored_description
+    try:
+        preset = localized_preset(code, language)
+    except KeyError:
+        return stored_name, stored_description
+    return preset.name, preset.description

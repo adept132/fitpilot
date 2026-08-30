@@ -78,6 +78,17 @@ SPLITS: tuple[SplitDef, ...] = (
 )
 
 _BY_CODE = {split.code: split for split in SPLITS}
+_NAME_KEY_BY_STORED_NAME = {split.name: split.name_key for split in SPLITS}
+
+
+def localized_split_name(
+    stored_name: str,
+    is_system: bool,
+    language: SupportedLanguage,
+) -> str:
+    """Render a seeded system name without changing stored/custom names."""
+    key = _NAME_KEY_BY_STORED_NAME.get(stored_name) if is_system else None
+    return tr(language, key) if key else stored_name
 
 
 def localized_split(code: str, language: SupportedLanguage) -> SplitDef:

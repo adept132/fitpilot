@@ -8,6 +8,7 @@ from sqlalchemy.orm import selectinload, joinedload
 
 from api.deps import get_db
 from api.errors import LocalizedHTTPException
+from api.i18n import SupportedLanguage
 from api.schemas.mesocycle import UpdateSelectedMesocyclePayload, UpdateMesocyclePhasePayload, \
     UpdateMesocycleContextPayload
 from api.schemas.microcycle import UpdateMicrocycleContextPayload
@@ -44,8 +45,39 @@ from api.schemas.workout_center import (
     StartWorkoutResponse, WorkoutCenterMesocycleRead,
 )
 from api.services.volume_service import VolumeService
+from api.services.structure.mesocycle_presets import localized_preset_fields
+from api.services.structure.split_catalog import localized_split_name
 
 router = APIRouter(prefix="", tags=["workout-center"])
+
+
+def _split_read(
+    split: SplitBlueprint, language: SupportedLanguage
+) -> WorkoutCenterSplitRead:
+    return WorkoutCenterSplitRead(
+        id=split.id,
+        name=localized_split_name(split.name, split.is_system, language),
+    )
+
+
+def _mesocycle_read(
+    mesocycle: Mesocycle,
+    language: SupportedLanguage,
+    **updates,
+) -> WorkoutCenterMesocycleRead:
+    name, _ = localized_preset_fields(
+        code=mesocycle.code,
+        stored_name=mesocycle.name,
+        stored_description=mesocycle.description,
+        is_system=mesocycle.author_id is None,
+        language=language,
+    )
+    return WorkoutCenterMesocycleRead(
+        id=mesocycle.id,
+        name=name,
+        phases_in_cycle=mesocycle.phases_in_cycle,
+        **updates,
+    )
 
 
 def build_split_day_read(slot: SplitDaySlot) -> WorkoutCenterSplitDayRead:
@@ -100,6 +132,7 @@ async def build_context(
         session: AsyncSession,
         app_user: AppUser,
 ) -> WorkoutCenterContextRead:
+    language = getattr(app_user, "_request_language", "en")
     # P0-09: пропуски проставляются лениво, при обращении. guarded()
     # изолирует падение в SAVEPOINT — голого try/except мало: работа идёт в
     # той же сессии, которую эндпоинт потом коммитит, и ошибка уровня DBAPI
@@ -165,10 +198,7 @@ async def build_context(
     selected_split_day = None
 
     if user_split and user_split.blueprint:
-        selected_split = WorkoutCenterSplitRead(
-            id=user_split.blueprint.id,
-            name=user_split.blueprint.name,
-        )
+        selected_split = _split_read(user_split.blueprint, language)
 
         sorted_slots = sorted(user_split.blueprint.slots, key=lambda s: s.day_order)
         available_split_days = [build_split_day_read(slot) for slot in sorted_slots]
@@ -190,11 +220,7 @@ async def build_context(
 
     # Форматируем их в список словарей (или используем Pydantic схему, если она у тебя есть)
     available_mesocycles = [
-        WorkoutCenterMesocycleRead(
-            id=m.id,
-            name=m.name,
-            phases_in_cycle=m.phases_in_cycle  # <--- ДОБАВИЛИ НЕДОСТАЮЩЕЕ ПОЛЕ
-        )
+        _mesocycle_read(m, language)
         for m in available_mesocycles_db
     ]
 
@@ -219,10 +245,9 @@ async def build_context(
     phase_label = None
 
     if active_meso and active_meso.mesocycle:
-        selected_periodization = WorkoutCenterMesocycleRead(
-            id=active_meso.mesocycle.id,
-            name=active_meso.mesocycle.name,
-            phases_in_cycle=active_meso.mesocycle.phases_in_cycle,
+        selected_periodization = _mesocycle_read(
+            active_meso.mesocycle,
+            language,
             # ДОБАВЛЯЕМ ВОЗВРАТ СОХРАНЕННОЙ ДЛИНЫ
             microcycle_length=active_meso.microcycle_length
         )
@@ -308,7 +333,7 @@ async def build_context(
     return WorkoutCenterContextRead(
         selected_split=selected_split,
         available_splits=[
-            WorkoutCenterSplitRead(id=split.id, name=split.name)
+            _split_read(split, language)
             for split in available_splits
         ],
         selected_split_day=selected_split_day,

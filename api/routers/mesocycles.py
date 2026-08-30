@@ -13,7 +13,7 @@ from api.schemas.mesocycle import MesocycleCreate, UpdateSelectedMesocyclePayloa
 from api.services.app_user_service import get_current_app_user
 from api.services.models import Mesocycle, MesocyclePhase, AppUser, AppUserMesocycle
 from api.services.validator import AntiSuicideValidator
-from api.services.structure.mesocycle_presets import localized_preset
+from api.services.structure.mesocycle_presets import localized_preset_fields
 
 router = APIRouter(prefix="/mesocycles", tags=["Mesocycles"])
 
@@ -30,14 +30,13 @@ async def get_mesocycles(request: Request, db: AsyncSession = Depends(get_db)):
     response = []
     for mesocycle in result.scalars().all():
         item = jsonable_encoder(mesocycle)
-        if mesocycle.author_id is None:
-            try:
-                preset = localized_preset(mesocycle.code, language)
-            except KeyError:
-                pass
-            else:
-                item["name"] = preset.name
-                item["description"] = preset.description
+        item["name"], item["description"] = localized_preset_fields(
+            code=mesocycle.code,
+            stored_name=mesocycle.name,
+            stored_description=mesocycle.description,
+            is_system=mesocycle.author_id is None,
+            language=language,
+        )
         response.append(item)
     return response
 
