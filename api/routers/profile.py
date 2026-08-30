@@ -118,6 +118,8 @@ async def update_profile_settings(
 
     # Обновляем JSONB поле settings (частично — только переданные поля)
     current_settings = dict(profile.settings) if profile.settings else {}
+    if payload.language is not None:
+        current_settings["language"] = payload.language
     if payload.locations is not None:
         current_settings["locations"] = payload.locations
     if payload.prehab_flags is not None:
