@@ -17,9 +17,11 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.i18n import SupportedLanguage
 from api.schemas.periodization import BlockCoordinateRead
 from api.services.models import (
     Exercise,
+    Mesocycle,
     PeriodizationProposal,
     TrainingBlock,
     UserCalendarDay,
@@ -41,6 +43,7 @@ from api.services.periodization.repository import (
     roll_over_if_complete,
 )
 from api.services.progression import params as progression_params
+from api.services.structure.mesocycle_presets import phase_name
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +55,8 @@ async def block_coordinate(
     today: date,
     *,
     include_workouts_to_deload: bool = False,
+    language: SupportedLanguage | None = None,
+    system_mesocycle: bool | None = None,
 ) -> BlockCoordinateRead:
     """Координата блока на дату — единая сборка BlockCoordinateRead (P0-08,
     Задача 13).
@@ -73,6 +78,23 @@ async def block_coordinate(
     current = next(
         (p for p in state.phases if p.phase_number == pos.phase_number), state.phases[-1]
     )
+    if language is not None and system_mesocycle is None:
+        system_mesocycle = False
+        if block.mesocycle_id is not None:
+            global_mesocycle_id = (
+                await session.execute(
+                    select(Mesocycle.id).where(
+                        Mesocycle.id == block.mesocycle_id,
+                        Mesocycle.author_id.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            system_mesocycle = global_mesocycle_id is not None
+    response_phase_name = (
+        phase_name(current.effort_tier, language)
+        if language is not None and system_mesocycle
+        else current.name
+    )
     workouts_to_deload = None
     if include_workouts_to_deload:
         workouts_to_deload = await count_workouts_to_deload(
@@ -82,7 +104,7 @@ async def block_coordinate(
         block_id=block.id,
         block_index=block.block_index,
         phase_number=pos.phase_number,
-        phase_name=current.name,
+        phase_name=response_phase_name,
         effort_tier=pos.effort_tier,
         phase_ordinal=pos.phase_ordinal,
         phases_total=pos.phases_total,

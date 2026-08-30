@@ -227,6 +227,11 @@ def explain_day(
             action=GenerationIssueAction(
                 type=action_type,
                 label="",
+                label_key=(
+                    "generation.muscle_target_partially_covered.context_action"
+                    if blocked_by_context
+                    else "generation.muscle_target_partially_covered.library_action"
+                ),
                 params={"day_tag": day.day_tag, "muscle": muscle},
             ),
         ))

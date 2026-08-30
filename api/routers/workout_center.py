@@ -45,7 +45,10 @@ from api.schemas.workout_center import (
     StartWorkoutResponse, WorkoutCenterMesocycleRead,
 )
 from api.services.volume_service import VolumeService
-from api.services.structure.mesocycle_presets import localized_preset_fields
+from api.services.structure.mesocycle_presets import (
+    localized_preset_fields,
+    phase_name,
+)
 from api.services.structure.split_catalog import localized_split_name
 
 router = APIRouter(prefix="", tags=["workout-center"])
@@ -243,8 +246,10 @@ async def build_context(
     selected_periodization = None
     selected_periodization_week = None
     phase_label = None
+    selected_periodization_is_system = False
 
     if active_meso and active_meso.mesocycle:
+        selected_periodization_is_system = active_meso.mesocycle.author_id is None
         selected_periodization = _mesocycle_read(
             active_meso.mesocycle,
             language,
@@ -261,7 +266,11 @@ async def build_context(
         phases = sorted(active_meso.mesocycle.phases, key=lambda p: p.phase_number)
         if phases:
             target_phase = next((p for p in phases if p.phase_number == current_phase), phases[-1])
-            phase_label = target_phase.name
+            phase_label = (
+                phase_name(target_phase.effort_tier, language)
+                if selected_periodization_is_system
+                else target_phase.name
+            )
 
         # --- 3. ЗАГРУЗКА ПЛАНОВ ---
     plans_stmt = select(WorkoutPlan).where(WorkoutPlan.app_user_id == app_user.id)
@@ -313,8 +322,20 @@ async def build_context(
     active_block_out = None
     active_block = await get_active_block(session, app_user.id)
     if active_block is not None:
+        block_system_mesocycle = None
+        if (
+            active_meso
+            and active_meso.mesocycle
+            and active_meso.mesocycle.id == active_block.mesocycle_id
+        ):
+            block_system_mesocycle = selected_periodization_is_system
         active_block_out = await _block_coordinate(
-            session, app_user.id, active_block, date.today()
+            session,
+            app_user.id,
+            active_block,
+            date.today(),
+            language=language,
+            system_mesocycle=block_system_mesocycle,
         )
 
     # P0-08, Задача 13, ревью, Critical 1: AppUserMesocycle.current_phase

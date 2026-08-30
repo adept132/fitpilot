@@ -126,7 +126,12 @@ async def get_periodization_context(
     # P0-08, Задача 13: сборка координаты вынесена в service.block_coordinate,
     # чтобы не дублировать её со сборкой в build_context workout-центра.
     coordinate = await block_coordinate(
-        db, current_user.id, block, today, include_workouts_to_deload=True
+        db,
+        current_user.id,
+        block,
+        today,
+        include_workouts_to_deload=True,
+        language=getattr(current_user, "_request_language", "en"),
     )
 
     return PeriodizationContextRead(
