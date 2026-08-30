@@ -10,6 +10,7 @@ from api.services import equipment
 from api.services.exercise_utils import get_base_exercise_query
 from api.services.models import Exercise, WorkoutSession, WorkoutSessionExercise, UserExercisePreference
 from api.services.exercise_matcher import ExerciseMatcher
+from api.services.exercise_localization import localized_names, sort_exercises
 
 
 def normalize_exercise_type(value: Optional[str]) -> Optional[str]:
@@ -114,6 +115,7 @@ class ExerciseSearchService:
         equipment: Optional[str] = None,
         recent: bool = False,
         source: Optional[str] = None,
+        language: str = "ru",
     ):
         normalized_type = normalize_exercise_type(type)
         recent_ids: set[int] | None = None
@@ -225,6 +227,7 @@ class ExerciseSearchService:
                 if item.source == source
             ]
 
+        filtered_items = sort_exercises(filtered_items, language)
         preferences = await ExerciseSearchService.preference_map(session, user_id)
         return ExerciseSearchService.sort_and_mark_preferences(filtered_items, preferences)
 
@@ -345,6 +348,7 @@ class ExerciseSearchService:
             {
                 "exercise_id": item.exercise_id,
                 "name": item.exercise.name if item.exercise else "Без названия",
+                "localized_names": localized_names(item.exercise) if item.exercise else {},
                 "main_muscle_group": item.exercise.main_muscle_group if item.exercise else None,
                 "category": item.exercise.category if item.exercise else None,
             }
@@ -448,6 +452,7 @@ class ExerciseSearchService:
         return {
             "exercise_id": exercise.id,
             "name": exercise.name,
+            "localized_names": localized_names(exercise),
             "category": exercise.category or "base",
             "main_muscle_group": exercise.main_muscle_group or "Не указано",
             "history": history_points

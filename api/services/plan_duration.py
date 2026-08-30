@@ -123,16 +123,22 @@ def estimate_duration_seconds(
     return int(total)
 
 
-def _copy_with_sets(exercise: SelectedExercise, sets: int, group_id=None) -> SelectedExercise:
+def _copy_with_sets(
+    exercise: SelectedExercise, sets: int, group_id=None, canonical_exercise=None
+) -> SelectedExercise:
     return SelectedExercise(
-        exercise_id=exercise.exercise_id, name=exercise.name, sets=sets,
+        exercise_id=exercise.exercise_id,
+        name=getattr(canonical_exercise, "name", exercise.name),
+        sets=sets,
         order_index=exercise.order_index, superset_group_id=group_id if group_id is not None else exercise.superset_group_id,
         fatigue_tier=exercise.fatigue_tier, primary_muscle=exercise.primary_muscle,
         secondary_muscle=exercise.secondary_muscle,
     )
 
 
-def _normalize_groups(exercises: list[SelectedExercise]) -> list[SelectedExercise]:
+def _normalize_groups(
+    exercises: list[SelectedExercise], pool_by_id: dict[int, object] | None = None
+) -> list[SelectedExercise]:
     counts: dict[str, int] = {}
     for row in exercises:
         if row.superset_group_id:
@@ -141,7 +147,12 @@ def _normalize_groups(exercises: list[SelectedExercise]) -> list[SelectedExercis
     for index, row in enumerate(exercises):
         group_size = counts.get(row.superset_group_id, 0) if row.superset_group_id else 0
         group = row.superset_group_id if group_size in (2, 3) else None
-        copied = _copy_with_sets(row, row.sets, group_id=group)
+        copied = _copy_with_sets(
+            row,
+            row.sets,
+            group_id=group,
+            canonical_exercise=(pool_by_id or {}).get(row.exercise_id),
+        )
         copied.order_index = index
         result.append(copied)
     return result
@@ -151,7 +162,12 @@ def fit_to_duration(
     exercises: list[SelectedExercise], pool_by_id: dict[int, object], duration_minutes: int | None,
     config: DurationConfig, accent_muscles: Iterable[str] = (), favorite_ids: set[int] | None = None,
 ) -> DurationResult:
-    current = [_copy_with_sets(row, row.sets) for row in exercises]
+    current = [
+        _copy_with_sets(
+            row, row.sets, canonical_exercise=pool_by_id.get(row.exercise_id)
+        )
+        for row in exercises
+    ]
     estimate = estimate_duration_seconds(current, pool_by_id, config)
     if not duration_minutes:
         return DurationResult(current, estimate, True, False)
@@ -174,7 +190,11 @@ def fit_to_duration(
                 -row.order_index,
             ))
             index = current.index(victim)
-            current[index] = _copy_with_sets(victim, victim.sets - 1)
+            current[index] = _copy_with_sets(
+                victim,
+                victim.sets - 1,
+                canonical_exercise=pool_by_id.get(victim.exercise_id),
+            )
         else:
             muscle_counts: dict[str | None, int] = {}
             for row in current:
@@ -206,8 +226,10 @@ def fit_to_duration(
                 -row.order_index,
             ))
             current.remove(victim)
-            current = _normalize_groups(current)
+            current = _normalize_groups(current, pool_by_id)
         reduced = True
         estimate = estimate_duration_seconds(current, pool_by_id, config)
 
-    return DurationResult(_normalize_groups(current), estimate, estimate <= limit, reduced)
+    return DurationResult(
+        _normalize_groups(current, pool_by_id), estimate, estimate <= limit, reduced
+    )

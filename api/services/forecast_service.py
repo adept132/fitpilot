@@ -63,11 +63,13 @@ async def build_strength_forecast(
         return None
 
     name = data["name"]
+    names = data.get("localized_names", {"ru": name})
     history = data.get("history", [])
 
     base = {
         "exercise_id": exercise_id,
         "name": name,
+        "localized_names": names,
         "has_data": False,
         "current_e1rm": None,
         "last_date": None,
@@ -135,6 +137,7 @@ async def build_strength_forecast(
     return {
         "exercise_id": exercise_id,
         "name": name,
+        "localized_names": names,
         "has_data": True,
         "current_e1rm": round(current_e1rm, 1),
         "last_date": last_date.isoformat(),

@@ -961,14 +961,16 @@ async def _apply_favorite(
         # exercise_name обязателен в модели (см. api/routers/exercises.py,
         # set_exercise_preference) — тянем его из Exercise; если упражнения
         # уже нет, ставить нечего.
-        exercise_name = (await session.execute(
-            select(Exercise.name).where(Exercise.id == exercise_id)
+        exercise = (await session.execute(
+            select(Exercise).where(Exercise.id == exercise_id)
         )).scalar_one_or_none()
-        if exercise_name is None:
+        if exercise is None:
             return False
         session.add(UserExercisePreference(
             app_user_id=app_user_id, exercise_id=exercise_id,
-            exercise_name=exercise_name, preference="favorite",
+            # Persist the canonical snapshot; response localization is rebuilt
+            # from exercise_id and never becomes preference identity.
+            exercise_name=exercise.name, preference="favorite",
         ))
     else:
         existing.preference = "favorite"

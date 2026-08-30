@@ -115,6 +115,7 @@ class Exercise(Base):
     __tablename__ = 'exercises'
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(200), unique=True, index=True, nullable=False)
+    name_en: Mapped[Optional[str]] = mapped_column(String(200), nullable=True, index=True)
     category: Mapped[str] = mapped_column(String(50), nullable=False)
     fatigue_tier: Mapped[int] = mapped_column(Integer, default=2, server_default='2', nullable=False)
     main_muscle_group: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -122,6 +123,7 @@ class Exercise(Base):
     equipment_needed: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     difficulty: Mapped[str] = mapped_column(String(20), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text)
+    description_en: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     source: Mapped[str] = mapped_column(String(20), default='default')
     # Идемпотентный ключ offline-создания кастомного упражнения (дедуп повтора).
     client_uuid: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)

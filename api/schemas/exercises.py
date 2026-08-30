@@ -6,7 +6,15 @@ ExercisePreferenceValue = Literal["favorite", "disliked"]
 from pydantic import BaseModel, Field
 
 
-class ExerciseListItemResponse(BaseModel):
+class LocalizedExerciseNameFields(BaseModel):
+    localized_names: dict[str, str] = Field(default_factory=dict)
+
+
+class LocalizedExerciseDescriptionFields(LocalizedExerciseNameFields):
+    localized_descriptions: dict[str, str] = Field(default_factory=dict)
+
+
+class ExerciseListItemResponse(LocalizedExerciseNameFields):
     id: int
     name: str
     category: str
@@ -23,7 +31,7 @@ class ExerciseListItemResponse(BaseModel):
     preference: ExercisePreferenceValue | None = None
 
 
-class ExerciseDetailResponse(BaseModel):
+class ExerciseDetailResponse(LocalizedExerciseDescriptionFields):
     id: int
     name: str
     category: str
@@ -46,7 +54,7 @@ class ExercisePreferenceRequest(BaseModel):
     preference: ExercisePreferenceValue
 
 
-class ExercisePreferenceResponse(BaseModel):
+class ExercisePreferenceResponse(LocalizedExerciseNameFields):
     exercise_id: int
     exercise_name: str
     preference: ExercisePreferenceValue
@@ -80,7 +88,7 @@ class ExerciseHistoryWorkoutSetResponse(BaseModel):
     parent_set_id: int | None = None
 
 
-class ExerciseHistoryWorkoutDetailResponse(BaseModel):
+class ExerciseHistoryWorkoutDetailResponse(LocalizedExerciseNameFields):
     workout_id: int
     finished_at: datetime | None = None
     source: str
@@ -91,7 +99,7 @@ class ExerciseHistoryWorkoutDetailResponse(BaseModel):
     total_volume: float
     sets: list[ExerciseHistoryWorkoutSetResponse]
 
-class ExerciseLastPerformanceResponse(BaseModel):
+class ExerciseLastPerformanceResponse(LocalizedExerciseNameFields):
     workout_id: int
     finished_at: datetime | None = None
     source: str
@@ -108,7 +116,7 @@ class EquipmentFilter(str):
     FREE = "free"
     MACHINE = "machine"
 
-class ExerciseSearchItem(BaseModel):
+class ExerciseSearchItem(LocalizedExerciseNameFields):
     id: int
     name: str
     main_muscle_group: str
@@ -129,7 +137,7 @@ class MuscleGroupItem(BaseModel):
     count: int
 
 
-class LastWorkoutExerciseItem(BaseModel):
+class LastWorkoutExerciseItem(LocalizedExerciseNameFields):
     exercise_id: int
     name: str
     main_muscle_group: str | None = None
@@ -139,7 +147,7 @@ class LastWorkoutExerciseItem(BaseModel):
 class LastWorkoutResponse(BaseModel):
     exercises: List[LastWorkoutExerciseItem]
 
-class ExerciseAlternativeResponse(BaseModel):
+class ExerciseAlternativeResponse(LocalizedExerciseNameFields):
     id: int
     name: str
     main_muscle_group: str
@@ -177,7 +185,7 @@ class ExerciseHistoryPoint(BaseModel): # У тебя она может назы�
     sets: Optional[List[HistorySetResponse]] = None # <-- ВОТ ОНО
 
 # 3. Сама схема ответа остается такой же, просто внутри нее теперь обновленный массив history
-class ExerciseFullHistoryResponse(BaseModel):
+class ExerciseFullHistoryResponse(LocalizedExerciseNameFields):
     exercise_id: int
     name: str
     category: str

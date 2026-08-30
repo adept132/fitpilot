@@ -23,6 +23,7 @@ from api.services.plan_generation_insights import (
 )
 from api.services.muscle_keys import key_for_muscle
 from api.services.exercise_selection_engine import SelectionConfig, SelectionPolicy, SelectedExercise
+from api.services.exercise_localization import localized_names
 from api.services.plan_duration import DurationConfig, estimate_duration_seconds, fit_to_duration
 from api.services.progression import repository as progression_repo
 from api.services.progression.engine import plan_exercise
@@ -377,6 +378,7 @@ async def generate_plan(request: GeneratePlanRequest,
                           seed=request.config.seed,
                           favorite_exercise_ids=favorite_ids,
                           disliked_exercise_ids=disliked_ids)
+    pool_by_id = {exercise.id: exercise for exercise in pool}
     effort_by_tag = (
         await _day_effort_by_tag(db, current_user.id)
         if callable(getattr(db, "execute", None)) else {}
@@ -451,7 +453,10 @@ async def generate_plan(request: GeneratePlanRequest,
                 estimated_duration_seconds=gen.estimated_duration_seconds,
                 duration_limit_met=gen.duration_limit_met,
                 exercises=[GeneratedExerciseOut(
-                    exercise_id=e.exercise_id, name=e.name, target_sets=e.sets,
+                    exercise_id=e.exercise_id,
+                    name=pool_by_id[e.exercise_id].name,
+                    localized_names=localized_names(pool_by_id[e.exercise_id]),
+                    target_sets=e.sets,
                     order_index=e.order_index, superset_group_id=e.superset_group_id,
                     fatigue_tier=e.fatigue_tier, primary_muscle=e.primary_muscle,
                     secondary_muscle=e.secondary_muscle,
@@ -514,9 +519,11 @@ async def preview_generated_plan(
     refreshed_days = []
     effort_by_tag = await _day_effort_by_tag(db, current_user.id)
     for day in request.days:
+        if any(exercise.exercise_id not in pool_by_id for exercise in day.exercises):
+            raise LocalizedHTTPException(400, "plan.exercise_unavailable")
         selected = [SelectedExercise(
             exercise_id=exercise.exercise_id,
-            name=exercise.name,
+            name=pool_by_id[exercise.exercise_id].name,
             sets=exercise.target_sets,
             order_index=exercise.order_index,
             superset_group_id=exercise.superset_group_id,
@@ -524,8 +531,6 @@ async def preview_generated_plan(
             primary_muscle=exercise.primary_muscle,
             secondary_muscle=exercise.secondary_muscle,
         ) for exercise in day.exercises]
-        if any(exercise.exercise_id not in pool_by_id for exercise in selected):
-            raise LocalizedHTTPException(400, "plan.exercise_unavailable")
         group_sizes: dict[str, int] = {}
         for exercise in day.exercises:
             if exercise.superset_group_id:
@@ -558,7 +563,12 @@ async def preview_generated_plan(
                 day_effort=effort,
             ),
         )
+        refreshed_exercises = [exercise.model_copy(update={
+            "name": pool_by_id[exercise.exercise_id].name,
+            "localized_names": localized_names(pool_by_id[exercise.exercise_id]),
+        }) for exercise in day.exercises]
         refreshed_day = day.model_copy(update={
+            "exercises": refreshed_exercises,
             "estimated_duration_seconds": estimated_seconds,
             "duration_limit_met": request.config.duration_minutes is None
                 or estimated_seconds <= request.config.duration_minutes * 60,
@@ -876,6 +886,17 @@ def _apply_saved_generator_rules(
     )
     estimated_seconds = day.estimated_duration_seconds
     duration_limit_met = day.duration_limit_met
+    pool_by_id = {exercise.id: exercise for exercise in pool}
+    exercises = [
+        {
+            **exercise,
+            "name": pool_by_id[exercise["exercise_id"]].name,
+            "localized_names": localized_names(pool_by_id[exercise["exercise_id"]]),
+        }
+        if exercise["exercise_id"] in pool_by_id
+        else exercise
+        for exercise in exercises
+    ]
     if generation_config is not None:
         selected = [SelectedExercise(
             exercise_id=exercise["exercise_id"], name=exercise["name"],
@@ -884,7 +905,6 @@ def _apply_saved_generator_rules(
             fatigue_tier=exercise["fatigue_tier"], primary_muscle=exercise["primary_muscle"],
             secondary_muscle=exercise.get("secondary_muscle"),
         ) for exercise in exercises]
-        pool_by_id = {exercise.id: exercise for exercise in pool}
         if all(exercise.exercise_id in pool_by_id for exercise in selected):
             duration_result = fit_to_duration(
                 selected, pool_by_id, generation_config.duration_minutes,

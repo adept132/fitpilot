@@ -27,6 +27,12 @@ class ExerciseShortResponse(BaseModel):
 
     id: int
     name: str
+    name_en: str | None = Field(default=None, exclude=True)
+    description: str | None = Field(default=None, exclude=True)
+    description_en: str | None = Field(default=None, exclude=True)
+    source: str | None = Field(default=None, exclude=True)
+    localized_names: Dict[str, str] = Field(default_factory=dict)
+    localized_descriptions: Dict[str, str] = Field(default_factory=dict)
     fatigue_tier: int | None = None
 
     category: str | None = None
@@ -44,6 +50,13 @@ class ExerciseShortResponse(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_muscle_keys(self) -> "ExerciseShortResponse":
+        from api.services.exercise_localization import (
+            localized_descriptions,
+            localized_names,
+        )
+
+        self.localized_names = localized_names(self)
+        self.localized_descriptions = localized_descriptions(self)
         self.muscle_key = to_system_key(self.main_muscle_group)
 
         raw_secondary = self.secondary_muscle_groups
@@ -238,6 +251,7 @@ class RepeatWorkoutSetRequest(BaseModel):
 class WorkoutFinishedExerciseSummary(BaseModel):
     exercise_id: int
     exercise_name: str
+    localized_names: Dict[str, str] = Field(default_factory=dict)
     sets_count: int
     total_reps: int
     total_volume: Decimal | None = None

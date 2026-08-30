@@ -50,6 +50,7 @@ from api.services.structure.mesocycle_presets import (
     phase_name,
 )
 from api.services.structure.split_catalog import localized_split_name
+from api.services.exercise_localization import localized_names
 
 router = APIRouter(prefix="", tags=["workout-center"])
 
@@ -875,6 +876,7 @@ async def finish_workout(
             WorkoutFinishedExerciseSummary(
                 exercise_id=session_exercise.exercise.id,
                 exercise_name=session_exercise.exercise.name,
+                localized_names=localized_names(session_exercise.exercise),
                 sets_count=sets_count,
                 total_reps=reps_sum,
                 total_volume=exercise_volume,

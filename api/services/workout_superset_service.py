@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from api.services.models import WorkoutSession, WorkoutSessionExercise, WorkoutSessionSet
+from api.services.exercise_localization import localized_names
 
 def ensure_unique_exercise_ids_for_new_superset(
     session_exercises: list[WorkoutSessionExercise],
@@ -216,6 +217,7 @@ class WorkoutSupersetService:
                         "order_index": exercise.order_index,
                         "exercise_id": exercise.exercise_id,
                         "exercise_name": exercise.exercise.name if exercise.exercise else "Без названия",
+                        "localized_names": localized_names(exercise.exercise) if exercise.exercise else {},
                         "sets_count": WorkoutSupersetService._sets_count(exercise),
                         "volume_total": WorkoutSupersetService._volume_total(exercise),
                         "sets": [
@@ -249,6 +251,7 @@ class WorkoutSupersetService:
                             "order_index": ex.order_index,
                             "exercise_id": ex.exercise_id,
                             "exercise_name": ex.exercise.name if ex.exercise else "Без названия",
+                            "localized_names": localized_names(ex.exercise) if ex.exercise else {},
                             "sets_count": WorkoutSupersetService._sets_count(ex),
                             "volume_total": WorkoutSupersetService._volume_total(ex),
                         }
@@ -512,6 +515,7 @@ class WorkoutSupersetService:
                     "order_index": exercise.order_index,
                     "exercise_id": exercise.exercise_id,
                     "exercise_name": exercise.exercise.name if exercise.exercise else "Без названия",
+                    "localized_names": localized_names(exercise.exercise) if exercise.exercise else {},
                     "sets": [
                         WorkoutSupersetService._serialize_set(set_item)
                         for set_item in exercise.sets

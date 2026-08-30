@@ -87,6 +87,7 @@ class GeneratePlanRequest(BaseModel):
 class GeneratedExerciseOut(BaseModel):
     exercise_id: int
     name: str
+    localized_names: Dict[str, str] = Field(default_factory=dict)
     target_sets: int
     order_index: int
     superset_group_id: Optional[str] = None

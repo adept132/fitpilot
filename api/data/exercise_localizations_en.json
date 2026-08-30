@@ -1,0 +1,394 @@
+{
+  "76": {
+    "name": "Cable Shrug",
+    "description": "Stand tall and shrug the shoulders straight up against cable resistance."
+  },
+  "77": {
+    "name": "Barbell Shrug",
+    "description": "Hold the bar with straight arms and raise the shoulders without rolling them."
+  },
+  "78": {
+    "name": "Dumbbell Shrug",
+    "description": "Hold dumbbells at the sides and lift the shoulders under control."
+  },
+  "79": {
+    "name": "Standing Dumbbell Upright Row",
+    "description": "Pull the dumbbells toward the upper chest while keeping the elbows high."
+  },
+  "80": {
+    "name": "Barbell Upright Row",
+    "description": "Pull the bar close to the body toward the upper chest with high elbows."
+  },
+  "81": {
+    "name": "Cable Lateral Raise",
+    "description": "Raise one arm out to the side against cable resistance without shrugging."
+  },
+  "82": {
+    "name": "Machine Lateral Raise",
+    "description": "Raise the machine pads out to the sides while keeping the torso still."
+  },
+  "83": {
+    "name": "Dumbbell Lateral Raise",
+    "description": "Raise the dumbbells out to shoulder height with softly bent elbows."
+  },
+  "84": {
+    "name": "Standing Military Press",
+    "description": "Press the bar overhead from shoulder level while keeping the trunk braced."
+  },
+  "85": {
+    "name": "Seated Barbell Military Press",
+    "description": "Press the bar overhead from a seated, supported position."
+  },
+  "86": {
+    "name": "Dumbbell Shoulder Press",
+    "description": "Press the dumbbells overhead and lower them to shoulder level with control."
+  },
+  "87": {
+    "name": "Machine Shoulder Press",
+    "description": "Press the machine handles overhead while keeping the back supported."
+  },
+  "88": {
+    "name": "Reverse Pec Deck Fly",
+    "description": "Open the arms against the pads to train the rear shoulders and upper back."
+  },
+  "89": {
+    "name": "Seated Bent-Over Rear Delt Raise",
+    "description": "Hinge forward while seated and raise the dumbbells out to the sides."
+  },
+  "90": {
+    "name": "Barbell Bench Press",
+    "description": "Lower the bar to the chest and press it up from a stable bench position."
+  },
+  "91": {
+    "name": "Incline Dumbbell Press",
+    "description": "Press dumbbells above the upper chest on an inclined bench."
+  },
+  "92": {
+    "name": "Pec Deck Fly",
+    "description": "Bring the machine arms together in front of the chest without rounding forward."
+  },
+  "93": {
+    "name": "Machine Chest Press",
+    "description": "Press the machine handles forward while keeping the shoulders supported."
+  },
+  "94": {
+    "name": "Cable Crossover",
+    "description": "Bring the cable handles together in front of the chest with a soft elbow bend."
+  },
+  "95": {
+    "name": "Dumbbell Bench Press",
+    "description": "Press dumbbells above the chest from a flat bench with controlled depth."
+  },
+  "96": {
+    "name": "Incline Barbell Bench Press",
+    "description": "Lower the bar toward the upper chest and press from an inclined bench."
+  },
+  "97": {
+    "name": "Dumbbell Fly",
+    "description": "Open the dumbbells in a wide arc and bring them together above the chest."
+  },
+  "98": {
+    "name": "Incline Dumbbell Fly",
+    "description": "Perform a controlled dumbbell fly on an inclined bench."
+  },
+  "99": {
+    "name": "Smith Machine Bench Press",
+    "description": "Press the Smith machine bar from the chest on a flat bench."
+  },
+  "100": {
+    "name": "Smith Machine Incline Bench Press",
+    "description": "Press the Smith machine bar from the upper chest on an inclined bench."
+  },
+  "101": {
+    "name": "Incline Machine Chest Press",
+    "description": "Press the machine handles forward and upward to target the upper chest."
+  },
+  "102": {
+    "name": "Decline Barbell Bench Press",
+    "description": "Lower the bar to the lower chest and press from a declined bench."
+  },
+  "103": {
+    "name": "Push-Up",
+    "description": "Lower the braced body toward the floor and press back to straight arms."
+  },
+  "104": {
+    "name": "Bent-Arm Dumbbell Pullover",
+    "description": "Lower one dumbbell behind the head with bent elbows and pull it over the chest."
+  },
+  "105": {
+    "name": "Pull-Up",
+    "description": "Pull the chest toward the bar from a full, controlled hang."
+  },
+  "106": {
+    "name": "Wide-Grip Lat Pulldown",
+    "description": "Pull the wide bar toward the upper chest while keeping the torso stable."
+  },
+  "107": {
+    "name": "Close-Grip V-Bar Pulldown",
+    "description": "Pull the V-bar toward the chest with the elbows driving down."
+  },
+  "108": {
+    "name": "Chin-Up",
+    "description": "Pull up with an underhand grip until the chin clears the bar."
+  },
+  "109": {
+    "name": "Behind-the-Neck Wide-Grip Pulldown",
+    "description": "Pull the wide bar carefully behind the head only through a comfortable range."
+  },
+  "110": {
+    "name": "Rope Straight-Arm Pulldown",
+    "description": "Keep the arms nearly straight and pull the rope from overhead toward the thighs."
+  },
+  "111": {
+    "name": "Single-Arm Hammer Pulldown",
+    "description": "Pull one lever down toward the ribs while keeping the torso supported."
+  },
+  "112": {
+    "name": "Two-Arm Hammer Pulldown",
+    "description": "Pull both machine levers toward the ribs with the chest supported."
+  },
+  "113": {
+    "name": "Hammer Curl",
+    "description": "Curl the dumbbells with neutral palms while keeping the upper arms still."
+  },
+  "114": {
+    "name": "Preacher Curl",
+    "description": "Curl the weight while the upper arms stay supported on the preacher pad."
+  },
+  "115": {
+    "name": "Dumbbell Hammer Preacher Curl",
+    "description": "Use a neutral grip to curl dumbbells from the preacher pad."
+  },
+  "116": {
+    "name": "Barbell Curl",
+    "description": "Curl the bar toward the shoulders without swinging the torso."
+  },
+  "117": {
+    "name": "Incline Dumbbell Curl",
+    "description": "Curl dumbbells from an inclined bench while keeping the upper arms behind the torso."
+  },
+  "118": {
+    "name": "Standing Cable Curl",
+    "description": "Curl the cable handle toward the shoulders with the elbows fixed."
+  },
+  "119": {
+    "name": "Concentration Curl",
+    "description": "Brace the upper arm against the thigh and curl the dumbbell slowly."
+  },
+  "120": {
+    "name": "Dumbbell Biceps Curl",
+    "description": "Curl the dumbbells toward the shoulders without moving the upper arms."
+  },
+  "121": {
+    "name": "Seated Dumbbell Curl",
+    "description": "Curl dumbbells from a seated position while keeping the torso upright."
+  },
+  "122": {
+    "name": "Zottman Curl",
+    "description": "Curl with palms up, rotate at the top, and lower with palms down."
+  },
+  "123": {
+    "name": "Overhead Straight-Bar Cable Triceps Extension",
+    "description": "Extend the elbows overhead using a straight cable attachment."
+  },
+  "124": {
+    "name": "Overhead Rope Triceps Extension",
+    "description": "Extend the elbows overhead and separate the rope at full extension."
+  },
+  "125": {
+    "name": "Single-Arm Cable Triceps Extension",
+    "description": "Straighten one elbow against cable resistance without moving the upper arm."
+  },
+  "126": {
+    "name": "Standing Dumbbell Overhead Triceps Extension",
+    "description": "Lower a dumbbell behind the head and extend the elbows overhead."
+  },
+  "127": {
+    "name": "Triceps Pushdown",
+    "description": "Push the cable attachment down until the elbows are straight."
+  },
+  "128": {
+    "name": "EZ-Bar Skull Crusher",
+    "description": "Lower the EZ-bar toward the forehead by bending only the elbows."
+  },
+  "129": {
+    "name": "Lying Dumbbell Triceps Extension",
+    "description": "Lower the dumbbells beside the head and extend the elbows."
+  },
+  "130": {
+    "name": "Chest Dip",
+    "description": "Lean slightly forward, lower between the bars, and press back up."
+  },
+  "131": {
+    "name": "Seated Palms-Up Dumbbell Wrist Curl",
+    "description": "Curl the wrists upward with the forearms supported and palms facing up."
+  },
+  "132": {
+    "name": "Seated Palms-Down Dumbbell Wrist Curl",
+    "description": "Raise the backs of the hands with the forearms supported and palms down."
+  },
+  "133": {
+    "name": "Ab Crunch Machine",
+    "description": "Curl the rib cage toward the pelvis against the machine resistance."
+  },
+  "134": {
+    "name": "Decline Crunch",
+    "description": "Curl the upper back off a declined bench without pulling on the neck."
+  },
+  "135": {
+    "name": "Seated Cable Row",
+    "description": "Pull the handle toward the torso while keeping the spine stable."
+  },
+  "136": {
+    "name": "Bent-Over Barbell Row",
+    "description": "Hinge at the hips and row the bar toward the lower ribs."
+  },
+  "137": {
+    "name": "Machine Glute Bridge",
+    "description": "Drive the hips up against the machine pad and squeeze the glutes."
+  },
+  "138": {
+    "name": "Hip Abductor Machine",
+    "description": "Press the knees outward against the pads without rocking the torso."
+  },
+  "139": {
+    "name": "Leg Extension",
+    "description": "Extend the knees against the machine pad and lower under control."
+  },
+  "140": {
+    "name": "Hack Squat",
+    "description": "Lower on the hack squat platform and drive through the feet to stand."
+  },
+  "141": {
+    "name": "Smith Machine Squat",
+    "description": "Squat under the guided bar while keeping the feet firmly planted."
+  },
+  "142": {
+    "name": "Hip Adductor Machine",
+    "description": "Bring the knees together against the pads without bouncing."
+  },
+  "143": {
+    "name": "Glute-Ham Raise",
+    "description": "Lower the torso from the knees and pull back up with the hamstrings."
+  },
+  "144": {
+    "name": "Lying Leg Curl",
+    "description": "Curl the machine pad toward the glutes while keeping the hips down."
+  },
+  "145": {
+    "name": "Seated Calf Raise",
+    "description": "Raise the heels against the thigh pad and lower through a full range."
+  },
+  "146": {
+    "name": "Cable Wrist Curl",
+    "description": "Curl the wrists against cable resistance while keeping the forearms still."
+  },
+  "147": {
+    "name": "Palms-Down Wrist Curl Over a Bench",
+    "description": "Raise the backs of the hands while the forearms rest across a bench."
+  },
+  "148": {
+    "name": "Palms-Up Barbell Wrist Curl Over a Bench",
+    "description": "Curl the bar with the wrists while the forearms rest across a bench."
+  },
+  "149": {
+    "name": "Oblique Crunch",
+    "description": "Curl the torso diagonally to bring the ribs toward the opposite hip."
+  },
+  "150": {
+    "name": "Hanging Leg Raise",
+    "description": "Raise the legs from a controlled hang without swinging."
+  },
+  "151": {
+    "name": "Lying Bench Leg Raise",
+    "description": "Raise the legs from a flat bench while keeping the lower back controlled."
+  },
+  "152": {
+    "name": "Crunch",
+    "description": "Curl the rib cage toward the pelvis while keeping the lower back grounded."
+  },
+  "153": {
+    "name": "Decline Sit-Up",
+    "description": "Raise the torso from a declined bench with the abdomen braced."
+  },
+  "154": {
+    "name": "Cable Crunch",
+    "description": "Kneel and curl the torso down against cable resistance."
+  },
+  "155": {
+    "name": "Chest-Supported T-Bar Row",
+    "description": "Row the T-bar toward the chest while keeping the torso supported."
+  },
+  "156": {
+    "name": "One-Arm Dumbbell Row",
+    "description": "Brace the body and row one dumbbell toward the hip."
+  },
+  "157": {
+    "name": "Bent-Over Two-Dumbbell Row",
+    "description": "Hinge at the hips and row both dumbbells toward the ribs."
+  },
+  "158": {
+    "name": "Single-Leg Cable Kickback",
+    "description": "Drive one leg back against cable resistance without arching the lower back."
+  },
+  "159": {
+    "name": "Machine Glute Kickback",
+    "description": "Press one leg back against the machine pad and squeeze the glute."
+  },
+  "160": {
+    "name": "Barbell Hip Thrust",
+    "description": "Drive the hips up with the upper back supported and the bar across the hips."
+  },
+  "161": {
+    "name": "Smith Machine Hip Thrust",
+    "description": "Drive the guided bar upward with the upper back supported."
+  },
+  "162": {
+    "name": "Leg Press",
+    "description": "Lower the platform under control and press through the whole foot."
+  },
+  "163": {
+    "name": "Barbell Squat",
+    "description": "Squat with the bar securely positioned and drive up through the feet."
+  },
+  "164": {
+    "name": "Dumbbell Lunge",
+    "description": "Step into a lunge with dumbbells at the sides and push back to standing."
+  },
+  "165": {
+    "name": "Smith Machine Lunge",
+    "description": "Lunge under the guided bar while keeping the front foot firmly planted."
+  },
+  "166": {
+    "name": "Smith Machine Single-Leg Split Squat",
+    "description": "Perform a split squat under the guided bar with emphasis on the front leg."
+  },
+  "167": {
+    "name": "Seated Leg Curl",
+    "description": "Curl the machine pad down and back while keeping the hips seated."
+  },
+  "168": {
+    "name": "Romanian Deadlift",
+    "description": "Hinge at the hips with a soft knee bend and keep the weight close."
+  },
+  "169": {
+    "name": "Conventional Deadlift",
+    "description": "Lift the bar from the floor with a braced trunk and balanced foot pressure."
+  },
+  "170": {
+    "name": "Stiff-Leg Dumbbell Deadlift",
+    "description": "Hinge forward with nearly straight legs while keeping the dumbbells close."
+  },
+  "171": {
+    "name": "Sumo Deadlift",
+    "description": "Lift from a wide stance with the knees tracking over the toes."
+  },
+  "172": {
+    "name": "Calf Press on Leg Press",
+    "description": "Press the platform through the balls of the feet using ankle movement only."
+  },
+  "173": {
+    "name": "Standing Calf Raise",
+    "description": "Rise onto the balls of the feet and lower the heels under control."
+  }
+}

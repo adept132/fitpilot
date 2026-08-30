@@ -34,6 +34,7 @@ from api.services.models import Exercise, WorkoutSessionSet, WorkoutSessionExerc
 from api.services.volume import repository as volume_repo
 from api.services.volume.landmarks import landmarks_for, reachable_mrv
 from api.services.volume.service import targets_from_budget
+from api.services.exercise_localization import localized_names
 
 router = APIRouter()
 
@@ -55,6 +56,8 @@ async def get_progress_achievements(
             WorkoutSession.finished_at,
             WorkoutSessionExercise.exercise_id,
             Exercise.name,
+            Exercise.name_en,
+            Exercise.source,
             WorkoutSessionSet.weight,
             WorkoutSessionSet.reps,
         )
@@ -78,13 +81,35 @@ async def get_progress_achievements(
     )
 
     performances: dict[tuple[int, int], dict] = {}
-    for workout_id, finished_at, exercise_id, exercise_name, raw_weight, raw_reps in result.all():
+    for row in result.all():
+        if len(row) == 6:
+            # Keep compatibility with lightweight query fakes and rows
+            # captured before the additive localization columns existed.
+            workout_id, finished_at, exercise_id, exercise_name, raw_weight, raw_reps = row
+            exercise_name_en = None
+            exercise_source = None
+        else:
+            (
+                workout_id,
+                finished_at,
+                exercise_id,
+                exercise_name,
+                exercise_name_en,
+                exercise_source,
+                raw_weight,
+                raw_reps,
+            ) = row
         key = (workout_id, exercise_id)
         item = performances.setdefault(key, {
             "workout_id": workout_id,
             "achieved_at": finished_at,
             "exercise_id": exercise_id,
             "exercise_name": exercise_name,
+            "localized_names": localized_names({
+                "name": exercise_name,
+                "name_en": exercise_name_en,
+                "source": exercise_source,
+            }),
             "e1rm": 0.0,
             "weight": 0.0,
             "reps": 0,
@@ -111,6 +136,7 @@ async def get_progress_achievements(
                 id=f'{item["workout_id"]}:{item["exercise_id"]}:e1rm',
                 exercise_id=item["exercise_id"],
                 exercise_name=item["exercise_name"],
+                localized_names=item["localized_names"],
                 e1rm=round(item["e1rm"], 1),
                 previous_e1rm=round(previous, 1) if previous is not None else None,
                 weight=round(item["weight"], 2),

@@ -79,7 +79,13 @@ async def export_csv(
     """
     resolved_unit = await _resolve_export_unit(db, current_app_user.id, unit)
     tz_name = await _user_timezone(db, current_app_user.id)
-    rows = await collect_export_rows(db, current_app_user.id, resolved_unit, tz_name)
+    rows = await collect_export_rows(
+        db,
+        current_app_user.id,
+        resolved_unit,
+        tz_name,
+        language=getattr(current_app_user, "_request_language", "ru"),
+    )
 
     filename = f"eurith-export-{date.today().isoformat()}.csv"
     return StreamingResponse(

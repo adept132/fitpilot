@@ -49,6 +49,7 @@ class GoalResponse(BaseModel):
     unit: Optional[str] = None
     exercise_id: Optional[int] = None
     exercise_name: Optional[str] = None
+    localized_names: dict[str, str] = Field(default_factory=dict)
     target_reps: Optional[int] = None
     metric_key: Optional[str] = None
     deadline: Optional[str] = None

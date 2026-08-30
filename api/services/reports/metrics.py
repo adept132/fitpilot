@@ -13,11 +13,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.services.models import (
+    Exercise,
     UserRecord,
     WorkoutSession,
     WorkoutSessionExercise,
     WorkoutSessionSet,
 )
+from api.services.exercise_localization import localized_names
 from api.services.progression.metrics import effort_to_rir
 from api.services.volume import repository as volume_repo
 from api.services.volume.landmarks import landmarks_for
@@ -124,6 +126,7 @@ class RecordItem:
     record_type: str
     value: float
     achieved_on: date
+    localized_names: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -366,6 +369,11 @@ async def collect_records(
         )
         .order_by(UserRecord.date_achieved, UserRecord.id)
     )).scalars().all()
+    exercise_ids = {row.exercise_id for row in rows if row.exercise_id is not None}
+    exercises = (
+        await session.execute(select(Exercise).where(Exercise.id.in_(exercise_ids)))
+    ).scalars().all() if exercise_ids else []
+    exercises_by_id = {exercise.id: exercise for exercise in exercises}
     return [
         RecordItem(
             exercise_id=row.exercise_id,
@@ -373,6 +381,11 @@ async def collect_records(
             record_type=row.record_type,
             value=float(row.value),
             achieved_on=row.date_achieved,
+            localized_names=(
+                localized_names(exercises_by_id[row.exercise_id])
+                if row.exercise_id in exercises_by_id
+                else {"ru": row.exercise_name}
+            ),
         )
         for row in rows
     ]

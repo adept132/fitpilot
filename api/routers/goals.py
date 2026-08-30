@@ -16,6 +16,7 @@ from api.services.goal_service import (
     compute_goal_status,
 )
 from api.services.models import AppUser, AppUserProfile, Exercise, UserGoal
+from api.services.exercise_localization import localized_names
 
 router = APIRouter(prefix="/goals", tags=["goals"])
 
@@ -35,14 +36,15 @@ async def _status_for(db: AsyncSession, goal: UserGoal, profile) -> GoalStatus:
     return GoalStatus(**data)
 
 
-def _to_response(goal: UserGoal, exercise_name: Optional[str], status_obj: GoalStatus) -> GoalResponse:
+def _to_response(goal: UserGoal, exercise: Optional[Exercise], status_obj: GoalStatus) -> GoalResponse:
     return GoalResponse(
         id=goal.id,
         goal_type=goal.goal_type,
         target_value=float(goal.target_value),
         unit=goal.unit,
         exercise_id=goal.exercise_id,
-        exercise_name=exercise_name,
+        exercise_name=exercise.name if exercise else None,
+        localized_names=localized_names(exercise) if exercise else {},
         target_reps=goal.target_reps,
         metric_key=goal.metric_key,
         deadline=goal.deadline.isoformat() if goal.deadline else None,
@@ -104,8 +106,8 @@ async def create_goal(
     await db.refresh(goal)
 
     profile = await _profile(db, current_user.id)
-    exercise_name = await _exercise_name(db, goal.exercise_id)
-    return _to_response(goal, exercise_name, await _status_for(db, goal, profile))
+    exercise = await _exercise(db, goal.exercise_id)
+    return _to_response(goal, exercise, await _status_for(db, goal, profile))
 
 
 @router.get("", response_model=List[GoalResponse])
@@ -128,8 +130,7 @@ async def list_goals(
 
     out: List[GoalResponse] = []
     for goal in goals:
-        name = goal.exercise.name if goal.exercise else None
-        out.append(_to_response(goal, name, await _status_for(db, goal, profile)))
+        out.append(_to_response(goal, goal.exercise, await _status_for(db, goal, profile)))
     return out
 
 
@@ -194,8 +195,8 @@ async def update_goal(
     await db.refresh(goal)
 
     profile = await _profile(db, current_user.id)
-    name = await _exercise_name(db, goal.exercise_id)
-    return _to_response(goal, name, await _status_for(db, goal, profile))
+    exercise = await _exercise(db, goal.exercise_id)
+    return _to_response(goal, exercise, await _status_for(db, goal, profile))
 
 
 @router.delete("/{goal_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -236,9 +237,9 @@ async def _owned_goal(db: AsyncSession, goal_id: int, app_user_id: int) -> UserG
     return goal
 
 
-async def _exercise_name(db: AsyncSession, exercise_id: Optional[int]) -> Optional[str]:
+async def _exercise(db: AsyncSession, exercise_id: Optional[int]) -> Optional[Exercise]:
     if exercise_id is None:
         return None
     return (await db.execute(
-        select(Exercise.name).where(Exercise.id == exercise_id)
+        select(Exercise).where(Exercise.id == exercise_id)
     )).scalar_one_or_none()

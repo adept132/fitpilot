@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class SupersetWorkoutSetItem(BaseModel):
@@ -21,6 +21,7 @@ class WorkoutStructureExerciseItem(BaseModel):
     order_index: int
     exercise_id: int
     exercise_name: str
+    localized_names: dict[str, str] = Field(default_factory=dict)
     sets_count: int
     volume_total: float
     sets: list[SupersetWorkoutSetItem] = []
@@ -31,6 +32,7 @@ class WorkoutStructureSupersetMember(BaseModel):
     order_index: int
     exercise_id: int
     exercise_name: str
+    localized_names: dict[str, str] = Field(default_factory=dict)
     sets_count: int
     volume_total: float
 
@@ -74,6 +76,7 @@ class SupersetFlowExerciseItem(BaseModel):
     order_index: int
     exercise_id: int
     exercise_name: str
+    localized_names: dict[str, str] = Field(default_factory=dict)
     sets: list[SupersetWorkoutSetItem]
     last_performance_sets: list[SupersetWorkoutSetItem] = []
     is_current_round_completed: bool

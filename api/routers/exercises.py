@@ -11,6 +11,7 @@ from api.errors import LocalizedHTTPException
 from api.schemas.workouts import ExerciseShortResponse
 from api.services.app_user_service import get_current_app_user
 from api.services.exercise_search_service import ExerciseSearchService
+from api.services.exercise_localization import localized_descriptions, localized_names
 from api.services.exercise_utils import get_base_exercise_query
 from api.services.fatigue_tiers import calculate_fatigue_tier
 from api.services.heuristics import HeuristicsEngine
@@ -64,7 +65,8 @@ async def list_exercises(
         type=type,
         equipment=equipment,
         recent=recent,
-        source=source # <--- Передали!
+        source=source, # <--- Передали!
+        language=getattr(current_user, "_request_language", "ru"),
     )
 
     response_items = []
@@ -78,6 +80,7 @@ async def list_exercises(
                 ExerciseListItemResponse(
                     id=item.get("id"),
                     name=item.get("name"),
+                    localized_names=localized_names(item),
                     category=item.get("category") or "base",
                     main_muscle_group=item.get("main_muscle_group") or "unknown",
                     secondary_muscle_groups=item.get("secondary_muscle_groups") or [],
@@ -99,6 +102,7 @@ async def list_exercises(
                 ExerciseListItemResponse(
                     id=item.id,
                     name=item.name,
+                    localized_names=localized_names(item),
                     category=item.category,
                     main_muscle_group=item.main_muscle_group,
                     secondary_muscle_groups=item.secondary_muscle_groups or [],
@@ -154,12 +158,14 @@ async def get_exercise_detail(
     return ExerciseDetailResponse(
         id=exercise.id,
         name=exercise.name,
+        localized_names=localized_names(exercise),
         category=exercise.category,
         main_muscle_group=exercise.main_muscle_group,
         secondary_muscle_groups=exercise.secondary_muscle_groups or [],
         equipment_needed=exercise.equipment_needed or [],
         difficulty=exercise.difficulty,
         description=exercise.description,
+        localized_descriptions=localized_descriptions(exercise),
         source=exercise.source,
         video_url=exercise.video_url,
         image_urls=image_urls,
@@ -182,8 +188,20 @@ async def list_exercise_preferences(
     if preference:
         stmt = stmt.where(UserExercisePreference.preference == preference)
     rows = (await session.execute(stmt.order_by(UserExercisePreference.exercise_name))).scalars().all()
-    return [ExercisePreferenceResponse(exercise_id=row.exercise_id, exercise_name=row.exercise_name,
-                                       preference=row.preference) for row in rows]
+    exercise_ids = [row.exercise_id for row in rows]
+    exercises = (
+        await session.execute(select(Exercise).where(Exercise.id.in_(exercise_ids)))
+    ).scalars().all() if exercise_ids else []
+    by_id = {exercise.id: exercise for exercise in exercises}
+    return [ExercisePreferenceResponse(
+        exercise_id=row.exercise_id,
+        exercise_name=row.exercise_name,
+        localized_names=(
+            localized_names(by_id[row.exercise_id])
+            if row.exercise_id in by_id else {"ru": row.exercise_name}
+        ),
+        preference=row.preference,
+    ) for row in rows]
 
 
 @router.put("/exercises/{exercise_id}/preference", response_model=ExercisePreferenceResponse)
@@ -210,8 +228,12 @@ async def set_exercise_preference(
         row.preference = payload.preference
         row.exercise_name = exercise.name
     await session.commit()
-    return ExercisePreferenceResponse(exercise_id=exercise.id, exercise_name=exercise.name,
-                                      preference=payload.preference)
+    return ExercisePreferenceResponse(
+        exercise_id=exercise.id,
+        exercise_name=exercise.name,
+        localized_names=localized_names(exercise),
+        preference=payload.preference,
+    )
 
 
 @router.delete("/exercises/{exercise_id}/preference", status_code=status.HTTP_204_NO_CONTENT)
@@ -372,6 +394,7 @@ async def get_exercise_history_workout_detail(
         source=workout.source,
         exercise_id=session_exercise.exercise.id,
         exercise_name=session_exercise.exercise.name,
+        localized_names=localized_names(session_exercise.exercise),
         sets_count=len(completed_sets),
         total_reps=total_reps,
         total_volume=total_volume,
@@ -460,6 +483,7 @@ async def get_exercise_last_performance(
         source=workout.source,
         exercise_id=session_exercise.exercise.id,
         exercise_name=session_exercise.exercise.name,
+        localized_names=localized_names(session_exercise.exercise),
         sets=[
             ExerciseHistoryWorkoutSetResponse(
                 id=s.id,
@@ -495,6 +519,7 @@ async def search_exercises(
         type=type,
         equipment=equipment,
         recent=recent,
+        language=getattr(user, "_request_language", "ru"),
     )
 
     # Сервис отдаёт либо ORM-объекты (без q), либо dict (ветка ExerciseMatcher).
@@ -508,6 +533,7 @@ async def search_exercises(
             items.append(ExerciseSearchItem(
                 id=it.get("id"),
                 name=it.get("name"),
+                localized_names=localized_names(it),
                 main_muscle_group=it.get("main_muscle_group") or "unknown",
                 secondary_muscle_groups=it.get("secondary_muscle_groups") or [],
                 category=it.get("category") or "base",
@@ -525,6 +551,7 @@ async def search_exercises(
             items.append(ExerciseSearchItem(
                 id=it.id,
                 name=it.name,
+                localized_names=localized_names(it),
                 main_muscle_group=it.main_muscle_group,
                 secondary_muscle_groups=it.secondary_muscle_groups or [],
                 category=it.category,
@@ -647,6 +674,7 @@ async def get_exercise_alternatives(
         alt_data = ExerciseAlternativeResponse(
             id=ex_obj.id,
             name=ex_obj.name,
+            localized_names=localized_names(ex_obj),
             main_muscle_group=ex_obj.main_muscle_group,
             equipment_needed=ex_obj.equipment_needed,
             fatigue_tier=ex_obj.fatigue_tier,
@@ -911,4 +939,16 @@ async def create_custom_exercise(
     await db.commit()
     await db.refresh(new_exercise)
 
-    return new_exercise
+    return ExerciseSearchItem(
+        id=new_exercise.id,
+        name=new_exercise.name,
+        localized_names=localized_names(new_exercise),
+        main_muscle_group=new_exercise.main_muscle_group,
+        secondary_muscle_groups=new_exercise.secondary_muscle_groups or [],
+        category=new_exercise.category,
+        fatigue_tier=new_exercise.fatigue_tier,
+        equipment_needed=new_exercise.equipment_needed or [],
+        source=new_exercise.source,
+        image_url=None,
+        image_approx=bool(new_exercise.image_approx),
+    )
