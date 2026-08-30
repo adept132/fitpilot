@@ -885,6 +885,26 @@ def _coverage_after_commands(base_coverage: dict, exercises: list[dict]) -> dict
     return coverage
 
 
+def _canonicalize_command_exercises(exercises: list[dict], pool) -> list[dict]:
+    """Replace executor presentation fields from the authorized exercise pool."""
+    pool_by_id = {exercise.id: exercise for exercise in pool}
+    if any(exercise.get("exercise_id") not in pool_by_id for exercise in exercises):
+        raise LocalizedHTTPException(400, "plan.exercise_unavailable")
+    return [
+        {
+            **exercise,
+            "name": pool_by_id[exercise["exercise_id"]].name,
+            "localized_names": localized_names(
+                pool_by_id[exercise["exercise_id"]]
+            ),
+            "localized_descriptions": localized_descriptions(
+                pool_by_id[exercise["exercise_id"]]
+            ),
+        }
+        for exercise in exercises
+    ]
+
+
 def _apply_saved_generator_rules(
     day: GeneratedDayOut, profile, blueprint_id, pool, allowed, prehab,
     generation_config=None, accent_muscles=(), favorite_ids=None, day_effort=None,
@@ -904,16 +924,7 @@ def _apply_saved_generator_rules(
     estimated_seconds = day.estimated_duration_seconds
     duration_limit_met = day.duration_limit_met
     pool_by_id = {exercise.id: exercise for exercise in pool}
-    exercises = [
-        {
-            **exercise,
-            "name": pool_by_id[exercise["exercise_id"]].name,
-            "localized_names": localized_names(pool_by_id[exercise["exercise_id"]]),
-        }
-        if exercise["exercise_id"] in pool_by_id
-        else exercise
-        for exercise in exercises
-    ]
+    exercises = _canonicalize_command_exercises(exercises, pool)
     if generation_config is not None:
         selected = [SelectedExercise(
             exercise_id=exercise["exercise_id"], name=exercise["name"],
@@ -1034,6 +1045,7 @@ async def apply_commands(request: ApplyCommandsRequest, db: AsyncSession = Depen
     allowed = _allowed_equipment(settings.get("locations")) if profile else None
     ctx = {"allowed_equipment": allowed, "prehab_flags": settings.get("prehab_flags", [])}
     final_ex, _summaries, warns = apply_commands_exec(draft_ex, log, pool, ctx, exp)
+    final_ex = _canonicalize_command_exercises(final_ex, pool)
 
     # Fix 3: recompute coverage["filled"] from the post-command exercise list
     # instead of echoing request.base_draft.coverage unchanged — otherwise the

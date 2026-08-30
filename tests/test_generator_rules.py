@@ -20,6 +20,17 @@ def _day():
     )
 
 
+def _pool():
+    return [SimpleNamespace(
+        id=1,
+        name="Bench press",
+        name_en=None,
+        description=None,
+        description_en=None,
+        source="default",
+    )]
+
+
 def test_rule_scope_matching_normalizes_repeated_day_suffix():
     day_rule = {"enabled": True, "scope": "day", "blueprint_id": "bp-1", "day_tag": "upper"}
     split_rule = {"enabled": True, "scope": "split", "blueprint_id": "bp-1"}
@@ -46,7 +57,7 @@ def test_saved_rule_replays_same_command_and_recomputes_coverage():
             },
         }],
     })
-    result = _apply_saved_generator_rules(_day(), profile, "bp-1", [], None, [])
+    result = _apply_saved_generator_rules(_day(), profile, "bp-1", _pool(), None, [])
     assert result.exercises[0].target_sets == 4
     assert result.coverage["chest"]["filled"] == 4
     assert any("Постоянное правило" in warning for warning in result.warnings)

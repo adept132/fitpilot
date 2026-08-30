@@ -10,9 +10,22 @@ def _profile():
                            settings={"locations": ["gym"], "prehab_flags": []})
 
 
+def _pool_for(base):
+    return [
+        SimpleNamespace(
+            id=exercise["exercise_id"],
+            name=exercise["name"],
+            name_en=None,
+            description=None,
+            description_en=None,
+            source="default",
+        )
+        for exercise in base["exercises"]
+    ]
+
+
 def test_apply_exclude_via_comment():
     profile = _profile()
-    pool = []
     base = {"day_tag": "push", "day_name": "Push", "coverage": {}, "warnings": [],
             "exercises": [
                 {"exercise_id": 1, "name": "Выпады", "target_sets": 3, "order_index": 0,
@@ -22,6 +35,7 @@ def test_apply_exclude_via_comment():
                  "superset_group_id": None, "fatigue_tier": 1,
                  "primary_muscle": "Грудь", "secondary_muscle": None},
             ]}
+    pool = _pool_for(base)
     req = ApplyCommandsRequest(base_draft=base, command_log=[], new_comment="убери выпады", context={})
     with patch.object(plans_mod, "_load_commands_context",
                       AsyncMock(return_value=(profile, pool))):
@@ -58,7 +72,6 @@ def test_apply_recomputes_coverage_after_exclude():
     # unchanged — it must recompute "filled" from the post-command exercise
     # list so the mobile "цели X/Y" indicator isn't stale after an edit.
     profile = _profile()
-    pool = []
     base = {"day_tag": "push", "day_name": "Push",
             "coverage": {"quads": {"target": 3, "filled": 3}, "chest": {"target": 3, "filled": 3}},
             "warnings": [],
@@ -70,6 +83,7 @@ def test_apply_recomputes_coverage_after_exclude():
                  "superset_group_id": None, "fatigue_tier": 1,
                  "primary_muscle": "Грудь", "secondary_muscle": None},
             ]}
+    pool = _pool_for(base)
     req = ApplyCommandsRequest(base_draft=base, command_log=[], new_comment="убери выпады", context={})
     with patch.object(plans_mod, "_load_commands_context",
                       AsyncMock(return_value=(profile, pool))):
@@ -85,7 +99,6 @@ def test_apply_recomputes_coverage_after_exclude():
 
 def test_apply_clarify_on_ambiguous_replace():
     profile = _profile()
-    pool = []
     base = {"day_tag": "push", "day_name": "Push", "coverage": {}, "warnings": [],
             "exercises": [
                 {"exercise_id": 1, "name": "Жим штанги", "target_sets": 3, "order_index": 0,
@@ -95,6 +108,7 @@ def test_apply_clarify_on_ambiguous_replace():
                  "superset_group_id": None, "fatigue_tier": 1,
                  "primary_muscle": "Грудь", "secondary_muscle": None},
             ]}
+    pool = _pool_for(base)
     req = ApplyCommandsRequest(base_draft=base, command_log=[],
                                new_comment="замени жим на изоляцию", context={})
     with patch.object(plans_mod, "_load_commands_context",

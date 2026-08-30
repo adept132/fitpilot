@@ -16,7 +16,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.i18n import SupportedLanguage, resolve_language, tr
-from api.services.exercise_localization import localized_names
+from api.services.exercise_localization import localized_descriptions, localized_names
 from api.services.models import (
     AppUserProfile,
     Exercise,
@@ -31,15 +31,15 @@ from api.services.reports.rules import RULES_VERSION, Action, RuleContext, build
 REPORT_SHAPE_VERSION = 2
 
 
-def _missing_record_localization(record: object) -> bool:
+def _missing_record_localization(record: object, field: str) -> bool:
     if not isinstance(record, dict):
         return False
-    names = record.get("localized_names")
+    localized = record.get(field)
     return not (
-        isinstance(names, dict)
+        isinstance(localized, dict)
         and any(
             key in {"ru", "en"} and isinstance(value, str) and value
-            for key, value in names.items()
+            for key, value in localized.items()
         )
     )
 
@@ -52,6 +52,14 @@ def _record_exercise_id(record: dict) -> int | None:
         return raw
     if isinstance(raw, str) and raw.isdecimal() and int(raw) > 0:
         return int(raw)
+    return None
+
+
+def _durable_record_text(record: dict, *fields: str) -> str | None:
+    for field in fields:
+        value = record.get(field)
+        if isinstance(value, str) and value.strip():
+            return value
     return None
 
 
@@ -71,27 +79,44 @@ async def enrich_report_record_localizations(
     missing = [
         record
         for record in records
-        if _missing_record_localization(record)
-        and _record_exercise_id(record) is not None
+        if isinstance(record, dict)
+        and (
+            _missing_record_localization(record, "localized_names")
+            or _missing_record_localization(record, "localized_descriptions")
+        )
     ]
-    exercise_ids = {_record_exercise_id(record) for record in missing}
-    if not exercise_ids:
-        return enriched
-
+    exercise_ids = {
+        exercise_id
+        for record in missing
+        if (exercise_id := _record_exercise_id(record)) is not None
+    }
     exercises = list((await session.execute(
         select(Exercise).where(Exercise.id.in_(exercise_ids))
-    )).scalars().all())
+    )).scalars().all()) if exercise_ids else []
     exercises_by_id = {exercise.id: exercise for exercise in exercises}
     for record in missing:
         exercise_id = _record_exercise_id(record)
         exercise = exercises_by_id.get(exercise_id)
-        names = localized_names(exercise) if exercise is not None else {}
-        if not names:
-            legacy_name = record.get("exercise_name")
-            if isinstance(legacy_name, str) and legacy_name:
-                names = {"ru": legacy_name}
-        if names:
-            record["localized_names"] = names
+        if _missing_record_localization(record, "localized_names"):
+            names = localized_names(exercise) if exercise is not None else {}
+            if not names:
+                legacy_name = _durable_record_text(record, "exercise_name", "name")
+                if legacy_name:
+                    names = {"ru": legacy_name}
+            if names:
+                record["localized_names"] = names
+        if _missing_record_localization(record, "localized_descriptions"):
+            descriptions = (
+                localized_descriptions(exercise) if exercise is not None else {}
+            )
+            if not descriptions:
+                legacy_description = _durable_record_text(
+                    record, "exercise_description", "description"
+                )
+                if legacy_description:
+                    descriptions = {"ru": legacy_description}
+            if descriptions:
+                record["localized_descriptions"] = descriptions
     return enriched
 
 def build_payload(metrics: ReportMetrics, actions: list[Action]) -> dict:
