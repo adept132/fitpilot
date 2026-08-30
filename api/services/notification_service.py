@@ -22,6 +22,52 @@ from api.services.models import (
 )
 
 
+# Goal deadlines are materialized at most three days ahead today. A ten-year
+# ceiling still accepts imported/future-compatible rows while preventing
+# unbounded persisted numbers from becoming user-visible copy.
+MAX_GOAL_DEADLINE_DAYS = 3650
+
+_PARAMETERLESS_NOTIFICATION_KEYS = frozenset(
+    {
+        "notification.periodization_proposal",
+        "notification.training_day_without_plan",
+        "notification.measurements_due",
+        "notification.sync_conflict",
+        "notification.period_report.week",
+        "notification.period_report.month",
+        "notification.period_report.year",
+    }
+)
+
+
+def normalize_notification_params(
+    message_key: str, raw_params: object
+) -> dict[str, Any] | None:
+    """Return only parameters explicitly safe for the semantic message key."""
+
+    params = {} if raw_params is None else raw_params
+    if not isinstance(params, dict):
+        return None
+
+    if message_key == "notification.goal_deadline":
+        if set(params) != {"days"}:
+            return None
+        days = params["days"]
+        if type(days) is not int or not 0 <= days <= MAX_GOAL_DEADLINE_DAYS:
+            return None
+        return {"days": days}
+
+    if message_key == "notification.goal_deadline_today":
+        if set(params) != {"days"} or type(params["days"]) is not int:
+            return None
+        return {"days": 0} if params["days"] == 0 else None
+
+    if message_key in _PARAMETERLESS_NOTIFICATION_KEYS:
+        return {} if not params else None
+
+    return None
+
+
 async def create_notification(
     db: AsyncSession,
     *,
@@ -107,8 +153,10 @@ def render_notification(
     if title_key not in TRANSLATIONS["ru"] or body_key not in TRANSLATIONS["ru"]:
         return row.title, row.body
 
-    params = getattr(row, "message_params", None) or {}
-    if not isinstance(params, dict):
+    params = normalize_notification_params(
+        message_key, getattr(row, "message_params", None)
+    )
+    if params is None:
         return row.title, row.body
     try:
         return tr(language, title_key, **params), tr(language, body_key, **params)

@@ -16,7 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.i18n import normalize_language, tr
 from api.services.models import AppNotification, AppUser, AppUserProfile, PushDelivery, PushDevice
-from api.services.notification_service import materialize_domain_notifications
+from api.services.notification_service import (
+    materialize_domain_notifications,
+    normalize_notification_params,
+)
 from app.database import SessionLocal
 
 EXPO_SEND_URL = "https://exp.host/--/api/v2/push/send"
@@ -104,8 +107,10 @@ def safe_push_content(
 
     message_key = getattr(notification, "message_key", None)
     if notification is not None and message_key in SAFE_MESSAGE_KEYS[event_type]:
-        params = getattr(notification, "message_params", None) or {}
-        if isinstance(params, dict):
+        params = normalize_notification_params(
+            message_key, getattr(notification, "message_params", None)
+        )
+        if params is not None:
             try:
                 return (
                     tr(language, f"{message_key}.title", **params),
@@ -231,25 +236,30 @@ async def send_pending(db: AsyncSession, limit: int = 100) -> int:
         .order_by(PushDelivery.id).limit(limit).with_for_update(skip_locked=True)
     )).all()
     sent = 0
+    user_ids = sorted({notification.app_user_id for _, _, notification in rows})
+    profile_rows = []
+    if user_ids:
+        profile_rows = (
+            await db.execute(
+                select(AppUserProfile.app_user_id, AppUserProfile.settings).where(
+                    AppUserProfile.app_user_id.in_(user_ids)
+                )
+            )
+        ).all()
     language_by_user: dict[int, str] = {}
+    for app_user_id, profile_settings in profile_rows:
+        profile_language = normalize_language(
+            profile_settings.get("language")
+            if isinstance(profile_settings, dict)
+            else None
+        )
+        language_by_user[app_user_id] = profile_language or "ru"
     for delivery, device, notification in rows:
         if notification.event_type in (device.disabled_event_types or []):
             delivery.status = "suppressed"
             continue
-        if notification.app_user_id not in language_by_user:
-            profile_settings = (
-                await db.execute(
-                    select(AppUserProfile.settings).where(
-                        AppUserProfile.app_user_id == notification.app_user_id
-                    )
-                )
-            ).scalar_one_or_none()
-            profile_language = normalize_language(
-                (profile_settings or {}).get("language")
-            )
-            language_by_user[notification.app_user_id] = profile_language or "ru"
         content = safe_push_content(
-            notification, language_by_user[notification.app_user_id]
+            notification, language_by_user.get(notification.app_user_id, "ru")
         )
         if not content:
             delivery.status = "suppressed"

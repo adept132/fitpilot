@@ -102,6 +102,28 @@ def test_render_notification_preserves_legacy_copy_for_malformed_params():
     assert render_notification(row, "en") == ("Legacy title", "Legacy body")
 
 
+@pytest.mark.parametrize(
+    "message_params",
+    [
+        {"days": "PRIVATE-COPY"},
+        {"days": True},
+        {"days": False},
+        {"days": -1},
+        {"days": 3651},
+        {"days": None},
+        {"days": []},
+        {"days": {}},
+        {"days": 3, "extra": "PRIVATE-COPY"},
+    ],
+)
+def test_render_notification_rejects_semantically_invalid_goal_params(
+    message_params,
+):
+    row = _notification(message_params=message_params)
+
+    assert render_notification(row, "en") == ("Legacy title", "Legacy body")
+
+
 def test_notification_read_renders_copy_without_exposing_internal_semantics():
     response = _read(_notification(), "en")
 
@@ -179,6 +201,62 @@ def test_safe_push_content_never_falls_back_to_malformed_persisted_copy():
     )
 
 
+@pytest.mark.parametrize(
+    "message_params",
+    [
+        {"days": "PRIVATE-COPY"},
+        {"days": True},
+        {"days": False},
+        {"days": -1},
+        {"days": 3651},
+        {"days": None},
+        {"days": []},
+        {"days": {}},
+        {"days": 3, "extra": "PRIVATE-COPY"},
+    ],
+)
+def test_safe_push_rejects_untrusted_goal_params_without_leaking_marker(
+    message_params,
+):
+    notification = _notification(
+        title="PRIVATE-COPY stored title",
+        body="PRIVATE-COPY stored body",
+        message_params=message_params,
+    )
+
+    content = safe_push_content(notification, "en")
+
+    assert content == (
+        "Goal deadline approaching",
+        "Open Eurith to check your progress.",
+    )
+    assert "PRIVATE-COPY" not in " ".join(content)
+
+
+@pytest.mark.parametrize(
+    "notification",
+    [
+        _notification(
+            message_key="notification.unknown",
+            message_params={},
+            title="PRIVATE-COPY stored title",
+            body="PRIVATE-COPY stored body",
+        ),
+        _notification(
+            event_type="measurements_due",
+            message_key="notification.measurements_due",
+            message_params={"extra": "PRIVATE-COPY"},
+            title="PRIVATE-COPY stored title",
+            body="PRIVATE-COPY stored body",
+        ),
+    ],
+)
+def test_safe_push_uses_generic_copy_for_unknown_or_extra_semantics(notification):
+    content = safe_push_content(notification, "en")
+
+    assert "PRIVATE-COPY" not in " ".join(content)
+
+
 @pytest.mark.asyncio
 async def test_send_pending_renders_safe_copy_from_profile_language(monkeypatch):
     delivery = SimpleNamespace(
@@ -198,7 +276,7 @@ async def test_send_pending_renders_safe_copy_from_profile_language(monkeypatch)
     notification = _notification(app_user_id=73)
     session = _SequenceSession(
         [(delivery, device, notification)],
-        {"language": "en"},
+        [(73, {"language": "en"})],
     )
     payloads = []
     monkeypatch.setattr(
@@ -213,6 +291,79 @@ async def test_send_pending_renders_safe_copy_from_profile_language(monkeypatch)
         "Your goal deadline is in 3 days. Check your progress."
     )
     assert delivery.status == "ticketed"
+
+
+@pytest.mark.asyncio
+async def test_send_pending_bulk_loads_mixed_profile_languages_once(monkeypatch):
+    def delivery():
+        return SimpleNamespace(
+            status="pending",
+            attempts=0,
+            expo_ticket_id=None,
+            sent_at=None,
+            last_error=None,
+            next_attempt_at=None,
+        )
+
+    def device(token):
+        return SimpleNamespace(
+            expo_push_token=token,
+            disabled_event_types=[],
+            notification_channel_id=None,
+            quiet_channel_id=None,
+        )
+
+    rows = [
+        (
+            delivery(),
+            device("ExponentPushToken[user-1-device-a-123456]"),
+            _notification(id=101, app_user_id=1),
+        ),
+        (
+            delivery(),
+            device("ExponentPushToken[user-1-device-b-123456]"),
+            _notification(id=102, app_user_id=1),
+        ),
+        (
+            delivery(),
+            device("ExponentPushToken[user-2-device-a-123456]"),
+            _notification(id=201, app_user_id=2),
+        ),
+        (
+            delivery(),
+            device("ExponentPushToken[user-3-device-a-123456]"),
+            _notification(id=301, app_user_id=3),
+        ),
+        (
+            delivery(),
+            device("ExponentPushToken[user-4-device-a-123456]"),
+            _notification(id=401, app_user_id=4),
+        ),
+    ]
+    session = _SequenceSession(
+        rows,
+        [
+            (1, {"language": "en"}),
+            (2, {"language": "ru"}),
+            (3, {"language": "de"}),
+        ],
+    )
+    payloads = []
+    monkeypatch.setattr(
+        "api.services.push_service._expo_request",
+        lambda _url, payload: payloads.append(payload)
+        or {"data": {"status": "ok", "id": "ticket-bulk"}},
+    )
+
+    assert await send_pending(session) == 5
+    assert len(session.statements) == 2
+    assert [payload["title"] for payload in payloads] == [
+        "Goal deadline approaching",
+        "Goal deadline approaching",
+        "Приближается срок цели",
+        "Приближается срок цели",
+        "Приближается срок цели",
+    ]
 
 
 def test_notification_migration_is_linear_and_reversible(monkeypatch):
