@@ -16,6 +16,24 @@ def test_normalize_language_returns_supported_primary_tag(raw, expected):
     assert normalize_language(raw) == expected
 
 
+@pytest.mark.parametrize(
+    ("accept_language", "expected"),
+    [
+        ("RU;q=1", "ru"),
+        ("de;q=.9, ru;q=.8", "ru"),
+        ("ru;q=.2, en;q=.8", "en"),
+        ("ru;q=.8, en;q=.8", "ru"),
+        ("ru;q=0, en;q=.8", "en"),
+        ("ru;q=not-a-number, en;q=.5", "en"),
+        ("ru;q=not-a-number", "en"),
+    ],
+)
+def test_resolve_language_selects_highest_quality_supported_header_range(
+    accept_language, expected
+):
+    assert resolve_language(accept_language, None) == expected
+
+
 def test_profile_language_overrides_accept_language_header():
     assert resolve_language("en-US", {"language": "ru"}) == "ru"
 

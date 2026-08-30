@@ -7,9 +7,13 @@ from api.services.models import AppUser, AppUserProfile
 
 @pytest_asyncio.fixture
 async def with_profile(db: AsyncSession, test_user: AppUser):
-    profile = AppUserProfile(app_user_id=test_user.id)
+    profile = AppUserProfile(
+        app_user_id=test_user.id,
+        settings={"weight_unit": "kg"},
+    )
     db.add(profile)
     await db.commit()
+    await db.refresh(profile)
     yield profile
 
 
@@ -17,11 +21,6 @@ async def with_profile(db: AsyncSession, test_user: AppUser):
 async def test_language_is_persisted_without_erasing_settings(
     client, auth_headers, with_profile
 ):
-    initial_response = await client.patch(
-        "/profile/settings", headers=auth_headers, json={"weight_unit": "kg"}
-    )
-    assert initial_response.status_code == 200, initial_response.text
-
     response = await client.patch(
         "/profile/settings", headers=auth_headers, json={"language": "en"}
     )
