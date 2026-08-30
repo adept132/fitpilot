@@ -35,13 +35,28 @@ def _missing_record_localization(record: object, field: str) -> bool:
     if not isinstance(record, dict):
         return False
     localized = record.get(field)
-    return not (
-        isinstance(localized, dict)
-        and any(
-            key in {"ru", "en"} and isinstance(value, str) and value
+    ru = localized.get("ru") if isinstance(localized, dict) else None
+    return not (isinstance(ru, str) and bool(ru.strip()))
+
+
+def _merge_record_localization(
+    record: dict, field: str, fallback: dict[str, str]
+) -> None:
+    ru = fallback.get("ru")
+    if not isinstance(ru, str) or not ru.strip():
+        return
+
+    localized = record.get(field)
+    stored = (
+        {
+            key: value
             for key, value in localized.items()
-        )
+            if key != "ru" and isinstance(value, str) and value.strip()
+        }
+        if isinstance(localized, dict)
+        else {}
     )
+    record[field] = {**fallback, **stored, "ru": ru}
 
 
 def _record_exercise_id(record: dict) -> int | None:
@@ -104,7 +119,7 @@ async def enrich_report_record_localizations(
                 if legacy_name:
                     names = {"ru": legacy_name}
             if names:
-                record["localized_names"] = names
+                _merge_record_localization(record, "localized_names", names)
         if _missing_record_localization(record, "localized_descriptions"):
             descriptions = (
                 localized_descriptions(exercise) if exercise is not None else {}
@@ -116,8 +131,11 @@ async def enrich_report_record_localizations(
                 if legacy_description:
                     descriptions = {"ru": legacy_description}
             if descriptions:
-                record["localized_descriptions"] = descriptions
+                _merge_record_localization(
+                    record, "localized_descriptions", descriptions
+                )
     return enriched
+
 
 def build_payload(metrics: ReportMetrics, actions: list[Action]) -> dict:
     """JSON-представление снапшота. Даты — ISO-строки: payload переживает
