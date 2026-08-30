@@ -10,6 +10,10 @@ from api.services.exercise_localization import sort_exercises
 from api.services.models import Exercise, UserExercise
 
 
+MATCH_CANDIDATE_SCAN_LIMIT = 1500
+DEFAULT_MATCH_RESULT_LIMIT = 5
+
+
 class ExerciseMatcher:
     """Умный сопоставитель упражнений на основе существующей базы"""
 
@@ -20,6 +24,7 @@ class ExerciseMatcher:
             exercise_name: str,
             min_similarity: float = 0.4,  # СНИЖЕН по умолчанию для лучшего fuzzy
             language: str = "ru",
+            candidate_limit: int | None = DEFAULT_MATCH_RESULT_LIMIT,
     ) -> Tuple[Dict, List[Dict]]:
         """
         Находит существующие упражнения или возвращает варианты.
@@ -49,16 +54,21 @@ class ExerciseMatcher:
             # УЛУЧШЕННАЯ ЛОГИКА: выбираем лучший, даже если чуть ниже порога
             if all_matches:
                 best_match = all_matches[0]
+                candidates = (
+                    all_matches
+                    if candidate_limit is None
+                    else all_matches[:candidate_limit]
+                )
                 # Если лучший > порога/2, выбираем его (адаптивно понижаем)
                 if best_match['similarity'] >= min_similarity * 0.5:  # Более мягкий threshold
-                    return best_match, all_matches[:5]
+                    return best_match, candidates
                 else:
                     # Если есть варианты выше 0.5, возвращаем топ-1
                     filtered = [m for m in all_matches if m['similarity'] >= 0.5]
                     if filtered:
-                        return filtered[0], all_matches[:5]
+                        return filtered[0], candidates
 
-            return None, all_matches[:5]  # Возвращаем варианты для выбора пользователем
+            return None, candidates  # Возвращаем варианты для выбора пользователем
 
         # 4. Если ничего не нашли, НЕ создаем новое — пусть обрабатывает вызывающий код
         return None, []
@@ -75,7 +85,7 @@ class ExerciseMatcher:
         # Один запрос вместо двух
         stmt = get_base_exercise_query(user_id).where(
             ExerciseMatcher._exact_name_clause(normalized_exercise_name)
-        )
+        ).limit(MATCH_CANDIDATE_SCAN_LIMIT)
         result = await session.execute(stmt)
 
         for exercise in result.scalars().all():
@@ -97,7 +107,7 @@ class ExerciseMatcher:
         matches = []
 
         # Одним запросом забираем и базу, и кастом, без ручного склеивания списков
-        stmt = get_base_exercise_query(user_id).limit(1500)
+        stmt = get_base_exercise_query(user_id).limit(MATCH_CANDIDATE_SCAN_LIMIT)
         result = await session.execute(stmt)
         all_exercises = list(result.scalars().all())
 

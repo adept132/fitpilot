@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,32 +48,82 @@ class BackfillPlan:
     custom_ids_skipped: tuple[int, ...]
 
 
+class _ObjectPairs(list):
+    """JSON object members preserved in source order, including duplicates."""
+
+
+def _object_from_pairs(pairs: _ObjectPairs, context: str) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate {context} key: {key!r}")
+        result[key] = value
+    return result
+
+
+def _validated_text(
+    value: object,
+    *,
+    exercise_id: int,
+    label: str,
+    max_length: int | None,
+) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"translation {exercise_id} has no {label}")
+    normalized = value.strip()
+    if max_length is not None and len(normalized) > max_length:
+        raise ValueError(
+            f"translation {exercise_id} {label} exceeds {max_length} characters"
+        )
+    return normalized
+
+
 def load_translations(path: Path = DEFAULT_TRANSLATIONS) -> dict[int, Translation]:
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict):
+    raw = json.loads(
+        path.read_text(encoding="utf-8"), object_pairs_hook=_ObjectPairs
+    )
+    if not isinstance(raw, _ObjectPairs):
         raise ValueError("translation catalog must be a JSON object")
 
+    name_max_length = Exercise.__table__.c.name_en.type.length
+    description_max_length = Exercise.__table__.c.description_en.type.length
     translations: dict[int, Translation] = {}
-    for raw_id, value in raw.items():
-        if not isinstance(value, dict):
-            raise ValueError(f"translation {raw_id} must be an object")
-        try:
-            exercise_id = int(raw_id)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"invalid exercise id: {raw_id!r}") from exc
+    raw_ids: set[str] = set()
+    for raw_id, raw_value in raw:
+        if raw_id in raw_ids:
+            raise ValueError(f"duplicate exercise id key: {raw_id!r}")
+        raw_ids.add(raw_id)
+        if re.fullmatch(r"[1-9][0-9]*", raw_id) is None:
+            raise ValueError(f"noncanonical exercise id: {raw_id!r}")
+        exercise_id = int(raw_id)
         if exercise_id in translations:
             raise ValueError(f"duplicate exercise id: {exercise_id}")
-        name = value.get("name")
-        description = value.get("description")
-        if not isinstance(name, str) or not name.strip():
-            raise ValueError(f"translation {exercise_id} has no English name")
+        if not isinstance(raw_value, _ObjectPairs):
+            raise ValueError(f"translation {raw_id} must be an object")
+        value = _object_from_pairs(raw_value, f"translation {exercise_id} field")
+        unexpected = set(value) - {"name", "description"}
+        if unexpected:
+            raise ValueError(
+                f"translation {exercise_id} has unexpected fields: "
+                + ", ".join(sorted(unexpected))
+            )
+        name = _validated_text(
+            value.get("name"),
+            exercise_id=exercise_id,
+            label="English name",
+            max_length=name_max_length,
+        )
         if "_" in name:
             raise ValueError(
                 f"translation {exercise_id} exposes an unreviewed dataset identifier"
             )
-        if not isinstance(description, str) or not description.strip():
-            raise ValueError(f"translation {exercise_id} has no English description")
-        translations[exercise_id] = Translation(name.strip(), description.strip())
+        description = _validated_text(
+            value.get("description"),
+            exercise_id=exercise_id,
+            label="English description",
+            max_length=description_max_length,
+        )
+        translations[exercise_id] = Translation(name, description)
     return translations
 
 

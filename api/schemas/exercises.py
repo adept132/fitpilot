@@ -116,9 +116,10 @@ class EquipmentFilter(str):
     FREE = "free"
     MACHINE = "machine"
 
-class ExerciseSearchItem(LocalizedExerciseNameFields):
+class ExerciseSearchItem(LocalizedExerciseDescriptionFields):
     id: int
     name: str
+    description: str | None = None
     main_muscle_group: str
     secondary_muscle_groups: Optional[List[str]] = []
     category: str

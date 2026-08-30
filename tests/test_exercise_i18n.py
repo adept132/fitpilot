@@ -9,7 +9,13 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.dialects import postgresql
 
-from api.schemas.exercises import ExerciseDetailResponse, ExerciseListItemResponse
+from api.routers.exercises import create_custom_exercise
+from api.schemas.exercises import (
+    CustomExerciseCreate,
+    ExerciseDetailResponse,
+    ExerciseListItemResponse,
+    ExerciseSearchItem,
+)
 from api.schemas.goals import GoalResponse, GoalStatus
 from api.schemas.plan import GeneratedExerciseOut
 from api.schemas.progress import ProgressAchievement
@@ -116,6 +122,36 @@ class _BackfillSession(_SequenceSession):
         self.rollback_calls += 1
         for row in self.rows:
             row.name_en, row.description_en = self._before[row.id]
+
+
+class _ScalarResult:
+    def __init__(self, value):
+        self._value = value
+
+    def scalar_one_or_none(self):
+        return self._value
+
+
+class _CustomExerciseSession:
+    def __init__(self):
+        self.execute_calls = 0
+        self.added = None
+
+    async def execute(self, _statement):
+        self.execute_calls += 1
+        if self.execute_calls <= 2:
+            return _ScalarResult(None)
+        return _ScalarResult(self.added)
+
+    def add(self, exercise):
+        self.added = exercise
+
+    async def commit(self):
+        return None
+
+    async def refresh(self, exercise):
+        exercise.id = 901
+        exercise.image_approx = False
 
 
 def test_exercise_model_declares_nullable_english_columns():
@@ -416,8 +452,8 @@ def test_backfill_plan_is_idempotent_and_never_writes_custom_exercises():
     assert plan.custom_ids_skipped == (901,)
 
 
-def test_translation_loader_rejects_duplicate_normalized_ids(tmp_path):
-    """Catches ambiguous JSON keys targeting the same canonical exercise ID."""
+def test_translation_loader_rejects_noncanonical_normalized_ids(tmp_path):
+    """Catches an alternate key spelling targeting a canonical exercise ID."""
     backfill = _backfill_module()
     translations_path = tmp_path / "translations.json"
     translations_path.write_text(
@@ -428,8 +464,94 @@ def test_translation_loader_rejects_duplicate_normalized_ids(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="duplicate exercise id: 76"):
+    with pytest.raises(ValueError, match="noncanonical exercise id: '076'"):
         backfill.load_translations(translations_path)
+
+
+@pytest.mark.asyncio
+async def test_literal_duplicate_catalog_key_fails_before_session_open(
+    tmp_path, monkeypatch
+):
+    """Catches the JSON decoder collapsing an exact duplicate ID key."""
+    backfill = _backfill_module()
+    translations_path = tmp_path / "translations.json"
+    translations_path.write_text(
+        """{
+          "76": {"name": "First", "description": "One."},
+          "76": {"name": "Second", "description": "Two."}
+        }""",
+        encoding="utf-8",
+    )
+    opened = 0
+
+    def session_factory():
+        nonlocal opened
+        opened += 1
+        return _BackfillSession([])
+
+    monkeypatch.setattr(backfill, "SessionLocal", session_factory)
+
+    with pytest.raises(ValueError, match="duplicate exercise id key: '76'"):
+        await backfill._run(True, translations_path)
+
+    assert opened == 0
+
+
+@pytest.mark.parametrize("raw_id", ["076", "0", "-1", "+76", " 76"])
+@pytest.mark.asyncio
+async def test_noncanonical_catalog_id_fails_before_session_open(
+    raw_id, tmp_path, monkeypatch
+):
+    """Catches permissive integer conversion accepting unstable catalog keys."""
+    backfill = _backfill_module()
+    translations_path = tmp_path / "translations.json"
+    translations_path.write_text(
+        json.dumps({
+            raw_id: {"name": "Cable Shrug", "description": "Controlled shrug."}
+        }),
+        encoding="utf-8",
+    )
+    opened = 0
+
+    def session_factory():
+        nonlocal opened
+        opened += 1
+        return _BackfillSession([])
+
+    monkeypatch.setattr(backfill, "SessionLocal", session_factory)
+
+    with pytest.raises(ValueError, match="noncanonical exercise id"):
+        await backfill._run(True, translations_path)
+
+    assert opened == 0
+
+
+@pytest.mark.asyncio
+async def test_overlength_english_name_fails_before_session_open(
+    tmp_path, monkeypatch
+):
+    """Catches values longer than Exercise.name_en reaching ORM mutation."""
+    backfill = _backfill_module()
+    translations_path = tmp_path / "translations.json"
+    translations_path.write_text(
+        json.dumps({
+            "76": {"name": "N" * 201, "description": "Controlled shrug."}
+        }),
+        encoding="utf-8",
+    )
+    opened = 0
+
+    def session_factory():
+        nonlocal opened
+        opened += 1
+        return _BackfillSession([])
+
+    monkeypatch.setattr(backfill, "SessionLocal", session_factory)
+
+    with pytest.raises(ValueError, match="English name exceeds 200 characters"):
+        await backfill._run(True, translations_path)
+
+    assert opened == 0
 
 
 @pytest.mark.asyncio
@@ -567,3 +689,103 @@ async def test_fuzzy_match_equal_scores_use_english_name_then_id():
 
     assert best["id"] == 2
     assert [item["id"] for item in matches] == [2, 3, 1]
+
+
+def _six_ranked_search_candidates(*, leading_source="default"):
+    rows = [
+        _exercise(
+            id=index,
+            name=f"Press {letter}" if leading_source == "custom" else f"Пресс {letter}",
+            name_en=f"Press {letter}",
+            source=leading_source,
+        )
+        for index, letter in enumerate("ABCDE", start=1)
+    ]
+    rows.append(_exercise(
+        id=6,
+        name="Жим со штангой",
+        name_en="Barbell Press",
+        source="default",
+    ))
+    return rows
+
+
+@pytest.mark.parametrize("language", ["ru", "en"])
+@pytest.mark.parametrize("match_branch", ["exact", "fuzzy"])
+@pytest.mark.asyncio
+async def test_query_filters_all_candidates_before_final_limit(
+    language, match_branch
+):
+    """Catches a valid sixth candidate disappearing before source filtering."""
+    candidates = _six_ranked_search_candidates(leading_source="custom")
+    exact_rows = candidates if match_branch == "exact" else []
+    fuzzy_rows = candidates if match_branch == "fuzzy" else []
+    session = _SequenceSession(exact_rows, fuzzy_rows, [])
+
+    result = await ExerciseSearchService.search_exercises(
+        session,
+        user_id=7,
+        q="press",
+        source="default",
+        language=language,
+    )
+
+    assert [item["id"] for item in result] == [6]
+
+
+@pytest.mark.parametrize("language", ["ru", "en"])
+@pytest.mark.parametrize("match_branch", ["exact", "fuzzy"])
+@pytest.mark.asyncio
+async def test_query_preference_ranking_precedes_final_limit(language, match_branch):
+    """Catches a sixth-ranked favorite being pruned behind five disliked rows."""
+    candidates = _six_ranked_search_candidates()
+    exact_rows = candidates if match_branch == "exact" else []
+    fuzzy_rows = candidates if match_branch == "fuzzy" else []
+    preferences = [
+        *((exercise_id, "disliked") for exercise_id in range(1, 6)),
+        (6, "favorite"),
+    ]
+    session = _SequenceSession(exact_rows, fuzzy_rows, preferences)
+
+    result = await ExerciseSearchService.search_exercises(
+        session, user_id=7, q="press", language=language
+    )
+
+    assert len(result) == 5
+    assert result[0]["id"] == 6
+    assert result[0]["preference"] == "favorite"
+
+
+@pytest.mark.asyncio
+async def test_custom_create_retry_preserves_russian_localization_maps():
+    """Catches idempotent replay returning defaults instead of custom text maps."""
+    session = _CustomExerciseSession()
+    user = SimpleNamespace(
+        id=7,
+        experience_level="beginner",
+        _request_language="en",
+    )
+    payload = CustomExerciseCreate(
+        name="Мой жим",
+        main_muscle_group="Грудь",
+        secondary_muscle_groups=[],
+        equipment_needed=[],
+        description="Моя техника",
+        client_uuid="exercise-retry-1",
+    )
+
+    created = await create_custom_exercise(payload, session, user)
+    replayed = await create_custom_exercise(payload, session, user)
+    created_wire = ExerciseSearchItem.model_validate(
+        created, from_attributes=True
+    ).model_dump()
+    replayed_wire = ExerciseSearchItem.model_validate(
+        replayed, from_attributes=True
+    ).model_dump()
+
+    assert created_wire["name"] == replayed_wire["name"] == "Мой жим"
+    assert created_wire["localized_names"] == {"ru": "Мой жим"}
+    assert replayed_wire["localized_names"] == {"ru": "Мой жим"}
+    assert created_wire["description"] == replayed_wire["description"] == "Моя техника"
+    assert created_wire["localized_descriptions"] == {"ru": "Моя техника"}
+    assert replayed_wire["localized_descriptions"] == {"ru": "Моя техника"}

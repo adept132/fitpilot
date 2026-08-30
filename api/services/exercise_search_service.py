@@ -13,6 +13,9 @@ from api.services.exercise_matcher import ExerciseMatcher
 from api.services.exercise_localization import localized_names, sort_exercises
 
 
+EXERCISE_SEARCH_RESULT_LIMIT = 5
+
+
 def normalize_exercise_type(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
@@ -144,6 +147,7 @@ class ExerciseSearchService:
                 user_id=user_id,
                 exercise_name=q,
                 language=language,
+                candidate_limit=None,
             )
 
             filtered = matches
@@ -181,12 +185,13 @@ class ExerciseSearchService:
                 ]
 
             preferences = await ExerciseSearchService.preference_map(session, user_id)
-            return ExerciseSearchService.sort_and_mark_preferences(
+            ordered = ExerciseSearchService.sort_and_mark_preferences(
                 filtered,
                 preferences,
                 language,
                 by_similarity=True,
             )
+            return ordered[:EXERCISE_SEARCH_RESULT_LIMIT]
 
         stmt = (
             get_base_exercise_query(user_id)

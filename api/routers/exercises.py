@@ -33,6 +33,24 @@ from api.schemas.exercises import (
 router = APIRouter(tags=["exercises"])
 
 
+def _custom_exercise_response(exercise: Exercise) -> ExerciseSearchItem:
+    return ExerciseSearchItem(
+        id=exercise.id,
+        name=exercise.name,
+        description=exercise.description,
+        localized_names=localized_names(exercise),
+        localized_descriptions=localized_descriptions(exercise),
+        main_muscle_group=exercise.main_muscle_group,
+        secondary_muscle_groups=exercise.secondary_muscle_groups or [],
+        category=exercise.category,
+        fatigue_tier=exercise.fatigue_tier,
+        equipment_needed=exercise.equipment_needed or [],
+        source=exercise.source,
+        image_url=None,
+        image_approx=bool(exercise.image_approx),
+    )
+
+
 def _thumb_url(request: Request, image_urls, image_approx) -> tuple[Optional[str], bool]:
     """Первое фото техники -> абсолютный URL миниатюры + флаг «примерная».
     Работает и для ORM-объекта, и для dict (ветка поиска через ExerciseMatcher)."""
@@ -534,6 +552,8 @@ async def search_exercises(
                 id=it.get("id"),
                 name=it.get("name"),
                 localized_names=localized_names(it),
+                description=it.get("description"),
+                localized_descriptions=localized_descriptions(it),
                 main_muscle_group=it.get("main_muscle_group") or "unknown",
                 secondary_muscle_groups=it.get("secondary_muscle_groups") or [],
                 category=it.get("category") or "base",
@@ -552,6 +572,8 @@ async def search_exercises(
                 id=it.id,
                 name=it.name,
                 localized_names=localized_names(it),
+                description=it.description,
+                localized_descriptions=localized_descriptions(it),
                 main_muscle_group=it.main_muscle_group,
                 secondary_muscle_groups=it.secondary_muscle_groups or [],
                 category=it.category,
@@ -872,7 +894,7 @@ async def create_custom_exercise(
             )
         )).scalar_one_or_none()
         if existing:
-            return existing
+            return _custom_exercise_response(existing)
 
     # 1. Защита от дубликатов
     duplicate_stmt = select(Exercise).where(
@@ -939,16 +961,4 @@ async def create_custom_exercise(
     await db.commit()
     await db.refresh(new_exercise)
 
-    return ExerciseSearchItem(
-        id=new_exercise.id,
-        name=new_exercise.name,
-        localized_names=localized_names(new_exercise),
-        main_muscle_group=new_exercise.main_muscle_group,
-        secondary_muscle_groups=new_exercise.secondary_muscle_groups or [],
-        category=new_exercise.category,
-        fatigue_tier=new_exercise.fatigue_tier,
-        equipment_needed=new_exercise.equipment_needed or [],
-        source=new_exercise.source,
-        image_url=None,
-        image_approx=bool(new_exercise.image_approx),
-    )
+    return _custom_exercise_response(new_exercise)

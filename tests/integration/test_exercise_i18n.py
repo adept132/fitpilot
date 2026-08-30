@@ -80,3 +80,35 @@ async def test_custom_exercise_name_is_untouched_for_english_requests(
     assert response.status_code == 200
     assert response.json()["name"] == exercise.name
     assert response.json()["localized_names"] == {"ru": exercise.name}
+
+
+async def test_custom_exercise_idempotent_retry_keeps_russian_maps(
+    client, auth_headers
+):
+    marker = uuid.uuid4().hex
+    payload = {
+        "name": f"Мой повтор {marker[:8]}",
+        "description": "Моя техника",
+        "main_muscle_group": "Грудь",
+        "secondary_muscle_groups": [],
+        "equipment_needed": [],
+        "client_uuid": marker,
+    }
+    english_headers = {**auth_headers, "Accept-Language": "en"}
+
+    created = await client.post(
+        "/exercises", json=payload, headers=english_headers
+    )
+    replayed = await client.post(
+        "/exercises", json=payload, headers=english_headers
+    )
+
+    assert created.status_code == replayed.status_code == 201
+    assert created.json()["id"] == replayed.json()["id"]
+    for body in (created.json(), replayed.json()):
+        assert body["name"] == payload["name"]
+        assert body["localized_names"] == {"ru": payload["name"]}
+        assert body["description"] == payload["description"]
+        assert body["localized_descriptions"] == {
+            "ru": payload["description"]
+        }
