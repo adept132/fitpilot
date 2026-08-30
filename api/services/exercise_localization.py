@@ -8,6 +8,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from typing import Any
+import unicodedata
+
+
+PREFERENCE_RANK = {"favorite": 0, None: 1, "disliked": 2}
 
 
 def _value(exercise: object, field: str) -> Any:
@@ -54,12 +58,38 @@ def display_description(exercise: object, language: str) -> str | None:
     )
 
 
-def sort_exercises(exercises: Iterable[object], language: str) -> list[object]:
-    """Sort presentation rows by locale, with the canonical ID as tie-breaker."""
+def normalized_display_name(exercise: object, language: str) -> str:
+    """Return the locale-selected name normalized only for deterministic collation."""
+    name = display_name(exercise, language)
+    return unicodedata.normalize("NFKC", " ".join(name.split()).casefold())
+
+
+def sort_exercises(
+    exercises: Iterable[object],
+    language: str,
+    *,
+    preferences: Mapping[int, str] | None = None,
+    by_similarity: bool = False,
+) -> list[object]:
+    """Apply the final exercise ordering contract.
+
+    Preference rank is the leading dimension when supplied, followed by search
+    relevance when requested, the locale-selected normalized display name, and
+    canonical exercise ID.  Every dimension is explicit so database row order
+    never affects an API result.
+    """
+    def order_key(exercise: object) -> tuple[int, float, str, int]:
+        exercise_id = int(_value(exercise, "id") or 0)
+        preference = preferences.get(exercise_id) if preferences is not None else None
+        similarity = float(_value(exercise, "similarity") or 0.0)
+        return (
+            PREFERENCE_RANK.get(preference, 1) if preferences is not None else 0,
+            -similarity if by_similarity else 0.0,
+            normalized_display_name(exercise, language),
+            exercise_id,
+        )
+
     return sorted(
         exercises,
-        key=lambda exercise: (
-            display_name(exercise, language).casefold(),
-            int(_value(exercise, "id") or 0),
-        ),
+        key=order_key,
     )

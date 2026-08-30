@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import and_, or_
 
 from api.services.exercise_utils import get_base_exercise_query
+from api.services.exercise_localization import sort_exercises
 from api.services.models import Exercise, UserExercise
 
 
@@ -17,7 +18,8 @@ class ExerciseMatcher:
             session: AsyncSession,
             user_id: int,
             exercise_name: str,
-            min_similarity: float = 0.4  # СНИЖЕН по умолчанию для лучшего fuzzy
+            min_similarity: float = 0.4,  # СНИЖЕН по умолчанию для лучшего fuzzy
+            language: str = "ru",
     ) -> Tuple[Dict, List[Dict]]:
         """
         Находит существующие упражнения или возвращает варианты.
@@ -40,8 +42,9 @@ class ExerciseMatcher:
 
         if all_matches:
             all_matches = list({m['id']: m for m in all_matches}.values())
-            # Сортируем по похожести
-            all_matches.sort(key=lambda x: x.get('similarity', 0), reverse=True)
+            all_matches = sort_exercises(
+                all_matches, language, by_similarity=True
+            )
 
             # УЛУЧШЕННАЯ ЛОГИКА: выбираем лучший, даже если чуть ниже порога
             if all_matches:

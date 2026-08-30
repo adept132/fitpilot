@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from api.schemas.progress import ProgressAchievement
 from api.schemas.supersets import WorkoutStructureExerciseItem
 from api.schemas.workouts import ExerciseShortResponse
 from api.services.exercise_matcher import ExerciseMatcher
+from api.services.exercise_search_service import ExerciseSearchService
 from api.services.models import Exercise
 from api.services.exercise_selection_engine import SelectedExercise
 from api.services.plan_duration import DurationConfig, fit_to_duration
@@ -56,9 +58,64 @@ def _exercise(**updates):
         "description": "Русское описание",
         "description_en": "Press the bar from the chest with control.",
         "source": "default",
+        "category": "base",
+        "main_muscle_group": "Грудь",
+        "secondary_muscle_groups": [],
+        "equipment_needed": ["barbell"],
+        "difficulty": "beginner",
+        "fatigue_tier": 1,
+        "image_urls": [],
+        "image_approx": False,
     }
     values.update(updates)
     return SimpleNamespace(**values)
+
+
+class _RowsResult:
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return list(self._rows)
+
+
+class _SequenceSession:
+    def __init__(self, *row_sets):
+        self._row_sets = list(row_sets)
+
+    async def execute(self, _statement):
+        return _RowsResult(self._row_sets.pop(0))
+
+
+class _BackfillSession(_SequenceSession):
+    def __init__(self, rows, *, fail_commit=False):
+        super().__init__(rows)
+        self.rows = list(rows)
+        self.fail_commit = fail_commit
+        self.commit_calls = 0
+        self.rollback_calls = 0
+        self._before = {
+            row.id: (row.name_en, row.description_en) for row in self.rows
+        }
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, _exc_type, _exc, _traceback):
+        return False
+
+    async def commit(self):
+        self.commit_calls += 1
+        if self.fail_commit:
+            raise RuntimeError("commit failed")
+
+    async def rollback(self):
+        self.rollback_calls += 1
+        for row in self.rows:
+            row.name_en, row.description_en = self._before[row.id]
 
 
 def test_exercise_model_declares_nullable_english_columns():
@@ -357,3 +414,156 @@ def test_backfill_plan_is_idempotent_and_never_writes_custom_exercises():
     ]
     assert plan.missing_translation_ids == (999,)
     assert plan.custom_ids_skipped == (901,)
+
+
+def test_translation_loader_rejects_duplicate_normalized_ids(tmp_path):
+    """Catches ambiguous JSON keys targeting the same canonical exercise ID."""
+    backfill = _backfill_module()
+    translations_path = tmp_path / "translations.json"
+    translations_path.write_text(
+        json.dumps({
+            "76": {"name": "Cable Shrug", "description": "First."},
+            "076": {"name": "Other Shrug", "description": "Second."},
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicate exercise id: 76"):
+        backfill.load_translations(translations_path)
+
+
+@pytest.mark.asyncio
+async def test_apply_with_missing_system_translation_changes_nothing(
+    tmp_path, monkeypatch
+):
+    """Catches partial writes before full system-catalog validation."""
+    backfill = _backfill_module()
+    translations_path = tmp_path / "translations.json"
+    translations_path.write_text(
+        json.dumps({
+            "76": {
+                "name": "Cable Shrug",
+                "description": "Shrug the shoulders under control.",
+            }
+        }),
+        encoding="utf-8",
+    )
+    known = _exercise(id=76, name_en=None, description_en=None)
+    newly_added = _exercise(id=999, name_en=None, description_en=None)
+    session = _BackfillSession([known, newly_added])
+    monkeypatch.setattr(backfill, "SessionLocal", lambda: session)
+
+    result = await backfill._run(True, translations_path)
+
+    assert result == 1
+    assert (known.name_en, known.description_en) == (None, None)
+    assert (newly_added.name_en, newly_added.description_en) == (None, None)
+    assert session.commit_calls == 0
+    assert session.rollback_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_apply_rolls_back_all_fields_when_commit_fails(tmp_path, monkeypatch):
+    """Catches an unexpected persistence error leaving dirty ORM state behind."""
+    backfill = _backfill_module()
+    translations_path = tmp_path / "translations.json"
+    translations_path.write_text(
+        json.dumps({
+            "76": {
+                "name": "Cable Shrug",
+                "description": "Shrug the shoulders under control.",
+            }
+        }),
+        encoding="utf-8",
+    )
+    exercise = _exercise(id=76, name_en=None, description_en=None)
+    session = _BackfillSession([exercise], fail_commit=True)
+    monkeypatch.setattr(backfill, "SessionLocal", lambda: session)
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await backfill._run(True, translations_path)
+
+    assert (exercise.name_en, exercise.description_en) == (None, None)
+    assert session.commit_calls == 1
+    assert session.rollback_calls == 1
+
+
+@pytest.mark.parametrize("language", ["ru", "en"])
+@pytest.mark.asyncio
+async def test_nonquery_order_normalizes_locale_name_then_uses_id(language):
+    """Catches whitespace/case variants bypassing the canonical ID tie-breaker."""
+    rows = [
+        _exercise(id=2, name="  Альфа  ", name_en="  Alpha  "),
+        _exercise(id=1, name="альфа", name_en="alpha"),
+    ]
+    session = _SequenceSession(rows, [])
+
+    result = await ExerciseSearchService.search_exercises(
+        session, user_id=7, language=language
+    )
+
+    assert [row.id for row in result] == [1, 2]
+
+
+def test_preference_rank_leads_then_locale_name_and_id_are_deterministic():
+    """Catches preference partitioning that preserves arbitrary DB order."""
+    rows = [
+        _exercise(id=4, name="Гамма", name_en="Zulu"),
+        _exercise(id=3, name="Бета", name_en="Beta"),
+        _exercise(id=2, name="Альфа  ", name_en="Alpha  "),
+        _exercise(id=1, name="  альфа", name_en="  alpha"),
+        _exercise(id=6, name="Дельта", name_en="Delta"),
+        _exercise(id=5, name="Вега", name_en="Beta"),
+    ]
+    preferences = {
+        1: "favorite",
+        2: "favorite",
+        5: "disliked",
+        6: "disliked",
+    }
+
+    result = ExerciseSearchService.sort_and_mark_preferences(
+        rows, preferences, language="en"
+    )
+
+    assert [row.id for row in result] == [1, 2, 3, 4, 5, 6]
+    assert [getattr(row, "_user_preference") for row in result] == [
+        "favorite",
+        "favorite",
+        None,
+        None,
+        "disliked",
+        "disliked",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_exact_match_equal_scores_use_english_name_then_id():
+    """Catches exact SQL result order leaking into equal-score search results."""
+    zulu = _exercise(id=1, name="Первое", name_en="Zulu Press")
+    beta_later = _exercise(id=3, name="Второе", name_en="Beta Press")
+    beta_first = _exercise(id=2, name="Третье", name_en="Beta Press")
+    session = _SequenceSession([zulu, beta_later, beta_first], [])
+
+    best, matches = await ExerciseMatcher.find_or_create_exercise(
+        session, 7, "press", language="en"
+    )
+
+    assert best["id"] == 2
+    assert [item["id"] for item in matches] == [2, 3, 1]
+
+
+@pytest.mark.asyncio
+async def test_fuzzy_match_equal_scores_use_english_name_then_id():
+    """Catches fuzzy candidate order leaking into equal-score search results."""
+    zulu = _exercise(id=1, name="Первое", name_en="Zulu Press")
+    beta_later = _exercise(id=3, name="Второе", name_en="Beta Press")
+    beta_first = _exercise(id=2, name="Третье", name_en="Beta Press")
+    session = _SequenceSession([], [zulu, beta_later, beta_first])
+
+    best, matches = await ExerciseMatcher.find_or_create_exercise(
+        session, 7, "press", language="en"
+    )
+
+    assert best["id"] == 2
+    assert [item["id"] for item in matches] == [2, 3, 1]

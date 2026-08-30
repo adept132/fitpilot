@@ -60,6 +60,8 @@ def load_translations(path: Path = DEFAULT_TRANSLATIONS) -> dict[int, Translatio
             exercise_id = int(raw_id)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"invalid exercise id: {raw_id!r}") from exc
+        if exercise_id in translations:
+            raise ValueError(f"duplicate exercise id: {exercise_id}")
         name = value.get("name")
         description = value.get("description")
         if not isinstance(name, str) or not name.strip():
@@ -104,31 +106,60 @@ def plan_backfill(
 
 async def _run(apply: bool, translations_path: Path) -> int:
     translations = load_translations(translations_path)
+    applied_updates = 0
+    validation_failed = False
     async with SessionLocal() as session:
-        exercises = list(
-            (
-                await session.execute(select(Exercise).order_by(Exercise.id))
-            ).scalars().all()
-        )
-        plan = plan_backfill(exercises, translations)
-        if apply:
-            by_id = {exercise.id: exercise for exercise in exercises}
-            for update in plan.updates:
-                exercise = by_id[update.exercise_id]
-                # plan_backfill admitted system rows only.
-                exercise.name_en = update.name_en
-                exercise.description_en = update.description_en
-            await session.commit()
+        try:
+            exercises = list(
+                (
+                    await session.execute(select(Exercise).order_by(Exercise.id))
+                ).scalars().all()
+            )
+            plan = plan_backfill(exercises, translations)
+            system_count = sum(
+                exercise.source == "default" for exercise in exercises
+            )
+            original_missing_names = sorted(
+                exercise.id
+                for exercise in exercises
+                if exercise.source == "default" and not exercise.name_en
+            )
+            missing_names = original_missing_names
+            validation_failed = bool(plan.missing_translation_ids)
 
-        missing_names = sorted(
-            exercise.id
-            for exercise in exercises
-            if exercise.source == "default" and not exercise.name_en
-        )
+            if validation_failed:
+                # Fail closed before assigning even one ORM field.
+                await session.rollback()
+            elif apply:
+                by_id = {exercise.id: exercise for exercise in exercises}
+                for update in plan.updates:
+                    exercise = by_id[update.exercise_id]
+                    # plan_backfill admitted system rows only.
+                    exercise.name_en = update.name_en
+                    exercise.description_en = update.description_en
+
+                # Verify the complete relevant catalog inside the transaction.
+                verification = plan_backfill(exercises, translations)
+                validation_failed = bool(
+                    verification.missing_translation_ids or verification.updates
+                )
+                if validation_failed:
+                    await session.rollback()
+                else:
+                    missing_names = sorted(
+                        exercise.id
+                        for exercise in exercises
+                        if exercise.source == "default" and not exercise.name_en
+                    )
+                    await session.commit()
+                    applied_updates = len(plan.updates)
+        except Exception:
+            await session.rollback()
+            raise
 
     print(
-        f"catalog={len(translations)} system={sum(e.source == 'default' for e in exercises)} "
-        f"updates={len(plan.updates) if apply else 0} custom_skipped={len(plan.custom_ids_skipped)}"
+        f"catalog={len(translations)} system={system_count} "
+        f"updates={applied_updates} custom_skipped={len(plan.custom_ids_skipped)}"
     )
     if plan.missing_translation_ids:
         print(
@@ -143,7 +174,7 @@ async def _run(apply: bool, translations_path: Path) -> int:
             "system exercises differ from reviewed catalog: "
             + ", ".join(str(item.exercise_id) for item in plan.updates)
         )
-    return 1 if plan.missing_translation_ids or missing_names or unapplied_drift else 0
+    return 1 if validation_failed or missing_names or unapplied_drift else 0
 
 
 def main() -> None:
