@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import select
 from api.deps import get_db
 from api.errors import LocalizedHTTPException
+from api.i18n import tr
 from api.schemas.plan import WorkoutPlanCreate, PlanApplyRequest
 from api.services.app_user_service import get_current_app_user
 from api.services.models import Mesocycle, MesocyclePhase, WorkoutPlan, AppUserProfile, WorkoutPlanExercise, \
@@ -328,6 +329,7 @@ async def _generation_comparison(db, current_user, blueprint, days, target_date,
         unique_plans = list({plan.id: plan for plan in previous_plans}.values())
         comparisons.append(compare_generated_day(
             day, unique_plans, sources, sorted(set(affected_dates)),
+            language=getattr(current_user, "_request_language", "en"),
         ))
     all_blueprint_tags = list(dict.fromkeys(
         slot.day.name for slot in sorted(blueprint.slots, key=lambda slot: slot.day_order)
@@ -827,7 +829,7 @@ def update_workout_plan(plan_id: int, plan_data: WorkoutPlanCreate, db: Session 
         db.add(new_ex)
 
     db.commit()
-    return {"status": "success", "message": "План обновлен"}
+    return {"status": "success", "message": tr(getattr(current_user, "_request_language", "en"), "plan.updated")}
 
 
 @router.delete("/{plan_id}")
@@ -839,7 +841,7 @@ def delete_plan(plan_id: int, db: Session = Depends(get_db), current_user=Depend
 
     db.delete(plan)
     db.commit()
-    return {"status": "success", "message": "План удален"}
+    return {"status": "success", "message": tr(getattr(current_user, "_request_language", "en"), "plan.deleted")}
 
 
 async def _load_commands_context(db, current_user, blueprint_id):
@@ -1191,7 +1193,7 @@ async def apply_plan_to_calendar(
 
     return {
         "status": "success",
-        "message": "План успешно применен",
+        "message": tr(getattr(current_user, "_request_language", "en"), "plan.applied"),
         "session_id": new_session.id
     }
 

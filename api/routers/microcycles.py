@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db
 from api.errors import LocalizedHTTPException
+from api.i18n import tr
 from api.schemas.microcycle import MicrocycleCreate
 from api.services.app_user_service import get_current_app_user
 from api.services.models import AppUserMicrocycle
@@ -108,4 +109,4 @@ async def delete_microcycle(micro_id: int, db: AsyncSession = Depends(get_db),
 
     await db.delete(micro)
     await db.commit()
-    return {"status": "success", "message": "Микроцикл удален"}
+    return {"status": "success", "message": tr(getattr(current_user, "_request_language", "en"), "microcycle.deleted")}

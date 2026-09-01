@@ -7,7 +7,7 @@ from sqlalchemy.orm import selectinload
 from uuid import UUID
 from api.deps import get_db
 from api.errors import LocalizedHTTPException
-from api.i18n import resolve_language
+from api.i18n import resolve_language, tr
 from api.routers.workout_center import build_context
 from api.schemas.mesocycle import MesocycleCreate, UpdateSelectedMesocyclePayload, UpdateMesocyclePhasePayload
 from api.services.app_user_service import get_current_app_user
@@ -104,4 +104,4 @@ async def delete_mesocycle(mesocycle_id: UUID, db: AsyncSession = Depends(get_db
 
     await db.delete(meso)
     await db.commit()
-    return {"status": "success", "message": "Стратегия удалена"}
+    return {"status": "success", "message": tr(getattr(current_user, "_request_language", "en"), "mesocycle.deleted")}

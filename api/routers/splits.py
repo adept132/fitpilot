@@ -12,6 +12,7 @@ from starlette import status
 
 from api.services.app_user_service import get_current_app_user
 from api.errors import LocalizedHTTPException
+from api.i18n import tr
 # Импортируй свои зависимости (пути могут немного отличаться в зависимости от твоего проекта)
 from api.services.models import (
     AppUser, SplitBlueprint, DayBlueprint, SplitDaySlot, UserSplit, DayMuscleTarget, UserCalendarDay, AppUserMesocycle,
@@ -227,7 +228,7 @@ async def activate_split(
 
     return {
         "status": "success",
-        "message": f"Split '{blueprint.name}' activated.",
+        "message": tr(getattr(current_user, "_request_language", "en"), "split.activated", name=blueprint.name),
         "microcycles_rebuilt": rebuilt,
     }
 
@@ -276,7 +277,7 @@ async def create_custom_split(
         session.add(slot)
 
     await session.commit()
-    return {"status": "success", "split_id": new_split.id, "message": "Сплит успешно сохранен"}
+    return {"status": "success", "split_id": new_split.id, "message": tr(getattr(current_user, "_request_language", "en"), "split.saved")}
 
 
 @router.delete("/{blueprint_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -350,7 +351,7 @@ async def update_custom_split(
             session.add(slot)
 
     await session.commit()
-    return {"status": "success", "message": "Сплит обновлен"}
+    return {"status": "success", "message": tr(getattr(current_user, "_request_language", "en"), "split.updated")}
 
 
 @router.post("/days/custom")
@@ -379,7 +380,7 @@ async def create_custom_day(
         ))
 
     await session.commit()
-    return {"status": "success", "day_id": new_day.id, "message": "День успешно создан"}
+    return {"status": "success", "day_id": new_day.id, "message": tr(getattr(current_user, "_request_language", "en"), "split.day_created")}
 
 
 @router.delete("/days/{day_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -433,7 +434,7 @@ async def update_custom_day(
             session.add(DayMuscleTarget(day_id=day.id, muscle_group_id=muscle))
 
     await session.commit()
-    return {"status": "success", "message": "День обновлен"}
+    return {"status": "success", "message": tr(getattr(current_user, "_request_language", "en"), "split.day_updated")}
 
 
 @router.post("/launch", status_code=status.HTTP_200_OK)
@@ -535,7 +536,7 @@ async def launch_split(
 
     return {
         "status": "success",
-        "message": f"Сплит '{blueprint.name}' успешно активирован и развернут в календарь!"
+        "message": tr(getattr(current_user, "_request_language", "en"), "split.launched", name=blueprint.name)
     }
 
 @router.get("/active")

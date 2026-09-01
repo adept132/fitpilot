@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_current_firebase_claims, get_db
 from api.i18n import resolve_language
+from api.errors import LocalizedHTTPException
 from api.services.models import AppUser, AppUserProfile
 
 
@@ -44,16 +45,8 @@ async def get_or_create_app_user(
                 )
             ).scalars().first()
             if conflict is not None:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail={
-                        "error": "email_already_linked",
-                        "message": (
-                            "На этот email в Firebase заведено несколько учётных "
-                            "записей. Обратитесь в поддержку — иначе история "
-                            "тренировок окажется разделённой между ними."
-                        ),
-                    },
+                raise LocalizedHTTPException(
+                    status.HTTP_409_CONFLICT, "auth.email_already_linked"
                 )
 
         app_user = AppUser(

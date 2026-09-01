@@ -59,6 +59,16 @@ def test_comparison_reports_added_removed_and_modified_exercises():
     assert [row.exercise_id for row in modified.modified_exercises] == [1]
 
 
+def test_comparison_localizes_missing_exercise_name_fallback():
+    old = _plan(1)
+    old.exercises[0].exercise = None
+
+    result = compare_generated_day(_generated(2), [old], {10: "split"}, [], language="en")
+
+    assert result.removed_exercises[0].name == "Exercise #1"
+    assert result.removed_exercises[0].localized_names == {"en": "Exercise #1"}
+
+
 def test_issues_explain_duration_and_inapplicable_accent():
     issues = explain_day(
         _generated(sets=4), {"chest": 8}, _pool(), None, [], 30, "lats",

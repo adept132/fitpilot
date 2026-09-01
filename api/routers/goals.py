@@ -2,12 +2,13 @@
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy import select, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from api.deps import get_db
+from api.errors import LocalizedHTTPException
 from api.schemas.goals import GoalAutopilotRead, GoalCreate, GoalResponse, GoalStatus, GoalUpdate
 from api.services.app_user_service import get_current_app_user
 from api.services.goal_service import (
@@ -61,9 +62,9 @@ async def create_goal(
     current_user: AppUser = Depends(get_current_app_user),
 ):
     if payload.goal_type == GOAL_STRENGTH and not payload.exercise_id:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Силовая цель требует exercise_id")
+        raise LocalizedHTTPException(status.HTTP_400_BAD_REQUEST, "goal.strength_exercise_required")
     if payload.goal_type == GOAL_MEASUREMENT and not payload.metric_key:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Цель-замер требует metric_key")
+        raise LocalizedHTTPException(status.HTTP_400_BAD_REQUEST, "goal.measurement_metric_required")
 
     # Идемпотентность offline-повтора: цель с этим client_uuid уже создана.
     if payload.client_uuid:
@@ -154,15 +155,14 @@ async def update_goal(
     if payload.is_primary is not None:
         if payload.is_primary:
             if goal.goal_type != GOAL_STRENGTH:
-                raise HTTPException(
+                raise LocalizedHTTPException(
                     status.HTTP_400_BAD_REQUEST,
-                    "Ведущей может быть только силовая цель: план влияет на e1RM лифта, "
-                    "а не на вес тела или обхваты",
+                    "goal.primary_strength_only",
                 )
             if goal.deadline is None:
-                raise HTTPException(
+                raise LocalizedHTTPException(
                     status.HTTP_400_BAD_REQUEST,
-                    "У ведущей цели должен быть срок: без него автопилоту нечему не успевать",
+                    "goal.primary_deadline_required",
                 )
             # Снимаем флаг с прежней ведущей в этой же транзакции — иначе
             # частичный уникальный индекс отвергнет вставку второй.
@@ -233,7 +233,7 @@ async def _owned_goal(db: AsyncSession, goal_id: int, app_user_id: int) -> UserG
         )
     )).scalar_one_or_none()
     if goal is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Цель не найдена")
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "goal.not_found")
     return goal
 
 

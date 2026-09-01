@@ -23,17 +23,22 @@ def _exercise_rows(plan) -> list:
     return sorted(list(getattr(plan, "exercises", []) or []), key=lambda row: row.order_index)
 
 
-def _exercise_name(row) -> str:
+def _exercise_name(row, language: SupportedLanguage) -> str:
     exercise = getattr(row, "exercise", None)
-    return getattr(exercise, "name", None) or f"Упражнение #{row.exercise_id}"
+    return getattr(exercise, "name", None) or tr(
+        language, "exercise.fallback_name", exercise_id=row.exercise_id
+    )
 
 
-def _compared_exercise(row) -> ComparedExercise:
+def _compared_exercise(row, language: SupportedLanguage) -> ComparedExercise:
     exercise = getattr(row, "exercise", None)
+    has_explicit_name = bool(
+        getattr(exercise, "name", None) or getattr(row, "name", None)
+    )
     name = (
         getattr(exercise, "name", None)
         or getattr(row, "name", None)
-        or _exercise_name(row)
+        or _exercise_name(row, language)
     )
     names = (
         localized_names(exercise)
@@ -46,7 +51,7 @@ def _compared_exercise(row) -> ComparedExercise:
         else dict(getattr(row, "localized_descriptions", {}) or {})
     )
     if not names and name:
-        names = {"ru": name}
+        names = {(language if not has_explicit_name else "ru"): name}
     return ComparedExercise(
         exercise_id=row.exercise_id,
         name=name,
@@ -89,6 +94,7 @@ def compare_generated_day(
     previous_plans: list,
     sources: dict[int, str],
     affected_dates: Iterable[date],
+    language: SupportedLanguage = "ru",
 ) -> GeneratedDayComparison:
     generated_rows = list(day.exercises)
     previous_rows = _exercise_rows(previous_plans[0]) if previous_plans else []
@@ -98,11 +104,11 @@ def compare_generated_day(
     old_by_id = {row.exercise_id: row for row in previous_rows}
     new_by_id = {row.exercise_id: row for row in generated_rows}
     added = [
-        _compared_exercise(new_by_id[key])
+        _compared_exercise(new_by_id[key], language)
         for key in new_by_id.keys() - old_by_id.keys()
     ]
     removed = [
-        _compared_exercise(old_by_id[key])
+        _compared_exercise(old_by_id[key], language)
         for key in old_by_id.keys() - new_by_id.keys()
     ]
     modified = []
@@ -114,7 +120,7 @@ def compare_generated_day(
             or getattr(old, "override_reps", None) != new.override_reps
             or getattr(old, "override_rir", None) != new.override_rir
         ):
-            modified.append(_compared_exercise(new))
+            modified.append(_compared_exercise(new, language))
 
     dates = sorted(set(affected_dates))
     status = "new" if not previous_plans else (

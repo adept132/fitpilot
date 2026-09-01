@@ -1,7 +1,8 @@
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from api.core.firebase_admin import verify_firebase_token
+from api.errors import LocalizedHTTPException
 
 from collections.abc import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,9 +22,6 @@ async def get_current_firebase_claims(
     try:
         decoded_token = verify_firebase_token(token)
         return decoded_token
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid Firebase ID token: {str(e)}",
-        )
+    except Exception:
+        raise LocalizedHTTPException(status.HTTP_401_UNAUTHORIZED, "auth.invalid_token")
 

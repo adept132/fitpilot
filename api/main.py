@@ -3,7 +3,7 @@ import asyncio
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -116,4 +116,4 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return {"status": "ok", "database": "connected"}
     except Exception as e:
         # Если база лежит, возвращаем 503 Service Unavailable
-        raise HTTPException(status_code=503, detail="Database connection failed")
+        raise LocalizedHTTPException(503, "system.database_unavailable")
