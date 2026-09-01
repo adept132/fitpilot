@@ -2,12 +2,14 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from httpx import ASGITransport, AsyncClient
 
 from api.errors import LocalizedHTTPException, localized_http_exception_handler
-from api.deps import get_db
+import api.deps as deps_module
+from api.deps import get_current_firebase_claims, get_db
 from api.routers.exercises import router as exercises_router
+from api.main import health_check
 from api.services.app_user_service import get_current_app_user, set_request_language
 from api.services.plan_generation_insights import missing_requested_day_issue
 from api.services.reports.metrics import (
@@ -34,6 +36,15 @@ def _request(language: str) -> Request:
     request = Request({"type": "http", "method": "GET", "path": "/"})
     request.state.language = language
     return request
+
+
+def _header_request(accept_language: str | None) -> Request:
+    headers = []
+    if accept_language is not None:
+        headers.append((b"accept-language", accept_language.encode("latin-1")))
+    return Request(
+        {"type": "http", "method": "GET", "path": "/", "headers": headers}
+    )
 
 
 @pytest.mark.asyncio
@@ -69,6 +80,125 @@ async def test_localized_error_keeps_canonical_parameter_values_as_data():
             "code": "superset.target_exercise_not_found",
             "params": {"exercise_id": 912},
         },
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("accept_language", "detail"),
+    [
+        ("ru-RU", "Недействительный токен авторизации"),
+        ("en-US", "Invalid authorization token"),
+        ("de-DE", "Invalid authorization token"),
+        ("ru;q=broken", "Invalid authorization token"),
+        ("ru;q=.2, en-US;q=.8", "Invalid authorization token"),
+        ("en-US;q=.2, ru-RU;q=.8", "Недействительный токен авторизации"),
+    ],
+)
+async def test_pre_profile_error_resolves_accept_language_header(
+    accept_language, detail
+):
+    response = await localized_http_exception_handler(
+        _header_request(accept_language),
+        LocalizedHTTPException(401, "auth.invalid_token"),
+    )
+
+    assert response.status_code == 401
+    assert json.loads(response.body) == {
+        "detail": detail,
+        "error": {"code": "auth.invalid_token", "params": {}},
+    }
+
+
+@pytest.mark.asyncio
+async def test_explicit_valid_state_language_precedes_accept_language_header():
+    request = _header_request("ru-RU")
+    request.state.language = "en"
+
+    response = await localized_http_exception_handler(
+        request,
+        LocalizedHTTPException(401, "auth.invalid_token"),
+    )
+
+    assert json.loads(response.body)["detail"] == "Invalid authorization token"
+
+
+@pytest.mark.asyncio
+async def test_invalid_state_language_is_not_trusted_over_header():
+    request = _header_request("ru-RU")
+    request.state.language = "de"
+
+    response = await localized_http_exception_handler(
+        request,
+        LocalizedHTTPException(401, "auth.invalid_token"),
+    )
+
+    assert json.loads(response.body)["detail"] == "Недействительный токен авторизации"
+
+
+@pytest.mark.asyncio
+async def test_firebase_auth_error_uses_pre_profile_header_language(monkeypatch):
+    def invalid_token(_token):
+        raise ValueError("provider detail must not escape")
+
+    monkeypatch.setattr(deps_module, "verify_firebase_token", invalid_token)
+    local_app = FastAPI()
+    local_app.add_exception_handler(
+        LocalizedHTTPException, localized_http_exception_handler
+    )
+
+    @local_app.get("/private")
+    async def private(
+        _claims: dict = Depends(get_current_firebase_claims),
+    ):
+        return {"ok": True}
+
+    async with AsyncClient(
+        transport=ASGITransport(app=local_app), base_url="http://test"
+    ) as client:
+        response = await client.get(
+            "/private",
+            headers={
+                "Authorization": "Bearer invalid",
+                "Accept-Language": "ru-RU",
+            },
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {
+        "detail": "Недействительный токен авторизации",
+        "error": {"code": "auth.invalid_token", "params": {}},
+    }
+
+
+class _UnavailableHealthSession:
+    async def execute(self, _statement):
+        raise RuntimeError("database detail must not escape")
+
+
+@pytest.mark.asyncio
+async def test_health_error_uses_pre_profile_header_language():
+    local_app = FastAPI()
+    local_app.add_api_route("/health", health_check, methods=["GET"])
+    local_app.add_exception_handler(
+        LocalizedHTTPException, localized_http_exception_handler
+    )
+
+    async def unavailable_db():
+        yield _UnavailableHealthSession()
+
+    local_app.dependency_overrides[get_db] = unavailable_db
+    async with AsyncClient(
+        transport=ASGITransport(app=local_app), base_url="http://test"
+    ) as client:
+        response = await client.get(
+            "/health", headers={"Accept-Language": "ru-RU"}
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "База данных недоступна",
+        "error": {"code": "system.database_unavailable", "params": {}},
     }
 
 

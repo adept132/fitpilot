@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from api.i18n import tr
+from api.i18n import SUPPORTED_LANGUAGES, resolve_language, tr
 
 
 class LocalizedHTTPException(HTTPException):
@@ -19,7 +19,13 @@ class LocalizedHTTPException(HTTPException):
 async def localized_http_exception_handler(
     request: Request, exc: LocalizedHTTPException
 ) -> JSONResponse:
-    language = getattr(request.state, "language", "en")
+    state_language = getattr(request.state, "language", None)
+    language = (
+        state_language
+        if isinstance(state_language, str)
+        and state_language in SUPPORTED_LANGUAGES
+        else resolve_language(request.headers.get("Accept-Language"), None)
+    )
     return JSONResponse(
         status_code=exc.status_code,
         content={
