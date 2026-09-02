@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
+import ctypes
 import errno
 import hashlib
 import os
@@ -9,6 +11,7 @@ import secrets
 import stat
 import sys
 import uuid
+from ctypes import wintypes
 
 from fastapi import UploadFile
 
@@ -29,6 +32,89 @@ class StoredArtifact:
     storage_key: str
     sha256: str
     size_bytes: int
+
+
+class _WindowsDirectoryGuard:
+    _FILE_READ_ATTRIBUTES = 0x0080
+    _FILE_SHARE_READ = 0x0001
+    _FILE_SHARE_WRITE = 0x0002
+    _OPEN_EXISTING = 3
+    _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+    _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    _FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
+    _FILE_ATTRIBUTE_TAG_INFO = 9
+    _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    class _AttributeTagInfo(ctypes.Structure):
+        _fields_ = [
+            ("file_attributes", wintypes.DWORD),
+            ("reparse_tag", wintypes.DWORD),
+        ]
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+        self._handle: int | None = None
+
+    def __enter__(self) -> _WindowsDirectoryGuard:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        handle = create_file(
+            str(self.directory),
+            self._FILE_READ_ATTRIBUTES,
+            self._FILE_SHARE_READ | self._FILE_SHARE_WRITE,
+            None,
+            self._OPEN_EXISTING,
+            self._FILE_FLAG_BACKUP_SEMANTICS | self._FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        if handle == self._INVALID_HANDLE_VALUE:
+            raise ArtifactValidationError("storage directory guard could not open")
+
+        get_information = kernel32.GetFileInformationByHandleEx
+        get_information.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        ]
+        get_information.restype = wintypes.BOOL
+        info = self._AttributeTagInfo()
+        if not get_information(
+            handle,
+            self._FILE_ATTRIBUTE_TAG_INFO,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        ):
+            self._close_handle(kernel32, handle)
+            raise ArtifactValidationError("storage directory guard could not inspect")
+        if info.file_attributes & self._FILE_ATTRIBUTE_REPARSE_POINT:
+            self._close_handle(kernel32, handle)
+            raise ArtifactValidationError("storage directory is a reparse point")
+
+        self._handle = handle
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        if self._handle is not None:
+            self._close_handle(ctypes.WinDLL("kernel32", use_last_error=True), self._handle)
+            self._handle = None
+
+    @staticmethod
+    def _close_handle(kernel32: object, handle: int) -> None:
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        close_handle(handle)
 
 
 class ReleaseStorage:
@@ -58,28 +144,29 @@ class ReleaseStorage:
         size = 0
 
         try:
-            with self._open_new_staged_file(temp) as output:
-                while chunk := await upload.read(self._CHUNK_BYTES):
-                    size += len(chunk)
-                    if size > self.max_bytes:
-                        raise ArtifactValidationError(
-                            f"artifact exceeds {self.max_bytes} bytes"
-                        )
-                    digest.update(chunk)
-                    output.write(chunk)
-                output.flush()
-                os.fsync(output.fileno())
-                if size == 0:
-                    raise ArtifactValidationError("artifact is empty")
-                output.seek(0)
-                magic = output.read(4)
-                if magic != self._APK_MAGIC:
-                    raise ArtifactValidationError("artifact is not an APK archive")
-                if not secrets.compare_digest(digest.hexdigest(), expected_sha256):
-                    raise ArtifactValidationError("artifact sha256 mismatch")
-            self._validate_staging_root()
+            with self._directory_guard(self.staging_root):
+                with self._open_new_staged_file(temp) as output:
+                    while chunk := await upload.read(self._CHUNK_BYTES):
+                        size += len(chunk)
+                        if size > self.max_bytes:
+                            raise ArtifactValidationError(
+                                f"artifact exceeds {self.max_bytes} bytes"
+                            )
+                        digest.update(chunk)
+                        output.write(chunk)
+                    output.flush()
+                    os.fsync(output.fileno())
+                    if size == 0:
+                        raise ArtifactValidationError("artifact is empty")
+                    output.seek(0)
+                    magic = output.read(4)
+                    if magic != self._APK_MAGIC:
+                        raise ArtifactValidationError("artifact is not an APK archive")
+                    if not secrets.compare_digest(digest.hexdigest(), expected_sha256):
+                        raise ArtifactValidationError("artifact sha256 mismatch")
+                self._validate_staging_root()
 
-            return StagedArtifact(temp, digest.hexdigest(), size)
+                return StagedArtifact(temp, digest.hexdigest(), size)
         except BaseException:
             self._discard_temp_if_safe(temp)
             raise
@@ -95,24 +182,25 @@ class ReleaseStorage:
         target = self.root / storage_key
         self._create_safe_directory(target.parent)
 
-        try:
-            self._link_staged_file(source, target)
-        except FileExistsError:
-            self._validate_existing_target(target)
-            if not self._files_are_identical(source, target):
-                raise ArtifactValidationError("storage integrity collision")
-            self.discard(staged)
-            return StoredArtifact(storage_key, staged.sha256, staged.size_bytes)
-        except OSError as error:
-            if error.errno == errno.EXDEV:
-                raise ArtifactValidationError(
-                    "staging and storage must be on the same filesystem"
-                ) from error
-            raise
-        else:
-            self._fsync_parent(target.parent)
-            self.discard(staged)
-            return StoredArtifact(storage_key, staged.sha256, staged.size_bytes)
+        with self._directory_guard(self.staging_root), self._directory_guard(target.parent):
+            try:
+                self._link_staged_file(source, target)
+            except FileExistsError:
+                self._validate_existing_target(target)
+                if not self._files_are_identical(source, target):
+                    raise ArtifactValidationError("storage integrity collision")
+                self.discard(staged)
+                return StoredArtifact(storage_key, staged.sha256, staged.size_bytes)
+            except OSError as error:
+                if error.errno == errno.EXDEV:
+                    raise ArtifactValidationError(
+                        "staging and storage must be on the same filesystem"
+                    ) from error
+                raise
+            else:
+                self._fsync_parent(target.parent)
+                self.discard(staged)
+                return StoredArtifact(storage_key, staged.sha256, staged.size_bytes)
 
     def discard(self, staged: StagedArtifact) -> None:
         path = self._validated_staged_path(staged)
@@ -196,6 +284,12 @@ class ReleaseStorage:
         except OSError as error:
             raise ArtifactValidationError("staging directory is unsafe") from error
 
+    @staticmethod
+    def _directory_guard(directory: Path):
+        if sys.platform == "win32":
+            return _WindowsDirectoryGuard(directory)
+        return nullcontext()
+
     def _link_staged_file(self, source: Path, target: Path) -> None:
         if self._supports_directory_file_descriptors():
             source_directory = self._open_staging_directory()
@@ -232,7 +326,7 @@ class ReleaseStorage:
         try:
             if temp.parent == self.staging_root:
                 self._unlink_staged_file(temp.name)
-        except ArtifactValidationError:
+        except (ArtifactValidationError, FileNotFoundError):
             # A replaced staging directory may no longer safely name this file.
             # Leaving an unreachable partial file is safer than unlinking outside it.
             return

@@ -157,13 +157,13 @@ async def test_finalize_never_reserves_an_empty_digest_target(
     digest = hashlib.sha256(payload).hexdigest()
     staged = await storage.stage(upload_file(payload), digest)
     target = tmp_path / f"android/sha256/{digest}.apk"
-    native_replace = release_storage.os.replace
+    native_link = release_storage.os.link
 
-    def replace_without_placeholder(source: Path, destination: Path) -> None:
+    def link_without_placeholder(source: Path, destination: Path, *args, **kwargs) -> None:
         assert not target.exists(), "publication exposed an empty target"
-        native_replace(source, destination)
+        native_link(source, destination, *args, **kwargs)
 
-    monkeypatch.setattr(release_storage.os, "replace", replace_without_placeholder)
+    monkeypatch.setattr(release_storage.os, "link", link_without_placeholder)
 
     stored = storage.finalize(staged)
 
@@ -185,15 +185,15 @@ async def test_concurrent_identical_finalizations_converge_without_a_collision(
     native_replace = release_storage.os.replace
     native_link = release_storage.os.link
 
-    def delayed_replace(source: Path, destination: Path) -> None:
+    def delayed_replace(source: Path, destination: Path, *args, **kwargs) -> None:
         replace_started.set()
         assert release_publication.wait(timeout=2)
-        native_replace(source, destination)
+        native_replace(source, destination, *args, **kwargs)
 
-    def delayed_link(source: Path, destination: Path) -> None:
+    def delayed_link(source: Path, destination: Path, *args, **kwargs) -> None:
         link_started.set()
         assert release_publication.wait(timeout=2)
-        native_link(source, destination)
+        native_link(source, destination, *args, **kwargs)
 
     monkeypatch.setattr(release_storage.os, "replace", delayed_replace)
     monkeypatch.setattr(release_storage.os, "link", delayed_link)
@@ -207,6 +207,7 @@ async def test_concurrent_identical_finalizations_converge_without_a_collision(
         second_stored = second.result(timeout=2)
 
     assert first_stored == second_stored
+    assert link_started.is_set()
     assert (tmp_path / first_stored.storage_key).read_bytes() == payload
     assert not first_staged.path.exists()
     assert not second_staged.path.exists()
@@ -231,6 +232,63 @@ async def test_stage_rejects_staging_directory_replaced_by_symlink_after_constru
         await storage.stage(upload_file(payload), hashlib.sha256(payload).hexdigest())
 
     assert list(outside.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_stage_fails_closed_when_windows_directory_guard_rejects_staging(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class RejectingGuard:
+        def __init__(self, directory: Path) -> None:
+            self.directory = directory
+
+        def __enter__(self) -> None:
+            raise ArtifactValidationError("directory is a reparse point")
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    storage = ReleaseStorage(tmp_path, max_bytes=1024)
+    payload = apk()
+    monkeypatch.setattr(release_storage.sys, "platform", "win32")
+    monkeypatch.setattr(
+        release_storage, "_WindowsDirectoryGuard", RejectingGuard, raising=False
+    )
+
+    with pytest.raises(ArtifactValidationError, match="reparse"):
+        await storage.stage(upload_file(payload), hashlib.sha256(payload).hexdigest())
+
+    assert list(storage.staging_root.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_finalize_fails_closed_when_windows_directory_guard_rejects_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class TargetRejectingGuard:
+        def __init__(self, directory: Path) -> None:
+            self.directory = directory
+
+        def __enter__(self) -> None:
+            if self.directory.name == "sha256":
+                raise ArtifactValidationError("directory is a reparse point")
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    storage = ReleaseStorage(tmp_path, max_bytes=1024)
+    payload = apk()
+    staged = await storage.stage(upload_file(payload), hashlib.sha256(payload).hexdigest())
+    monkeypatch.setattr(release_storage.sys, "platform", "win32")
+    monkeypatch.setattr(
+        release_storage, "_WindowsDirectoryGuard", TargetRejectingGuard, raising=False
+    )
+
+    with pytest.raises(ArtifactValidationError, match="reparse"):
+        storage.finalize(staged)
+
+    assert staged.path.exists()
+    assert not list((tmp_path / "android" / "sha256").glob("*.apk"))
 
 
 @pytest.mark.asyncio
