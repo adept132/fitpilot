@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 import hashlib
 from pathlib import Path
+from threading import Event
 
 import pytest
 from fastapi import UploadFile
 
+from api.services import release_storage
 from api.services.release_storage import (
     ArtifactValidationError,
     ReleaseStorage,
@@ -143,6 +146,109 @@ async def test_finalize_reuses_existing_identical_content(tmp_path: Path) -> Non
 
     assert (tmp_path / stored.storage_key).read_bytes() == payload
     assert not second.path.exists()
+
+
+@pytest.mark.asyncio
+async def test_finalize_never_reserves_an_empty_digest_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    storage = ReleaseStorage(tmp_path, max_bytes=1024)
+    payload = apk()
+    digest = hashlib.sha256(payload).hexdigest()
+    staged = await storage.stage(upload_file(payload), digest)
+    target = tmp_path / f"android/sha256/{digest}.apk"
+    native_replace = release_storage.os.replace
+
+    def replace_without_placeholder(source: Path, destination: Path) -> None:
+        assert not target.exists(), "publication exposed an empty target"
+        native_replace(source, destination)
+
+    monkeypatch.setattr(release_storage.os, "replace", replace_without_placeholder)
+
+    stored = storage.finalize(staged)
+
+    assert (tmp_path / stored.storage_key).read_bytes() == payload
+
+
+@pytest.mark.asyncio
+async def test_concurrent_identical_finalizations_converge_without_a_collision(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    storage = ReleaseStorage(tmp_path, max_bytes=1024)
+    payload = apk()
+    digest = hashlib.sha256(payload).hexdigest()
+    first_staged = await storage.stage(upload_file(payload), digest)
+    second_staged = await storage.stage(upload_file(payload), digest)
+    release_publication = Event()
+    replace_started = Event()
+    link_started = Event()
+    native_replace = release_storage.os.replace
+    native_link = release_storage.os.link
+
+    def delayed_replace(source: Path, destination: Path) -> None:
+        replace_started.set()
+        assert release_publication.wait(timeout=2)
+        native_replace(source, destination)
+
+    def delayed_link(source: Path, destination: Path) -> None:
+        link_started.set()
+        assert release_publication.wait(timeout=2)
+        native_link(source, destination)
+
+    monkeypatch.setattr(release_storage.os, "replace", delayed_replace)
+    monkeypatch.setattr(release_storage.os, "link", delayed_link)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(storage.finalize, first_staged)
+        assert replace_started.wait(timeout=0.2) or link_started.wait(timeout=0.2)
+        second = executor.submit(storage.finalize, second_staged)
+        release_publication.set()
+        first_stored = first.result(timeout=2)
+        second_stored = second.result(timeout=2)
+
+    assert first_stored == second_stored
+    assert (tmp_path / first_stored.storage_key).read_bytes() == payload
+    assert not first_staged.path.exists()
+    assert not second_staged.path.exists()
+
+
+@pytest.mark.asyncio
+async def test_stage_rejects_staging_directory_replaced_by_symlink_after_construction(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "storage"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    storage = ReleaseStorage(root, max_bytes=1024)
+    storage.staging_root.rmdir()
+    try:
+        storage.staging_root.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this runner")
+    payload = apk()
+
+    with pytest.raises(ArtifactValidationError, match="staging|escapes"):
+        await storage.stage(upload_file(payload), hashlib.sha256(payload).hexdigest())
+
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_finalize_preserves_a_tampered_existing_digest_target(tmp_path: Path) -> None:
+    storage = ReleaseStorage(tmp_path, max_bytes=1024)
+    payload = apk(b"expected")
+    digest = hashlib.sha256(payload).hexdigest()
+    staged = await storage.stage(upload_file(payload), digest)
+    target = tmp_path / f"android/sha256/{digest}.apk"
+    target.parent.mkdir(parents=True)
+    tampered = apk(b"tampered")
+    target.write_bytes(tampered)
+
+    with pytest.raises(ArtifactValidationError, match="integrity collision"):
+        storage.finalize(staged)
+
+    assert target.read_bytes() == tampered
+    assert staged.path.exists()
 
 
 @pytest.mark.asyncio

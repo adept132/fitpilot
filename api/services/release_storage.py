@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
 import hashlib
 import os
 from pathlib import Path
 import secrets
+import stat
 import sys
 import uuid
 
@@ -50,12 +52,13 @@ class ReleaseStorage:
         self, upload: UploadFile, expected_sha256: str
     ) -> StagedArtifact:
         self._validate_sha(expected_sha256)
+        self._validate_staging_root()
         temp = self.staging_root / f"{uuid.uuid4()}.apk.part"
         digest = hashlib.sha256()
         size = 0
 
         try:
-            with temp.open("xb") as output:
+            with self._open_new_staged_file(temp) as output:
                 while chunk := await upload.read(self._CHUNK_BYTES):
                     size += len(chunk)
                     if size > self.max_bytes:
@@ -66,19 +69,19 @@ class ReleaseStorage:
                     output.write(chunk)
                 output.flush()
                 os.fsync(output.fileno())
-
-            if size == 0:
-                raise ArtifactValidationError("artifact is empty")
-            with temp.open("rb") as staged_file:
-                magic = staged_file.read(4)
-            if magic != self._APK_MAGIC:
-                raise ArtifactValidationError("artifact is not an APK archive")
-            if not secrets.compare_digest(digest.hexdigest(), expected_sha256):
-                raise ArtifactValidationError("artifact sha256 mismatch")
+                if size == 0:
+                    raise ArtifactValidationError("artifact is empty")
+                output.seek(0)
+                magic = output.read(4)
+                if magic != self._APK_MAGIC:
+                    raise ArtifactValidationError("artifact is not an APK archive")
+                if not secrets.compare_digest(digest.hexdigest(), expected_sha256):
+                    raise ArtifactValidationError("artifact sha256 mismatch")
+            self._validate_staging_root()
 
             return StagedArtifact(temp, digest.hexdigest(), size)
         except BaseException:
-            temp.unlink(missing_ok=True)
+            self._discard_temp_if_safe(temp)
             raise
 
     def finalize(self, staged: StagedArtifact) -> StoredArtifact:
@@ -93,31 +96,33 @@ class ReleaseStorage:
         self._create_safe_directory(target.parent)
 
         try:
-            reservation = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+            self._link_staged_file(source, target)
         except FileExistsError:
             self._validate_existing_target(target)
             if not self._files_are_identical(source, target):
                 raise ArtifactValidationError("storage integrity collision")
             self.discard(staged)
             return StoredArtifact(storage_key, staged.sha256, staged.size_bytes)
-
-        os.close(reservation)
-        try:
-            os.replace(source, target)
-            self._fsync_parent(target.parent)
-        except BaseException:
-            target.unlink(missing_ok=True)
+        except OSError as error:
+            if error.errno == errno.EXDEV:
+                raise ArtifactValidationError(
+                    "staging and storage must be on the same filesystem"
+                ) from error
             raise
-
-        return StoredArtifact(storage_key, staged.sha256, staged.size_bytes)
+        else:
+            self._fsync_parent(target.parent)
+            self.discard(staged)
+            return StoredArtifact(storage_key, staged.sha256, staged.size_bytes)
 
     def discard(self, staged: StagedArtifact) -> None:
-        self._validated_staged_path(staged).unlink(missing_ok=True)
+        path = self._validated_staged_path(staged)
+        self._unlink_staged_file(path.name)
 
     def _validated_staged_path(self, staged: StagedArtifact) -> Path:
         path = Path(staged.path)
         if path.parent != self.staging_root:
             raise ArtifactValidationError("staged artifact is outside the staging directory")
+        self._validate_staging_root()
         if path.is_symlink() or not path.is_file():
             raise ArtifactValidationError("staged artifact is not a regular file")
         self._ensure_under_root(path)
@@ -128,8 +133,8 @@ class ReleaseStorage:
         current = self.root
         for part in relative.parts:
             current /= part
-            if current.exists():
-                if current.is_symlink() or not current.is_dir():
+            if current.exists() or current.is_symlink():
+                if self._is_reparse_point(current) or not current.is_dir():
                     raise ArtifactValidationError("storage path escapes configured root")
             else:
                 current.mkdir()
@@ -145,8 +150,124 @@ class ReleaseStorage:
 
     def _validate_existing_target(self, target: Path) -> None:
         self._ensure_under_root(target)
-        if target.is_symlink() or not target.is_file():
+        if self._is_reparse_point(target) or not target.is_file():
             raise ArtifactValidationError("storage integrity collision")
+
+    def _validate_staging_root(self) -> None:
+        try:
+            if self._is_reparse_point(self.staging_root) or not self.staging_root.is_dir():
+                raise ArtifactValidationError("staging directory is unsafe")
+            self._ensure_under_root(self.staging_root)
+        except OSError as error:
+            raise ArtifactValidationError("staging directory is unsafe") from error
+
+    def _open_new_staged_file(self, temp: Path):
+        if self._supports_directory_file_descriptors():
+            directory_descriptor = self._open_staging_directory()
+            try:
+                descriptor = os.open(
+                    temp.name,
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=directory_descriptor,
+                )
+            finally:
+                os.close(directory_descriptor)
+            return os.fdopen(descriptor, "w+b")
+
+        # Windows lacks dir_fd and O_NOFOLLOW in Python's os module. Revalidate
+        # every use and reject every reparse point instead of following it.
+        self._validate_staging_root()
+        descriptor = os.open(temp, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            self._validate_staging_root()
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return os.fdopen(descriptor, "w+b")
+
+    def _open_staging_directory(self) -> int:
+        self._validate_staging_root()
+        try:
+            return os.open(
+                self.staging_root,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
+        except OSError as error:
+            raise ArtifactValidationError("staging directory is unsafe") from error
+
+    def _link_staged_file(self, source: Path, target: Path) -> None:
+        if self._supports_directory_file_descriptors():
+            source_directory = self._open_staging_directory()
+            try:
+                target_directory = self._open_directory(target.parent)
+                try:
+                    os.link(
+                        source.name,
+                        target.name,
+                        src_dir_fd=source_directory,
+                        dst_dir_fd=target_directory,
+                        follow_symlinks=False,
+                    )
+                finally:
+                    os.close(target_directory)
+            finally:
+                os.close(source_directory)
+            return
+
+        self._validate_staging_root()
+        self._ensure_under_root(target.parent)
+        os.link(source, target)
+
+    def _open_directory(self, directory: Path) -> int:
+        self._ensure_under_root(directory)
+        if self._is_reparse_point(directory) or not directory.is_dir():
+            raise ArtifactValidationError("storage path escapes configured root")
+        try:
+            return os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as error:
+            raise ArtifactValidationError("storage path escapes configured root") from error
+
+    def _discard_temp_if_safe(self, temp: Path) -> None:
+        try:
+            if temp.parent == self.staging_root:
+                self._unlink_staged_file(temp.name)
+        except ArtifactValidationError:
+            # A replaced staging directory may no longer safely name this file.
+            # Leaving an unreachable partial file is safer than unlinking outside it.
+            return
+
+    def _unlink_staged_file(self, filename: str) -> None:
+        if self._supports_directory_file_descriptors():
+            directory_descriptor = self._open_staging_directory()
+            try:
+                os.unlink(filename, dir_fd=directory_descriptor)
+            except FileNotFoundError:
+                return
+            finally:
+                os.close(directory_descriptor)
+            return
+
+        self._validate_staging_root()
+        path = self.staging_root / filename
+        if self._is_reparse_point(path):
+            raise ArtifactValidationError("staged artifact is not a regular file")
+        path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _supports_directory_file_descriptors() -> bool:
+        return (
+            hasattr(os, "O_DIRECTORY")
+            and hasattr(os, "O_NOFOLLOW")
+            and os.link in os.supports_dir_fd
+        )
+
+    @staticmethod
+    def _is_reparse_point(path: Path) -> bool:
+        metadata = os.lstat(path)
+        attributes = getattr(metadata, "st_file_attributes", 0)
+        reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        return stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_attribute)
 
     def _verify_staged_contents(self, path: Path, staged: StagedArtifact) -> None:
         digest = hashlib.sha256()
