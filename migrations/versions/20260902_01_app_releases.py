@@ -107,7 +107,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("version_code > 0", name="ck_app_releases_version_code_positive"),
         sa.CheckConstraint(
-            "version_name ~ '^[0-9]+\\.[0-9]+\\.[0-9]+$'",
+            "version_name ~ '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$'",
             name="ck_app_releases_version_name",
         ),
         sa.CheckConstraint(
@@ -123,7 +123,8 @@ def upgrade() -> None:
             name="ck_app_releases_source_commit",
         ),
         sa.CheckConstraint(
-            "jsonb_typeof(release_notes) = 'object' "
+            "release_notes ? 'ru' AND release_notes ? 'en' "
+            "AND jsonb_typeof(release_notes) = 'object' "
             "AND jsonb_typeof(release_notes->'ru') = 'string' "
             "AND btrim(release_notes->>'ru') <> '' "
             "AND jsonb_typeof(release_notes->'en') = 'string' "

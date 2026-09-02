@@ -163,7 +163,9 @@ def test_release_domain_checks_match_the_persisted_contract():
             "delivery_method IN ('direct_apk', 'eas_update', 'google_play')"
         ),
         "ck_app_releases_version_code_positive": "version_code > 0",
-        "ck_app_releases_version_name": "version_name ~ '^[0-9]+\\.[0-9]+\\.[0-9]+$'",
+        "ck_app_releases_version_name": (
+            "version_name ~ '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$'"
+        ),
         "ck_app_releases_min_supported_version": (
             "min_supported_version_code IS NULL OR min_supported_version_code <= version_code"
         ),
@@ -172,7 +174,8 @@ def test_release_domain_checks_match_the_persisted_contract():
         ),
         "ck_app_releases_source_commit": "source_commit::text ~ '^[0-9a-f]{40}$'",
         "ck_app_releases_release_notes": (
-            "jsonb_typeof(release_notes) = 'object' "
+            "release_notes ? 'ru' AND release_notes ? 'en' "
+            "AND jsonb_typeof(release_notes) = 'object' "
             "AND jsonb_typeof(release_notes->'ru') = 'string' "
             "AND btrim(release_notes->>'ru') <> '' "
             "AND jsonb_typeof(release_notes->'en') = 'string' "
@@ -195,6 +198,19 @@ def test_release_domain_checks_match_the_persisted_contract():
             "(status = 'withdrawn' AND withdrawn_at IS NOT NULL AND withdrawal_reason IS NOT NULL)"
         ),
     }
+
+
+def test_release_notes_check_explicitly_rejects_missing_language_keys():
+    """Catches PostgreSQL CHECK-NULL acceptance when either required note key is absent."""
+    release_notes_check = next(
+        item
+        for item in AppRelease.__table__.constraints
+        if item.name == "ck_app_releases_release_notes"
+    )
+    sql = " ".join(str(release_notes_check.sqltext).split())
+
+    assert "release_notes ? 'ru'" in sql
+    assert "release_notes ? 'en'" in sql
 
 
 def test_release_indexes_use_the_expected_postgresql_expressions_and_predicates():
@@ -246,6 +262,14 @@ def test_release_migration_offline_sql_creates_and_removes_only_release_schema(m
         "ck_app_releases_release_notes",
     ):
         assert constraint_name in upgrade_sql
+    assert (
+        "CHECK (version_name ~ '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)"
+        "\\.(0|[1-9][0-9]*)$')"
+    ) in upgrade_sql
+    assert (
+        "CHECK (release_notes ? 'ru' AND release_notes ? 'en' "
+        "AND jsonb_typeof(release_notes) = 'object'"
+    ) in upgrade_sql
 
     command.downgrade(config, "20260902_01:20260830_02", sql=True)
     downgrade_sql = capsys.readouterr().out
