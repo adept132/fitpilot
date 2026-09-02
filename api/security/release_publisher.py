@@ -12,6 +12,7 @@ def require_release_publisher(
     scheme, separator, token = (authorization or "").partition(" ")
     expected = required_env("RELEASE_PUBLISHER_TOKEN")
     valid = separator == " " and scheme.lower() == "bearer"
+    valid = valid and token.isascii() and expected.isascii()
     valid = valid and secrets.compare_digest(token, expected)
     if not valid:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unauthorized")

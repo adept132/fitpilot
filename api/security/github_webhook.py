@@ -12,6 +12,7 @@ def verify_github_signature(body: bytes, signature: str | None) -> None:
     expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     algorithm, separator, digest = (signature or "").partition("=")
     valid = separator == "=" and algorithm == "sha256"
+    valid = valid and digest.isascii()
     valid = valid and secrets.compare_digest(digest, expected)
     if not valid:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unauthorized")
