@@ -134,6 +134,94 @@ def test_release_metadata_has_unique_delivery_and_latest_indexes():
     assert "ix_app_releases_latest_published" in index_names
 
 
+def test_release_domain_checks_match_the_persisted_contract():
+    """Catches rows with unsupported targets or malformed published-release data."""
+    lane_checks = {
+        item.name: " ".join(str(item.sqltext).split())
+        for item in AppReleaseLane.__table__.constraints
+        if getattr(item, "sqltext", None) is not None
+    }
+    release_checks = {
+        item.name: " ".join(str(item.sqltext).split())
+        for item in AppRelease.__table__.constraints
+        if getattr(item, "sqltext", None) is not None
+    }
+
+    assert lane_checks == {
+        "ck_app_release_lanes_platform": "platform = 'android'",
+        "ck_app_release_lanes_channel": (
+            "channel IN ('production-direct', 'production-play')"
+        ),
+        "ck_app_release_lanes_expected_source_commit": (
+            "expected_source_commit::text ~ '^[0-9a-f]{40}$'"
+        ),
+    }
+    assert release_checks == {
+        "ck_app_releases_platform": "platform = 'android'",
+        "ck_app_releases_channel": "channel IN ('production-direct', 'production-play')",
+        "ck_app_releases_delivery_method": (
+            "delivery_method IN ('direct_apk', 'eas_update', 'google_play')"
+        ),
+        "ck_app_releases_version_code_positive": "version_code > 0",
+        "ck_app_releases_version_name": "version_name ~ '^[0-9]+\\.[0-9]+\\.[0-9]+$'",
+        "ck_app_releases_min_supported_version": (
+            "min_supported_version_code IS NULL OR min_supported_version_code <= version_code"
+        ),
+        "ck_app_releases_artifact_sha256": (
+            "artifact_sha256 IS NULL OR artifact_sha256::text ~ '^[0-9a-f]{64}$'"
+        ),
+        "ck_app_releases_source_commit": "source_commit::text ~ '^[0-9a-f]{40}$'",
+        "ck_app_releases_release_notes": (
+            "jsonb_typeof(release_notes) = 'object' "
+            "AND jsonb_typeof(release_notes->'ru') = 'string' "
+            "AND btrim(release_notes->>'ru') <> '' "
+            "AND jsonb_typeof(release_notes->'en') = 'string' "
+            "AND btrim(release_notes->>'en') <> ''"
+        ),
+        "ck_app_releases_delivery_payload": (
+            "(delivery_method = 'direct_apk' AND artifact_storage_key IS NOT NULL "
+            "AND artifact_sha256 IS NOT NULL AND artifact_size_bytes > 0) OR "
+            "(delivery_method = 'eas_update' AND eas_update_group_id IS NOT NULL "
+            "AND runtime_version IS NOT NULL AND artifact_storage_key IS NULL) OR "
+            "(delivery_method = 'google_play' AND artifact_storage_key IS NULL)"
+        ),
+        "ck_app_releases_non_apk_artifact_fields": (
+            "delivery_method = 'direct_apk' OR "
+            "(artifact_sha256 IS NULL AND artifact_size_bytes IS NULL)"
+        ),
+        "ck_app_releases_status": "status IN ('published', 'withdrawn')",
+        "ck_app_releases_withdrawal_state": (
+            "(status = 'published' AND withdrawn_at IS NULL AND withdrawal_reason IS NULL) OR "
+            "(status = 'withdrawn' AND withdrawn_at IS NOT NULL AND withdrawal_reason IS NOT NULL)"
+        ),
+    }
+
+
+def test_release_indexes_use_the_expected_postgresql_expressions_and_predicates():
+    """Catches duplicate-release and latest-lookup index definitions that lose their predicates."""
+    indexes = {item.name: item for item in AppRelease.__table__.indexes}
+    direct = indexes["uq_app_releases_direct_version"]
+    latest = indexes["ix_app_releases_latest_published"]
+
+    assert direct.unique is True
+    assert [str(expression) for expression in direct.expressions] == [
+        "app_releases.platform",
+        "app_releases.channel",
+        "app_releases.version_code",
+    ]
+    assert str(direct.dialect_options["postgresql"]["where"]) == (
+        "delivery_method = 'direct_apk'"
+    )
+    assert latest.unique is False
+    assert [str(expression) for expression in latest.expressions] == [
+        "app_releases.platform",
+        "app_releases.channel",
+        "version_code DESC",
+        "published_at DESC",
+    ]
+    assert str(latest.dialect_options["postgresql"]["where"]) == "status = 'published'"
+
+
 def test_release_migration_offline_sql_creates_and_removes_only_release_schema(monkeypatch, capsys):
     """Catches a migration that cannot expand and contract the release schema by itself."""
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://test:test@localhost:5432/test")
@@ -147,10 +235,28 @@ def test_release_migration_offline_sql_creates_and_removes_only_release_schema(m
     assert "CREATE TABLE app_releases" in upgrade_sql
     assert "uq_app_releases_direct_version" in upgrade_sql
     assert "ix_app_releases_latest_published" in upgrade_sql
+    for constraint_name in (
+        "ck_app_release_lanes_platform",
+        "ck_app_release_lanes_channel",
+        "ck_app_release_lanes_expected_source_commit",
+        "ck_app_releases_channel",
+        "ck_app_releases_source_commit",
+        "ck_app_releases_artifact_sha256",
+        "ck_app_releases_version_name",
+        "ck_app_releases_release_notes",
+    ):
+        assert constraint_name in upgrade_sql
 
     command.downgrade(config, "20260902_01:20260830_02", sql=True)
     downgrade_sql = capsys.readouterr().out
-    assert "DROP INDEX ix_app_releases_latest_published" in downgrade_sql
-    assert "DROP INDEX uq_app_releases_direct_version" in downgrade_sql
-    assert "DROP TABLE app_releases" in downgrade_sql
-    assert "DROP TABLE app_release_lanes" in downgrade_sql
+    destructive_statements = [
+        " ".join(line.split())
+        for line in downgrade_sql.splitlines()
+        if line.lstrip().upper().startswith(("DROP ", "ALTER "))
+    ]
+    assert destructive_statements == [
+        "DROP INDEX ix_app_releases_latest_published;",
+        "DROP INDEX uq_app_releases_direct_version;",
+        "DROP TABLE app_releases;",
+        "DROP TABLE app_release_lanes;",
+    ]

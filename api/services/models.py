@@ -29,6 +29,18 @@ class AppReleaseLane(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
+    __table_args__ = (
+        CheckConstraint("platform = 'android'", name="ck_app_release_lanes_platform"),
+        CheckConstraint(
+            "channel IN ('production-direct', 'production-play')",
+            name="ck_app_release_lanes_channel",
+        ),
+        CheckConstraint(
+            "expected_source_commit::text ~ '^[0-9a-f]{40}$'",
+            name="ck_app_release_lanes_expected_source_commit",
+        ),
+    )
+
 
 class AppRelease(Base):
     """Immutable published-release metadata, including delivery-specific payloads."""
@@ -78,13 +90,37 @@ class AppRelease(Base):
         UniqueConstraint("eas_update_group_id", name="uq_app_releases_eas_update_group_id"),
         CheckConstraint("platform = 'android'", name="ck_app_releases_platform"),
         CheckConstraint(
+            "channel IN ('production-direct', 'production-play')",
+            name="ck_app_releases_channel",
+        ),
+        CheckConstraint(
             "delivery_method IN ('direct_apk', 'eas_update', 'google_play')",
             name="ck_app_releases_delivery_method",
         ),
         CheckConstraint("version_code > 0", name="ck_app_releases_version_code_positive"),
         CheckConstraint(
+            "version_name ~ '^[0-9]+\\.[0-9]+\\.[0-9]+$'",
+            name="ck_app_releases_version_name",
+        ),
+        CheckConstraint(
             "min_supported_version_code IS NULL OR min_supported_version_code <= version_code",
             name="ck_app_releases_min_supported_version",
+        ),
+        CheckConstraint(
+            "artifact_sha256 IS NULL OR artifact_sha256::text ~ '^[0-9a-f]{64}$'",
+            name="ck_app_releases_artifact_sha256",
+        ),
+        CheckConstraint(
+            "source_commit::text ~ '^[0-9a-f]{40}$'",
+            name="ck_app_releases_source_commit",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(release_notes) = 'object' "
+            "AND jsonb_typeof(release_notes->'ru') = 'string' "
+            "AND btrim(release_notes->>'ru') <> '' "
+            "AND jsonb_typeof(release_notes->'en') = 'string' "
+            "AND btrim(release_notes->>'en') <> ''",
+            name="ck_app_releases_release_notes",
         ),
         CheckConstraint(
             "(delivery_method = 'direct_apk' AND artifact_storage_key IS NOT NULL "
