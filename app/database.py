@@ -8,16 +8,12 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
+from app.config import required_env
 from api.services.models import Base
 
 load_dotenv()
 
-LOCAL_DATABASE_URL = "postgresql+asyncpg://postgres:fitpilotbd132@localhost:5432/fitpilot_bot"
-
-DATABASE_URL = os.getenv("DATABASE_URL") or ""
-# Пустой/чужой драйвер (например синхронный psycopg2-URL) -> локальная разработка.
-if "asyncpg" not in DATABASE_URL:
-    DATABASE_URL = LOCAL_DATABASE_URL
+DATABASE_URL = required_env("DATABASE_URL")
 
 _url = make_url(DATABASE_URL)
 _host = _url.host or ""
