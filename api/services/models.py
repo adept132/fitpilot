@@ -3,7 +3,7 @@ from datetime import datetime, UTC, date as date_type, time as time_type, date
 from typing import Optional, List, Dict, Any
 from sqlalchemy import (
     Column, Integer, String, ForeignKey, DateTime, Float, Boolean, Text,
-    func, Index, BigInteger, UniqueConstraint, Time, Date, CheckConstraint, Numeric, Enum, UUID
+    func, Index, BigInteger, UniqueConstraint, Time, Date, CheckConstraint, Numeric, Enum, UUID, CHAR, text
 )
 from sqlalchemy.dialects.postgresql import JSONB, ARRAY
 from sqlalchemy.orm import relationship, declarative_base, mapped_column, Mapped
@@ -14,6 +14,117 @@ from api.services.mesocycle_phase import MesocyclePhaseEnum
 from api.services.scheduling import SchedulingMode, WorkoutStatus, MesocyclePhase
 
 Base = declarative_base()
+
+
+class AppReleaseLane(Base):
+    """The CI target ledger for one platform and delivery channel."""
+
+    __tablename__ = "app_release_lanes"
+
+    platform: Mapped[str] = mapped_column(String(16), primary_key=True)
+    channel: Mapped[str] = mapped_column(String(32), primary_key=True)
+    expected_source_commit: Mapped[str] = mapped_column(CHAR(40), nullable=False)
+    expected_ci_run_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AppRelease(Base):
+    """Immutable published-release metadata, including delivery-specific payloads."""
+
+    __tablename__ = "app_releases"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    platform: Mapped[str] = mapped_column(String(16), nullable=False)
+    channel: Mapped[str] = mapped_column(String(32), nullable=False)
+    delivery_method: Mapped[str] = mapped_column(String(24), nullable=False)
+    version_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    version_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    runtime_version: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    fingerprint: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    release_notes: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="published", server_default="published"
+    )
+    is_mandatory: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    min_supported_version_code: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    artifact_storage_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    artifact_sha256: Mapped[Optional[str]] = mapped_column(CHAR(64), nullable=True)
+    artifact_size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    source_commit: Mapped[str] = mapped_column(CHAR(40), nullable=False)
+    ci_run_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    eas_build_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    eas_update_group_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    published_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    withdrawn_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    withdrawal_reason: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    mandatory_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    artifact_deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_app_releases_idempotency_key"),
+        UniqueConstraint("eas_update_group_id", name="uq_app_releases_eas_update_group_id"),
+        CheckConstraint("platform = 'android'", name="ck_app_releases_platform"),
+        CheckConstraint(
+            "delivery_method IN ('direct_apk', 'eas_update', 'google_play')",
+            name="ck_app_releases_delivery_method",
+        ),
+        CheckConstraint("version_code > 0", name="ck_app_releases_version_code_positive"),
+        CheckConstraint(
+            "min_supported_version_code IS NULL OR min_supported_version_code <= version_code",
+            name="ck_app_releases_min_supported_version",
+        ),
+        CheckConstraint(
+            "(delivery_method = 'direct_apk' AND artifact_storage_key IS NOT NULL "
+            "AND artifact_sha256 IS NOT NULL AND artifact_size_bytes > 0) OR "
+            "(delivery_method = 'eas_update' AND eas_update_group_id IS NOT NULL "
+            "AND runtime_version IS NOT NULL AND artifact_storage_key IS NULL) OR "
+            "(delivery_method = 'google_play' AND artifact_storage_key IS NULL)",
+            name="ck_app_releases_delivery_payload",
+        ),
+        CheckConstraint(
+            "delivery_method = 'direct_apk' OR "
+            "(artifact_sha256 IS NULL AND artifact_size_bytes IS NULL)",
+            name="ck_app_releases_non_apk_artifact_fields",
+        ),
+        CheckConstraint(
+            "status IN ('published', 'withdrawn')",
+            name="ck_app_releases_status",
+        ),
+        CheckConstraint(
+            "(status = 'published' AND withdrawn_at IS NULL AND withdrawal_reason IS NULL) OR "
+            "(status = 'withdrawn' AND withdrawn_at IS NOT NULL AND withdrawal_reason IS NOT NULL)",
+            name="ck_app_releases_withdrawal_state",
+        ),
+        Index(
+            "uq_app_releases_direct_version",
+            "platform",
+            "channel",
+            "version_code",
+            unique=True,
+            postgresql_where=text("delivery_method = 'direct_apk'"),
+        ),
+        Index(
+            "ix_app_releases_latest_published",
+            "platform",
+            "channel",
+            text("version_code DESC"),
+            text("published_at DESC"),
+            postgresql_where=text("status = 'published'"),
+        ),
+    )
 
 
 # --- ЯДРО ПОЛЬЗОВАТЕЛЕЙ ---
