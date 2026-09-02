@@ -16,6 +16,13 @@ from ctypes import wintypes
 from fastapi import UploadFile
 
 
+_SUPPORTS_DIRECTORY_FILE_DESCRIPTORS = (
+    hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and os.link in os.supports_dir_fd
+)
+
+
 class ArtifactValidationError(ValueError):
     """Raised when an uploaded artifact cannot be safely stored."""
 
@@ -143,8 +150,8 @@ class ReleaseStorage:
         digest = hashlib.sha256()
         size = 0
 
-        try:
-            with self._directory_guard(self.staging_root):
+        with self._directory_guard(self.staging_root):
+            try:
                 with self._open_new_staged_file(temp) as output:
                     while chunk := await upload.read(self._CHUNK_BYTES):
                         size += len(chunk)
@@ -167,9 +174,9 @@ class ReleaseStorage:
                 self._validate_staging_root()
 
                 return StagedArtifact(temp, digest.hexdigest(), size)
-        except BaseException:
-            self._discard_temp_if_safe(temp)
-            raise
+            except BaseException:
+                self._discard_temp_if_safe(temp)
+                raise
 
     def finalize(self, staged: StagedArtifact) -> StoredArtifact:
         source = self._validated_staged_path(staged)
@@ -350,11 +357,7 @@ class ReleaseStorage:
 
     @staticmethod
     def _supports_directory_file_descriptors() -> bool:
-        return (
-            hasattr(os, "O_DIRECTORY")
-            and hasattr(os, "O_NOFOLLOW")
-            and os.link in os.supports_dir_fd
-        )
+        return _SUPPORTS_DIRECTORY_FILE_DESCRIPTORS
 
     @staticmethod
     def _is_reparse_point(path: Path) -> bool:

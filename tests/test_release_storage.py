@@ -182,6 +182,7 @@ async def test_concurrent_identical_finalizations_converge_without_a_collision(
     release_publication = Event()
     replace_started = Event()
     link_started = Event()
+    link_kwargs: list[dict[str, object]] = []
     native_replace = release_storage.os.replace
     native_link = release_storage.os.link
 
@@ -192,6 +193,7 @@ async def test_concurrent_identical_finalizations_converge_without_a_collision(
 
     def delayed_link(source: Path, destination: Path, *args, **kwargs) -> None:
         link_started.set()
+        link_kwargs.append(kwargs)
         assert release_publication.wait(timeout=2)
         native_link(source, destination, *args, **kwargs)
 
@@ -208,6 +210,11 @@ async def test_concurrent_identical_finalizations_converge_without_a_collision(
 
     assert first_stored == second_stored
     assert link_started.is_set()
+    if release_storage._SUPPORTS_DIRECTORY_FILE_DESCRIPTORS:
+        assert any(
+            {"src_dir_fd", "dst_dir_fd", "follow_symlinks"} <= kwargs.keys()
+            for kwargs in link_kwargs
+        )
     assert (tmp_path / first_stored.storage_key).read_bytes() == payload
     assert not first_staged.path.exists()
     assert not second_staged.path.exists()
@@ -259,6 +266,85 @@ async def test_stage_fails_closed_when_windows_directory_guard_rejects_staging(
         await storage.stage(upload_file(payload), hashlib.sha256(payload).hexdigest())
 
     assert list(storage.staging_root.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_stage_cleans_up_before_releasing_windows_directory_guard(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state = {"active": False}
+    events: list[str] = []
+    native_unlink = release_storage.os.unlink
+
+    class TrackingGuard:
+        def __init__(self, directory: Path) -> None:
+            self.directory = directory
+
+        def __enter__(self) -> None:
+            state["active"] = True
+            events.append("enter")
+
+        def __exit__(self, *args: object) -> None:
+            events.append("exit")
+            state["active"] = False
+
+    def unlink_while_guarded(path: str | Path, *args, **kwargs) -> None:
+        assert state["active"], "staging cleanup ran after releasing its guard"
+        events.append("unlink")
+        native_unlink(path, *args, **kwargs)
+
+    storage = ReleaseStorage(tmp_path, max_bytes=1024)
+    payload = apk()
+    monkeypatch.setattr(release_storage.sys, "platform", "win32")
+    monkeypatch.setattr(release_storage, "_WindowsDirectoryGuard", TrackingGuard)
+    monkeypatch.setattr(release_storage.os, "unlink", unlink_while_guarded)
+
+    with pytest.raises(ArtifactValidationError, match="sha256"):
+        await storage.stage(upload_file(payload), "0" * 64)
+
+    assert events == ["enter", "unlink", "exit"]
+    assert list(storage.staging_root.iterdir()) == []
+
+
+def test_windows_directory_guard_rejects_reparse_attribute_and_closes_handle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class FakeFunction:
+        def __init__(self, implementation):
+            self.implementation = implementation
+
+        def __call__(self, *args):
+            return self.implementation(*args)
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.closed_handles: list[int] = []
+            self.CreateFileW = FakeFunction(lambda *args: 41)
+            self.GetFileInformationByHandleEx = FakeFunction(self._get_information)
+            self.CloseHandle = FakeFunction(self._close_handle)
+
+        def _get_information(self, handle, info_class, output, length) -> bool:
+            info = release_storage.ctypes.cast(
+                output,
+                release_storage.ctypes.POINTER(
+                    release_storage._WindowsDirectoryGuard._AttributeTagInfo
+                ),
+            ).contents
+            info.file_attributes = 0x0400
+            return True
+
+        def _close_handle(self, handle: int) -> bool:
+            self.closed_handles.append(handle)
+            return True
+
+    kernel32 = FakeKernel32()
+    monkeypatch.setattr(release_storage.ctypes, "WinDLL", lambda *args, **kwargs: kernel32)
+
+    with pytest.raises(ArtifactValidationError, match="reparse"):
+        with release_storage._WindowsDirectoryGuard(tmp_path):
+            pass
+
+    assert kernel32.closed_handles == [41]
 
 
 @pytest.mark.asyncio
