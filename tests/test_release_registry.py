@@ -7,11 +7,13 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql.elements import BinaryExpression, BooleanClauseList, TextClause, UnaryExpression
 
 from api.services.models import AppRelease, AppReleaseLane
 from api.services.release_registry import (
     ReleaseConflictError,
+    IdempotencyConflictError,
     StaleReleaseError,
     VersionConflictError,
     VersionRegressionError,
@@ -79,6 +81,10 @@ class RegistrySession:
         finally:
             self._in_transaction = False
 
+    @asynccontextmanager
+    async def begin_nested(self):
+        yield self
+
     def add(self, row: object) -> None:
         self._pending.append(row)
 
@@ -138,6 +144,26 @@ class RegistrySession:
         return ordered
 
 
+class RacingRegistrySession(RegistrySession):
+    """Injects a concurrently committed unique row at the persistence boundary."""
+
+    def arm_unique_race(self, release: AppRelease) -> None:
+        self._racing_release = release
+
+    async def flush(self) -> None:
+        release = getattr(self, "_racing_release", None)
+        if release is not None:
+            self._racing_release = None
+            self._pending.clear()
+            if release.id is None:
+                release.id = uuid4()
+            if release.published_at is None:
+                release.published_at = self._tick()
+            self.releases.append(release)
+            raise IntegrityError("INSERT app_releases", {}, RuntimeError("unique violation"))
+        await super().flush()
+
+
 def command(**overrides: object) -> SimpleNamespace:
     values: dict[str, object] = {
         "platform": "android",
@@ -180,6 +206,58 @@ def latest(**overrides: object) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
+def direct_row(value: SimpleNamespace, artifact: SimpleNamespace) -> AppRelease:
+    return AppRelease(
+        id=uuid4(),
+        platform=value.platform,
+        channel=value.channel,
+        delivery_method="direct_apk",
+        version_code=value.version_code,
+        version_name=value.version_name,
+        runtime_version=value.runtime_version,
+        fingerprint=value.fingerprint,
+        release_notes=value.release_notes,
+        status="published",
+        is_mandatory=False,
+        min_supported_version_code=value.min_supported_version_code,
+        artifact_storage_key=artifact.storage_key,
+        artifact_sha256=artifact.sha256,
+        artifact_size_bytes=artifact.size_bytes,
+        source_commit=value.source_commit,
+        ci_run_id=value.ci_run_id,
+        idempotency_key=value.idempotency_key,
+        eas_build_id=value.eas_build_id,
+        eas_update_group_id=None,
+        published_at=datetime(2026, 9, 2, tzinfo=UTC),
+    )
+
+
+def eas_row(value: SimpleNamespace) -> AppRelease:
+    return AppRelease(
+        id=uuid4(),
+        platform=value.platform,
+        channel=value.channel,
+        delivery_method="eas_update",
+        version_code=value.version_code,
+        version_name=value.version_name,
+        runtime_version=value.runtime_version,
+        fingerprint=value.fingerprint,
+        release_notes=value.release_notes,
+        status="published",
+        is_mandatory=False,
+        min_supported_version_code=value.min_supported_version_code,
+        artifact_storage_key=None,
+        artifact_sha256=None,
+        artifact_size_bytes=None,
+        source_commit=value.source_commit,
+        ci_run_id=value.ci_run_id,
+        idempotency_key=value.idempotency_key,
+        eas_build_id=value.eas_build_id,
+        eas_update_group_id=value.eas_update_group_id,
+        published_at=datetime(2026, 9, 2, tzinfo=UTC),
+    )
+
+
 async def publish_direct(session: RegistrySession, **overrides: object):
     await set_expected_commit(session, "android", "production-direct", "a" * 40, "target")
     return await publish_direct_release(session, command(**overrides), stored())
@@ -201,6 +279,121 @@ async def test_idempotent_retry_returns_existing_release() -> None:
     assert second.release.id == first.release.id
     assert second.created is False
     assert len(session.releases) == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "changed"),
+    [
+        ("version_name", "2.0.0"),
+        ("runtime_version", "runtime-other"),
+        ("fingerprint", "fingerprint-other"),
+        ("release_notes", {"ru": "Другое", "en": "Different"}),
+        ("min_supported_version_code", 2),
+        ("ci_run_id", "other-run"),
+        ("eas_build_id", "other-build"),
+    ],
+)
+async def test_direct_idempotency_key_rejects_every_changed_immutable_command_field(
+    field: str, changed: object
+) -> None:
+    session = RegistrySession()
+    await publish_direct(session, idempotency_key="same")
+
+    with pytest.raises(IdempotencyConflictError):
+        await publish_direct_release(session, command(idempotency_key="same", **{field: changed}), stored())
+
+
+@pytest.mark.parametrize(
+    ("field", "changed"),
+    [
+        ("storage_key", "android/sha256/other.apk"),
+        ("sha256", "2" * 64),
+        ("size_bytes", 999),
+    ],
+)
+async def test_direct_idempotency_key_rejects_every_changed_artifact_field(
+    field: str, changed: object
+) -> None:
+    session = RegistrySession()
+    await publish_direct(session, idempotency_key="same")
+
+    with pytest.raises(IdempotencyConflictError):
+        await publish_direct_release(session, command(idempotency_key="same"), stored(**{field: changed}))
+
+
+async def test_eas_idempotency_key_rejects_a_different_runtime() -> None:
+    session = RegistrySession()
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "target")
+    original = command(
+        version_code=1,
+        version_name="1.0.0",
+        runtime_version="runtime-1",
+        eas_update_group_id="group-1",
+        idempotency_key="ota-same",
+    )
+    await publish_eas_release(session, original)
+
+    with pytest.raises(IdempotencyConflictError):
+        await publish_eas_release(session, command(
+            version_code=1,
+            version_name="1.0.0",
+            runtime_version="runtime-other",
+            eas_update_group_id="group-1",
+            idempotency_key="ota-same",
+        ))
+
+
+async def test_unique_idempotency_race_returns_the_complete_matching_release() -> None:
+    session = RacingRegistrySession()
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "target")
+    value = command(idempotency_key="racing")
+    artifact = stored()
+    remote = direct_row(value, artifact)
+    session.arm_unique_race(remote)
+
+    result = await publish_direct_release(session, value, artifact)
+
+    assert result.release.id == remote.id
+    assert result.created is False
+
+
+async def test_cross_lane_idempotency_unique_race_is_a_registry_conflict() -> None:
+    session = RacingRegistrySession()
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "direct")
+    await set_expected_commit(session, "android", "production-play", "a" * 40, "play")
+    remote = direct_row(command(idempotency_key="shared"), stored())
+    session.arm_unique_race(remote)
+
+    with pytest.raises(IdempotencyConflictError):
+        await publish_direct_release(
+            session,
+            command(channel="production-play", idempotency_key="shared"),
+            stored(),
+        )
+
+
+async def test_cross_lane_eas_group_unique_race_is_a_registry_conflict() -> None:
+    session = RacingRegistrySession()
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "direct")
+    await set_expected_commit(session, "android", "production-play", "a" * 40, "play")
+    remote = eas_row(command(
+        version_code=1,
+        version_name="1.0.0",
+        runtime_version="runtime-1",
+        eas_update_group_id="shared-group",
+        idempotency_key="direct-group",
+    ))
+    session.arm_unique_race(remote)
+
+    with pytest.raises(ReleaseConflictError):
+        await publish_eas_release(session, command(
+            channel="production-play",
+            version_code=1,
+            version_name="1.0.0",
+            runtime_version="runtime-1",
+            eas_update_group_id="shared-group",
+            idempotency_key="play-group",
+        ))
 
 
 async def test_lane_lock_is_stable_signed_int64_and_isolated_by_channel() -> None:
@@ -256,6 +449,19 @@ async def test_withdrawn_release_is_excluded_from_latest() -> None:
 
     assert result.release is None
     assert result.update_available is False
+
+
+async def test_repeated_withdrawal_preserves_the_original_reason_and_time() -> None:
+    session = RegistrySession()
+    published = await publish_direct(session)
+    first = await withdraw_release(session, published.release.id, "broken startup")
+    first_reason = first.withdrawal_reason
+    first_time = first.withdrawn_at
+
+    second = await withdraw_release(session, published.release.id, "different later reason")
+
+    assert second.withdrawal_reason == first_reason
+    assert second.withdrawn_at == first_time
 
 
 async def test_newer_direct_binary_has_priority_over_runtime_compatible_ota() -> None:
@@ -314,6 +520,22 @@ async def test_direct_binary_is_not_offered_when_current_version_is_equal_or_new
 async def test_automatic_publication_never_sets_mandatory() -> None:
     session = RegistrySession()
     published = await publish_direct(session)
+
+    assert published.release.is_mandatory is False
+
+
+async def test_automatic_eas_publication_never_sets_mandatory() -> None:
+    session = RegistrySession()
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "target")
+
+    published = await publish_eas_release(session, command(
+        version_code=1,
+        version_name="1.0.0",
+        runtime_version="runtime-1",
+        eas_update_group_id="group-1",
+        idempotency_key="ota-1",
+        is_mandatory=True,
+    ))
 
     assert published.release.is_mandatory is False
 

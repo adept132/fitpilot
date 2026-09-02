@@ -10,6 +10,7 @@ from typing import Any, AsyncIterator
 from uuid import UUID
 
 from sqlalchemy import and_, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.services.models import AppRelease, AppReleaseLane
@@ -148,8 +149,19 @@ def _matches_existing_direct(release: AppRelease, command: Any, stored: Any) -> 
         and release.channel == _command_value(command, "channel")
         and release.delivery_method == "direct_apk"
         and release.version_code == _command_value(command, "version_code")
+        and release.version_name == _command_value(command, "version_name")
+        and release.runtime_version == _command_value(command, "runtime_version")
+        and release.fingerprint == _command_value(command, "fingerprint")
+        and release.release_notes == _command_value(command, "release_notes")
+        and release.min_supported_version_code
+        == _command_value(command, "min_supported_version_code")
         and release.source_commit == _command_value(command, "source_commit")
+        and release.ci_run_id == _command_value(command, "ci_run_id")
+        and release.eas_build_id == _command_value(command, "eas_build_id")
+        and release.eas_update_group_id is None
+        and release.artifact_storage_key == _stored_value(stored, "storage_key")
         and release.artifact_sha256 == _stored_value(stored, "sha256")
+        and release.artifact_size_bytes == _stored_value(stored, "size_bytes")
     )
 
 
@@ -159,9 +171,55 @@ def _matches_existing_eas(release: AppRelease, command: Any) -> bool:
         and release.channel == _command_value(command, "channel")
         and release.delivery_method == "eas_update"
         and release.version_code == _command_value(command, "version_code")
+        and release.version_name == _command_value(command, "version_name")
+        and release.runtime_version == _command_value(command, "runtime_version")
+        and release.fingerprint == _command_value(command, "fingerprint")
+        and release.release_notes == _command_value(command, "release_notes")
+        and release.min_supported_version_code
+        == _command_value(command, "min_supported_version_code")
         and release.source_commit == _command_value(command, "source_commit")
+        and release.ci_run_id == _command_value(command, "ci_run_id")
+        and release.eas_build_id == _command_value(command, "eas_build_id")
         and release.eas_update_group_id == _command_value(command, "eas_update_group_id")
     )
+
+
+async def _persist_new_release(
+    session: AsyncSession,
+    release: AppRelease,
+    command: Any,
+    matches_existing: Any,
+    *,
+    eas_update_group_id: str | None = None,
+) -> PublishResult:
+    """Flush under a savepoint and turn cross-lane unique races into policy results."""
+
+    try:
+        async with session.begin_nested():
+            session.add(release)
+            await session.flush()
+    except IntegrityError as error:
+        existing = await _release_by_idempotency(
+            session, _command_value(command, "idempotency_key")
+        )
+        if existing is not None:
+            if matches_existing(existing, command):
+                return PublishResult(existing, created=False)
+            raise IdempotencyConflictError(
+                "idempotency key belongs to a different release"
+            ) from error
+        if eas_update_group_id is not None:
+            matching_group = (
+                await session.execute(
+                    select(AppRelease).where(
+                        AppRelease.eas_update_group_id == eas_update_group_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if matching_group is not None:
+                raise ReleaseConflictError("EAS update group is already published") from error
+        raise ReleaseConflictError("release conflicts with an existing registry record") from error
+    return PublishResult(release, created=True)
 
 
 async def set_expected_commit(
@@ -248,9 +306,12 @@ async def publish_direct_release(
             eas_build_id=_command_value(command, "eas_build_id"),
             eas_update_group_id=None,
         )
-        session.add(release)
-        await session.flush()
-        return PublishResult(release, created=True)
+        return await _persist_new_release(
+            session,
+            release,
+            command,
+            lambda existing, candidate: _matches_existing_direct(existing, candidate, stored),
+        )
 
 
 async def publish_eas_release(session: AsyncSession, command: Any) -> PublishResult:
@@ -306,9 +367,13 @@ async def publish_eas_release(session: AsyncSession, command: Any) -> PublishRes
             eas_build_id=_command_value(command, "eas_build_id"),
             eas_update_group_id=update_group,
         )
-        session.add(release)
-        await session.flush()
-        return PublishResult(release, created=True)
+        return await _persist_new_release(
+            session,
+            release,
+            command,
+            _matches_existing_eas,
+            eas_update_group_id=update_group,
+        )
 
 
 async def _published_direct(
