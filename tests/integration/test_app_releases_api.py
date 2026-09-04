@@ -257,8 +257,9 @@ async def test_concurrent_github_pushes_serialize_before_reading_release_targets
     commit_b = _commit("concurrent-delivery-b")
     first_lane_read = asyncio.Event()
     release_a = asyncio.Event()
-    b_started = asyncio.Event()
+    b_waiting_on_lock = asyncio.Event()
     original_lane = release_registry._lane
+    original_lock_lane = release_registry._lock_lane
 
     async def pause_a_after_locks(session, platform, channel):
         if getattr(session, "_pause_github_target_read", False) and not first_lane_read.is_set():
@@ -268,6 +269,13 @@ async def test_concurrent_github_pushes_serialize_before_reading_release_targets
 
     monkeypatch.setattr(release_registry, "_lane", pause_a_after_locks)
 
+    async def signal_b_at_advisory_lock(session, platform, channel):
+        if getattr(session, "_signal_github_lock", False) and not b_waiting_on_lock.is_set():
+            b_waiting_on_lock.set()
+        await original_lock_lane(session, platform, channel)
+
+    monkeypatch.setattr(release_registry, "_lock_lane", signal_b_at_advisory_lock)
+
     async def apply_a():
         async with SessionLocal() as session:
             session._pause_github_target_read = True
@@ -276,8 +284,8 @@ async def test_concurrent_github_pushes_serialize_before_reading_release_targets
             )
 
     async def apply_b():
-        b_started.set()
         async with SessionLocal() as session:
+            session._signal_github_lock = True
             return await advance_github_mobile_push_targets(
                 session, before=commit_a, source_commit=commit_b
             )
@@ -285,8 +293,7 @@ async def test_concurrent_github_pushes_serialize_before_reading_release_targets
     a_task = asyncio.create_task(apply_a())
     await first_lane_read.wait()
     b_task = asyncio.create_task(apply_b())
-    await b_started.wait()
-    await asyncio.sleep(0)
+    await b_waiting_on_lock.wait()
     assert not b_task.done()
 
     release_a.set()
