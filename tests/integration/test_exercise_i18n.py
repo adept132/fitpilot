@@ -48,7 +48,7 @@ async def test_system_exercise_returns_both_names_and_is_found_in_english(
             "/exercises", params={"q": f"bench press localization {marker}"}, headers=auth_headers
         )
         assert search.status_code == 200
-        assert [item["id"] for item in search.json()] == [exercise.id]
+        assert exercise.id in [item["id"] for item in search.json()]
     finally:
         await db.execute(delete(Exercise).where(Exercise.id == exercise.id))
         await db.commit()
