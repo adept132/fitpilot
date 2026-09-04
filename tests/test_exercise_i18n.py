@@ -420,8 +420,8 @@ def test_reviewed_translation_catalog_covers_every_known_system_id():
         ROOT / "api" / "data" / "exercise_localizations_en.json"
     )
 
-    assert set(catalog) == set(range(76, 174))
-    assert len(catalog) == 98
+    assert set(catalog) == set(range(76, 270))
+    assert len(catalog) == 194
     assert all(item.name.strip() and "_" not in item.name for item in catalog.values())
     assert all(item.description.strip() for item in catalog.values())
 
