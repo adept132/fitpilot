@@ -260,3 +260,26 @@ Sanitized device captures (no credentials or user content) are retained outside 
 ### Final local state
 
 The emulator network was restored and verified enabled after the attempted offline path (`airplane_mode_on=0`, Wi-Fi enabled). Existing processes on ports 8000 and 8081 were left untouched. The isolated 8002 API and 8082 Metro sessions are to be stopped after this record is committed. A new development build containing `expo-localization` and the current native MMKV dependencies is required before device UI/offline checks can move from BLOCKED to PASS.
+
+---
+
+## Task 6 recovery: fresh native development build
+
+Date: 2026-09-04
+Mobile SHA: `70c448cedbfe14ed6024a6cf9e02ee5a5f9494c1`
+Device: Android 13 / API 33, emulator `emulator-5554`
+
+### Build and safe install evidence
+
+- The previously installed APK and its retained build output were byte-identical (`746A95C84048E27AF6D20A4E737424E3A6F9E8965CAAB71CD521D6179BAD4FD1`) and stale: its timestamp preceded the checked-out mobile revision.
+- Prior recovery attempts failed only in generated/build infrastructure: disk exhaustion, followed by the Windows x86_64 CMake/ninja `Filename longer than 260 characters` failure under a long temporary Gradle cache path. No product source was changed.
+- Only generated Gradle/CMake output was cleared. The bounded recovery build used Android Studio JBR Java 21, the local Android SDK, short cache `C:\\g`, and `:app:assembleDebug -PreactNativeArchitectures=x86_64 --no-daemon --max-workers=2`. It exited `0`: `BUILD SUCCESSFUL in 10m 5s`.
+- Fresh APK SHA-256: `49F57ACDB10F2279DBAF78C1EF613E37E82013AAB7CC8937E210FD59CC7C98D5`; package `com.adept.tracker`; ABI `x86_64`; it contains `libNitroMmkv.so`, `libNitroModules.so`, and `libmmkv.so`.
+- The fresh and installed APKs both use the same Android debug signing-certificate SHA-256 `fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c`. `adb install -r` succeeded, and the original `firstInstallTime` remained unchanged.
+
+### Isolated-service and UI boundary
+
+- The isolated backend on `8002` reported `/health` as `status=ok`, `database=connected` while using only `fitpilot_localization_primary_20260904_066c4a9a`; Metro `8082` returned HTTP `200` and was reached through the emulator's `adb reverse` route.
+- The first `10.0.2.2:8082` dev-client route timed out. The existing `127.0.0.1:8082` reverse route then loaded the newly built app into `MainActivity`; the former `Cannot find native module 'ExpoLocalization'` error did not recur.
+- Device localization/content and offline-relaunch assertions remain **BLOCKED**, not passed. The emulator contained a pre-existing authenticated personal session. Per the smoke constraint, it was not used as evidence and a new disposable account was not created before the bounded UI window ended. No custom-content, catalogue, workout-picker, or offline assertions were inferred from it.
+- Networking was restored (`airplane_mode_on=0`, Wi-Fi enabled). Only the isolated `8002` backend and `8082` Metro process trees were stopped. Port `8000` was still listening; no existing service was intentionally stopped.
