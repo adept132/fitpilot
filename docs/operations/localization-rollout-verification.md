@@ -60,7 +60,7 @@ python -m alembic heads
 python -m alembic history
 ```
 
-Results: both exited `0`. There is exactly one head: `20260902_01`. Its ancestry includes `20260830_02` (`20260830_01 -> 20260830_02`), which adds nullable English exercise catalog fields.
+Results: both exited `0`. There is exactly one head: `20260830_02`. It descends directly from `20260830_01` (`20260830_01 -> 20260830_02`), which adds nullable English exercise catalog fields.
 
 ## Reviewed catalog evidence
 
