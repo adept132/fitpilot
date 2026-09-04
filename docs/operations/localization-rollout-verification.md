@@ -87,6 +87,51 @@ The static checks, focused units, migration graph, and catalog validation pass. 
 
 ---
 
+## Task 5: disposable-copy migration and backfill verification
+
+Date: 2026-09-04
+Worktree: `codex/localization-rollout`
+Task base: `cfef388c24ca74fed9108c43e57f7ca9c4b2fea1`
+
+### Safety boundary and artifacts
+
+- The local source database was contacted only for a read-only reachability check and `pg_dump`. Its sanitized endpoint was `localhost:5432/fitpilot`; no migration, test, backfill, DDL, or data write was run on it.
+- Private untracked artifact directory: `C:\\Users\\Admin\\AppData\\Local\\Temp\\fitpilot-localization-rollout-20260904-da7e013b`.
+- Source custom-format dump: `source-fitpilot.dump`; size `279467` bytes; SHA-256 `373cc0d9cae4072b1dbe7376d7ff85a1b453b2c860b637bfeb001e0ba52a4541`.
+- Both generated target names were confirmed absent (`0`) before creation, restored successfully, and are intentionally left in place for diagnosis: `fitpilot_localization_primary_20260904_066c4a9a` and `fitpilot_localization_cycle_20260904_42b6236b`.
+
+### Primary-copy evidence
+
+The restored primary started at Alembic revision `20260822_02`, with no English exercise columns. Its custom-content checksum before the migration was `255b5b27aa62d50d43db31eef6a049c5`.
+
+With `DATABASE_URL` and `TEST_DATABASE_URL` explicitly set only in-process to the primary disposable copy:
+
+| Operation | Exit | Sanitized result |
+| --- | ---: | --- |
+| `alembic upgrade head` | 0 | Reached `20260830_02`; English columns added. |
+| Backfill `--check` before apply | 1 | Fail-closed catalog mismatch. |
+| Backfill `--apply` | 1 | No update applied; fail-closed catalog mismatch. |
+| Backfill `--check` after apply attempt | 1 | Same fail-closed catalog mismatch. |
+| Post-operation invariant query | 0 | See counts below. |
+
+Post-operation values (no user text was queried or recorded):
+
+| Invariant | Result |
+| --- | ---: |
+| System exercises | 194 |
+| Catalog-range system IDs `76..173` | 98 |
+| System exercises outside reviewed catalog range | 96 |
+| System rows missing an English name or description | 194 |
+| Custom-content checksum after the failed apply | `255b5b27aa62d50d43db31eef6a049c5` |
+
+### Blocking outcome
+
+Task 5 is **blocked, not passed**. The reviewed JSON catalog contains exactly 98 IDs (`76..173`), while the restored source data has an additional 96 default/system exercises (`174..269`) without reviewed English catalog entries. The backfill correctly refused to write any row: `updates=0` and exit `1` on both check and apply.
+
+Under the rollout constraint that every system exercise needs a reviewed English entry, no integration test or downgrade/upgrade cycle was run: proceeding would not make the copy valid and could be mistaken for a completed migration. The untouched second copy and dump are retained to repeat this task after the catalog is extended (or the data set is otherwise reconciled through a separately reviewed change). Production rollout remains blocked.
+
+---
+
 ## Task 4: localization-only rollout branch verification
 
 Date: 2026-09-04
