@@ -517,11 +517,11 @@
   },
   "205": {
     "name": "Cuban Press",
-    "description": "Starting position: stand with light dumbbells or a bar held in front of the thighs. Movement: row to chest height, externally rotate so the forearms are vertical, then press overhead. Return: reverse each phase slowly and use only a light, pain-free load."
+    "description": "Starting position: hold only light dumbbells in the scarecrow position, with the upper arms parallel to the floor and the forearms hanging down. Movement: externally rotate until the forearms are vertical, then press the dumbbells overhead. Return: reverse the press and rotation slowly with a light, pain-free load."
   },
   "206": {
     "name": "Alternating Dumbbell Curl",
-    "description": "Starting position: stand with a dumbbell in each hand and the elbows close to the torso. Movement: curl one dumbbell toward the shoulder while keeping the upper arm still. Return: lower it slowly and alternate arms."
+    "description": "Starting position: stand with a dumbbell in each hand and the elbows close to the torso. Movement: curl one dumbbell toward the shoulder while supinating so the palm faces forward and up, keeping the upper arm still. Return: lower it slowly while rotating the palm back toward the thigh, then alternate arms."
   },
   "207": {
     "name": "Neutral-Grip Dumbbell Bench Press",
@@ -613,7 +613,7 @@
   },
   "229": {
     "name": "Incline Cable Pullover",
-    "description": "Starting position: lie on an incline bench facing away from a high cable and hold a straight handle above the head with straight arms. Movement: pull the handle in an arc toward the thighs while keeping the shoulders controlled. Return: let the arms travel back overhead slowly into the lat stretch."
+    "description": "Starting position: lie on an incline bench facing away from a high cable, holding a straight handle near the thighs with straight arms. Movement: raise the handle in an arc overhead under control while keeping the shoulders stable. Return: use the lats to bring the handle back toward the thighs and pause in the contracted position."
   },
   "230": {
     "name": "Cable Shoulder Internal Rotation",
@@ -665,7 +665,7 @@
   },
   "242": {
     "name": "Dumbbell Scaption Raise",
-    "description": "Starting position: stand with light dumbbells at the sides and palms facing the thighs. Movement: raise the arms in the scapular plane, about 30 degrees forward of the sides, to shoulder height. Return: lower slowly; keep the load light and use a pain-free range."
+    "description": "Starting position: stand with light dumbbells at the sides in a neutral, thumbs-up grip. Movement: raise the arms in the scapular plane, about 30 degrees forward of the sides, to shoulder height while keeping the thumbs up. Return: lower slowly in the same neutral grip; keep the load light and use a pain-free range."
   },
   "243": {
     "name": "Dumbbell Step-Up",
@@ -717,11 +717,11 @@
   },
   "255": {
     "name": "Barbell Clean and Jerk",
-    "description": "Starting position: stand close to the bar with a neutral back, chest lifted, hips down, and a secure overhand or hook grip. Movement: pull from the floor, explosively extend, receive the bar on the front shoulders, then dip and drive it overhead into a split stance. Return: regain balance before lowering the bar under control."
+    "description": "Starting position: stand close to the bar with a neutral back, chest lifted, hips down, and a secure overhand or hook grip. Movement: pull from the floor, explosively extend, then drop under into a deep front squat, turning the elbows through to receive the bar in the front rack; stand fully before the jerk. Dip and drive, receive the bar locked out overhead in a split stance, then recover to a stable standing position before lowering under control."
   },
   "256": {
     "name": "Barbell Clean and Press",
-    "description": "Starting position: stand with the bar close to the shins, feet shoulder-width apart, back neutral, and shoulders slightly ahead of the bar. Movement: clean the bar to the front shoulders with an explosive pull and controlled catch, then press it overhead. Return: lower it to the chest and then the floor under control."
+    "description": "Starting position: stand with the bar close to the shins, feet shoulder-width apart, back neutral, and shoulders slightly ahead of the bar. Movement: pull explosively, drop under into a squat clean, turn the elbows through to the front rack, and absorb the catch through the knees and hips; stand fully before pressing overhead. Return: lower the bar to the chest and then to the floor under control."
   },
   "257": {
     "name": "Cross-Body Crunch",
