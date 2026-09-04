@@ -249,6 +249,60 @@ async def set_expected_commit(
         return lane
 
 
+async def advance_github_mobile_push_targets(
+    session: AsyncSession,
+    *,
+    before: str,
+    source_commit: str,
+) -> bool:
+    """Atomically advance both Android lanes for one ordered GitHub push.
+
+    The two advisory locks are acquired in a stable order *before* either lane
+    is read.  A later push therefore observes the committed result of its
+    predecessor instead of racing a stale delivery into rolling either target
+    back.
+
+    Returns ``True`` for an idempotent duplicate delivery and ``False`` for a
+    newly applied target.
+    """
+
+    lanes = tuple(sorted((
+        ("android", "production-direct"),
+        ("android", "production-play"),
+    )))
+    async with _transaction(session):
+        for platform, channel in lanes:
+            await _lock_lane(session, platform, channel)
+
+        existing = [await _lane(session, platform, channel) for platform, channel in lanes]
+        if all(
+            lane is not None and lane.expected_source_commit == source_commit
+            for lane in existing
+        ):
+            return True
+        if not (
+            all(lane is None for lane in existing)
+            or all(lane is not None and lane.expected_source_commit == before for lane in existing)
+        ):
+            raise StaleReleaseError("stale GitHub push delivery")
+
+        for (platform, channel), lane in zip(lanes, existing, strict=True):
+            if lane is None:
+                session.add(
+                    AppReleaseLane(
+                        platform=platform,
+                        channel=channel,
+                        expected_source_commit=source_commit,
+                        expected_ci_run_id=None,
+                    )
+                )
+            else:
+                lane.expected_source_commit = source_commit
+                lane.expected_ci_run_id = None
+        await session.flush()
+        return False
+
+
 async def bind_expected_ci_run(
     session: AsyncSession,
     platform: str,

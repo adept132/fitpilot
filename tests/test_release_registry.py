@@ -16,6 +16,7 @@ from api.services.release_registry import (
     IdempotencyConflictError,
     StaleReleaseError,
     VersionConflictError,
+    advance_github_mobile_push_targets,
     VersionRegressionError,
     advisory_key,
     latest_instruction,
@@ -66,6 +67,7 @@ class RegistrySession:
         self._pending: list[object] = []
         self._in_transaction = False
         self.advisory_keys: list[int] = []
+        self.operations: list[str] = []
         self._clock = datetime(2026, 9, 2, tzinfo=UTC)
 
     def in_transaction(self) -> bool:
@@ -108,10 +110,12 @@ class RegistrySession:
         if isinstance(statement, TextClause):
             assert statement.text == "SELECT pg_advisory_xact_lock(:key)"
             self.advisory_keys.append(params["key"])
+            self.operations.append("lock")
             return _Result([])
 
         entity = statement.column_descriptions[0]["entity"]
         if entity is AppReleaseLane:
+            self.operations.append("lane-read")
             rows = [row for row in self.lanes if self._matches(row, statement.whereclause)]
         elif entity is AppRelease:
             rows = [row for row in self.releases if self._matches(row, statement.whereclause)]
@@ -462,6 +466,27 @@ async def test_lane_lock_is_stable_signed_int64_and_isolated_by_channel() -> Non
         sha256(b"android:production-direct").digest()[:8], "big", signed=True
     )
     assert -(2**63) <= session.advisory_keys[-1] < 2**63
+
+
+async def test_github_target_advance_locks_both_lanes_before_reading_either() -> None:
+    session = RegistrySession()
+
+    duplicate = await advance_github_mobile_push_targets(
+        session,
+        before="0" * 40,
+        source_commit="a" * 40,
+    )
+
+    assert duplicate is False
+    assert session.advisory_keys[-2:] == [
+        advisory_key("android", "production-direct"),
+        advisory_key("android", "production-play"),
+    ]
+    assert session.operations == ["lock", "lock", "lane-read", "lane-read"]
+    assert [(lane.channel, lane.expected_source_commit, lane.expected_ci_run_id) for lane in session.lanes] == [
+        ("production-direct", "a" * 40, None),
+        ("production-play", "a" * 40, None),
+    ]
 
 
 async def test_lane_isolation_rejects_a_commit_expected_only_in_another_channel() -> None:

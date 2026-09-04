@@ -15,9 +15,12 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from api.services.models import AppRelease, AppReleaseLane
+from api.services import release_registry
+from api.services.release_registry import advance_github_mobile_push_targets
+from app.database import SessionLocal
 
 
 APK_BYTES = b"PK\x03\x04" + b"release-api-fixture"
@@ -244,6 +247,61 @@ async def test_webhook_rejects_delayed_old_delivery_after_newer_push(client):
         client, source_commit=commit_a, before="0" * 40, delivery_id="delivery-a"
     )
     assert delayed_a.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_concurrent_github_pushes_serialize_before_reading_release_targets(db, monkeypatch):
+    """A queued successor sees A's commit, never a stale pre-A lane snapshot."""
+
+    commit_a = _commit("concurrent-delivery-a")
+    commit_b = _commit("concurrent-delivery-b")
+    first_lane_read = asyncio.Event()
+    release_a = asyncio.Event()
+    b_started = asyncio.Event()
+    original_lane = release_registry._lane
+
+    async def pause_a_after_locks(session, platform, channel):
+        if getattr(session, "_pause_github_target_read", False) and not first_lane_read.is_set():
+            first_lane_read.set()
+            await release_a.wait()
+        return await original_lane(session, platform, channel)
+
+    monkeypatch.setattr(release_registry, "_lane", pause_a_after_locks)
+
+    async def apply_a():
+        async with SessionLocal() as session:
+            session._pause_github_target_read = True
+            return await advance_github_mobile_push_targets(
+                session, before="0" * 40, source_commit=commit_a
+            )
+
+    async def apply_b():
+        b_started.set()
+        async with SessionLocal() as session:
+            return await advance_github_mobile_push_targets(
+                session, before=commit_a, source_commit=commit_b
+            )
+
+    a_task = asyncio.create_task(apply_a())
+    await first_lane_read.wait()
+    b_task = asyncio.create_task(apply_b())
+    await b_started.wait()
+    await asyncio.sleep(0)
+    assert not b_task.done()
+
+    release_a.set()
+    assert await a_task is False
+    assert await b_task is False
+
+    lanes = (
+        await db.execute(
+            select(AppReleaseLane).where(AppReleaseLane.platform == "android")
+        )
+    ).scalars().all()
+    assert {(lane.channel, lane.expected_source_commit, lane.expected_ci_run_id) for lane in lanes} == {
+        ("production-direct", commit_b, None),
+        ("production-play", commit_b, None),
+    }
 
 
 @pytest.mark.asyncio

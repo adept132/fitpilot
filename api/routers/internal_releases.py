@@ -25,10 +25,10 @@ from api.services.release_registry import (
     ReleaseNotFoundError,
     ReleaseRegistryError,
     StaleReleaseError,
+    advance_github_mobile_push_targets,
     publish_direct_release,
     publish_eas_release,
     bind_expected_ci_run,
-    set_expected_commit,
     set_mandatory,
     withdraw_release,
 )
@@ -47,9 +47,6 @@ router = APIRouter(prefix="/internal/app-releases")
 _GITHUB_REPOSITORY = "adept132/eurith-mobile"
 _GITHUB_REF = "refs/heads/main"
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
-_CHANNELS = ("production-direct", "production-play")
-
-
 class _ReleaseCommand(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -186,23 +183,13 @@ async def github_mobile_push(
     ):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "unexpected GitHub push")
 
-    async with db.begin():
-        existing = [await _lane("android", channel, db) for channel in _CHANNELS]
-        duplicate = all(
-            lane is not None
-            and lane.expected_source_commit == source_commit
-            for lane in existing
-        )
-        advance = all(lane is None for lane in existing) or all(
-            lane is not None and lane.expected_source_commit == before for lane in existing
-        )
-        if not duplicate and not advance:
-            raise HTTPException(status.HTTP_409_CONFLICT, "stale GitHub push delivery")
-        if advance:
-            for channel in _CHANNELS:
-                await set_expected_commit(
-                    db, "android", channel, source_commit, None
-                )
+    try:
+        async with db.begin():
+            duplicate = await advance_github_mobile_push_targets(
+                db, before=before, source_commit=source_commit
+            )
+    except StaleReleaseError as error:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
     return {"accepted": True, "duplicate": duplicate, "source_commit": source_commit}
 
 
