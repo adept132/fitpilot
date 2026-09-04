@@ -283,3 +283,31 @@ Device: Android 13 / API 33, emulator `emulator-5554`
 - The first `10.0.2.2:8082` dev-client route timed out. The existing `127.0.0.1:8082` reverse route then loaded the newly built app into `MainActivity`; the former `Cannot find native module 'ExpoLocalization'` error did not recur.
 - Device localization/content and offline-relaunch assertions remain **BLOCKED**, not passed. The emulator contained a pre-existing authenticated personal session. Per the smoke constraint, it was not used as evidence and a new disposable account was not created before the bounded UI window ended. No custom-content, catalogue, workout-picker, or offline assertions were inferred from it.
 - Networking was restored (`airplane_mode_on=0`, Wi-Fi enabled). Only the isolated `8002` backend and `8082` Metro process trees were stopped. Port `8000` was still listening; no existing service was intentionally stopped.
+
+---
+
+## Task 6 final clean Android-user device retry
+
+Date: 2026-09-04
+Backend SHA before this documentation commit: `4634d9a5f0a8aabd37b987c5789c42553ffe28ad`
+Mobile SHA: `70c448cedbfe14ed6024a6cf9e02ee5a5f9494c1`
+Device: `emulator-5554`, Android 13 / API 33
+
+### Isolated boundary and successful checks
+
+- Before the attempt, `am get-current-user` was `0` and `pm list users` had only Owner. A single uniquely named temporary Android user was created (`id=10`), provisioned using `pm install-existing --user 10 com.adept.tracker`, and made current.
+- An isolated Uvicorn service used only `fitpilot_localization_primary_20260904_066c4a9a` on `8002`. `GET /health` returned HTTP 200 / `status=ok` / `database=connected`; `/openapi.json` returned HTTP 200.
+- Metro ran from the localization mobile worktree on `8082`, with `EXPO_PUBLIC_API_URL=http://127.0.0.1:8002`; its status endpoint reported `packager-status:running`. Reverse routes for both 8002 and 8082 were configured. Existing services on 8000/8081 were left untouched.
+
+### Exact device blocker
+
+Launching `com.adept.tracker/.MainActivity` in the new user created an `u10_a175 com.adept.tracker` process, but Android reported no focused/resumed app window (`mCurrentFocus=null`). Bounded UI inspection failed before the auth screen: `uiautomator dump` raised `java.util.concurrent.TimeoutException: Timeout while connecting UiAutomation`. The screenshot capture command did not complete.
+
+No Firebase account, password, token, user content, catalogue result, custom exercise, or offline-cache result was created or observed in this retry. Consequently, disposable-account/login and the requested EN/RU online/offline UI assertions are **BLOCKED**, not PASS. This is an Android secondary-user/UI-automation condition, distinct from the earlier stale-native-binary blocker.
+
+### Cleanup and final state
+
+- Switched back to user 0 and confirmed `com.adept.tracker` present there.
+- Removed only the exact created user ID 10; `pm list users` then contained only `UserInfo{0:Owner}`.
+- Restored/verified networking: `airplane_mode_on=0`, Wi-Fi connected.
+- Stopped only the owned 8002 Uvicorn and 8082 Metro processes.
