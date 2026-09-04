@@ -22,6 +22,7 @@ from api.services.models import AppRelease, AppReleaseLane
 
 APK_BYTES = b"PK\x03\x04" + b"release-api-fixture"
 PUBLISHER_TOKEN = "publisher-token-for-integration-tests"
+OPERATOR_TOKEN = "operator-token-for-integration-tests"
 WEBHOOK_SECRET = "webhook-secret-for-integration-tests"
 
 
@@ -47,10 +48,14 @@ def _metadata(*, source_commit: str, ci_run_id: str, version_code: int) -> dict[
     }
 
 
-async def _signed_push(client, *, source_commit: str, delivery_id: str, **changes):
+async def _signed_push(
+    client, *, source_commit: str, delivery_id: str, before: str = "0" * 40, **changes
+):
+    event = changes.pop("event", "push")
     payload = {
         "repository": {"full_name": "adept132/eurith-mobile"},
         "ref": "refs/heads/main",
+        "before": before,
         "after": source_commit,
         "deleted": False,
         **changes,
@@ -64,10 +69,18 @@ async def _signed_push(client, *, source_commit: str, delivery_id: str, **change
         content=body,
         headers={
             "Content-Type": "application/json",
-            "X-GitHub-Event": changes.pop("event", "push"),
+            "X-GitHub-Event": event,
             "X-GitHub-Delivery": delivery_id,
             "X-Hub-Signature-256": signature,
         },
+    )
+
+
+async def _bind_ci_run(client, release_headers, *, source_commit: str, ci_run_id: str):
+    return await client.post(
+        "/internal/app-releases/lanes/android/production-direct/ci-run",
+        headers=release_headers,
+        json={"source_commit": source_commit, "ci_run_id": ci_run_id},
     )
 
 
@@ -76,6 +89,7 @@ async def _release_test_state(db, tmp_path, monkeypatch):
     """Make every case independent without touching the deployment volume."""
 
     monkeypatch.setenv("RELEASE_PUBLISHER_TOKEN", PUBLISHER_TOKEN)
+    monkeypatch.setenv("RELEASE_OPERATOR_TOKEN", OPERATOR_TOKEN)
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
     monkeypatch.setenv("RELEASE_STORAGE_ROOT", str(tmp_path / "releases"))
     await db.execute(delete(AppRelease))
@@ -102,6 +116,11 @@ async def test_publish_latest_download_withdraw_cycle(client, release_headers):
         client, source_commit=source_commit, delivery_id=delivery_id
     )
     assert target.status_code == 200
+    assert (
+        await _bind_ci_run(
+            client, release_headers, source_commit=source_commit, ci_run_id=delivery_id
+        )
+    ).status_code == 200
 
     publish = await client.post(
         "/internal/app-releases/android/direct-apk",
@@ -128,6 +147,24 @@ async def test_publish_latest_download_withdraw_cycle(client, release_headers):
     )
     assert latest.status_code == 200
     assert latest.json()["release"]["id"] == release_id
+    ledger = await client.get(
+        "/internal/app-releases/lanes/android/production-direct", headers=release_headers
+    )
+    assert ledger.json() == {
+        "platform": "android",
+        "channel": "production-direct",
+        "expected_source_commit": source_commit,
+        "expected_ci_run_id": delivery_id,
+        "latest_published": {
+            "delivery_method": "direct_apk",
+            "version_code": version_code,
+            "version_name": "1.0.0",
+            "fingerprint": "fingerprint-1",
+            "runtime_version": "1.0.0",
+            "eas_build_id": None,
+            "eas_update_group_id": None,
+        },
+    }
     assert (await client.get(f"/app-releases/{release_id}/download")).status_code == 200
 
     withdrawn = await client.post(
@@ -185,7 +222,28 @@ async def test_webhook_delivery_is_idempotent_and_updates_both_lanes(client, rel
         )
         assert ledger.status_code == 200
         assert ledger.json()["expected_source_commit"] == source_commit
-        assert ledger.json()["expected_ci_run_id"] == "delivery-duplicate"
+        assert ledger.json()["expected_ci_run_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_webhook_rejects_delayed_old_delivery_after_newer_push(client):
+    commit_a = _commit("delivery-a")
+    commit_b = _commit("delivery-b")
+    assert (
+        await _signed_push(client, source_commit=commit_a, delivery_id="delivery-a")
+    ).status_code == 200
+    assert (
+        await _signed_push(
+            client,
+            source_commit=commit_b,
+            before=commit_a,
+            delivery_id="delivery-b",
+        )
+    ).status_code == 200
+    delayed_a = await _signed_push(
+        client, source_commit=commit_a, before="0" * 40, delivery_id="delivery-a"
+    )
+    assert delayed_a.status_code == 409
 
 
 @pytest.mark.asyncio
@@ -236,6 +294,11 @@ async def test_direct_publish_is_idempotent_and_rejects_conflicting_retry(client
         "X-Artifact-SHA256": _sha256(),
     }
     payload = _metadata(source_commit=source_commit, ci_run_id=delivery_id, version_code=103)
+    assert (
+        await _bind_ci_run(
+            client, release_headers, source_commit=source_commit, ci_run_id=delivery_id
+        )
+    ).status_code == 200
     first = await client.post(
         "/internal/app-releases/android/direct-apk", headers=headers, data=payload,
         files={"artifact": ("eurith.apk", APK_BYTES, "application/vnd.android.package-archive")},
@@ -261,6 +324,25 @@ async def test_eas_ledger_mandatory_and_concurrent_publish(client, release_heade
     source_commit = _commit("eas-and-concurrency")
     delivery_id = "delivery-eas-and-concurrency"
     await _signed_push(client, source_commit=source_commit, delivery_id=delivery_id)
+    bound = await _bind_ci_run(
+        client, release_headers, source_commit=source_commit, ci_run_id=delivery_id
+    )
+    assert bound.status_code == 200
+    assert (
+        await _bind_ci_run(
+            client, release_headers, source_commit=source_commit, ci_run_id=delivery_id
+        )
+    ).status_code == 200
+    assert (
+        await _bind_ci_run(
+            client, release_headers, source_commit=source_commit, ci_run_id="another-run"
+        )
+    ).status_code == 409
+    assert (
+        await _bind_ci_run(
+            client, release_headers, source_commit=_commit("wrong-target"), ci_run_id="wrong"
+        )
+    ).status_code == 409
 
     eas = await client.post(
         "/internal/app-releases/android/eas-update",
@@ -281,13 +363,13 @@ async def test_eas_ledger_mandatory_and_concurrent_publish(client, release_heade
     eas_id = eas.json()["release"]["id"]
     not_manual = await client.patch(
         f"/internal/app-releases/{eas_id}/mandatory",
-        headers=release_headers,
+        headers={**release_headers, "X-Release-Manual-Operation": "true"},
         json={"mandatory": True},
     )
-    assert not_manual.status_code == 403
+    assert not_manual.status_code == 401
     manual = await client.patch(
         f"/internal/app-releases/{eas_id}/mandatory",
-        headers={**release_headers, "X-Release-Manual-Operation": "true"},
+        headers={"Authorization": f"Bearer {OPERATOR_TOKEN}"},
         json={"mandatory": True},
     )
     assert manual.status_code == 200

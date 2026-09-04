@@ -24,7 +24,7 @@ def upgrade() -> None:
         sa.Column("platform", sa.String(length=16), nullable=False),
         sa.Column("channel", sa.String(length=32), nullable=False),
         sa.Column("expected_source_commit", sa.CHAR(length=40), nullable=False),
-        sa.Column("expected_ci_run_id", sa.String(length=128), nullable=False),
+        sa.Column("expected_ci_run_id", sa.String(length=128), nullable=True),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),

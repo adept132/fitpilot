@@ -5,7 +5,10 @@ import pytest
 from fastapi import HTTPException
 
 from api.security.github_webhook import verify_github_signature
-from api.security.release_publisher import require_release_publisher
+from api.security.release_publisher import (
+    require_release_operator,
+    require_release_publisher,
+)
 
 
 @pytest.mark.parametrize("header", [None, "", "Basic abc", "Bearer wrong"])
@@ -84,3 +87,19 @@ def test_webhook_hmac_is_independent_from_publisher_bearer_token(monkeypatch):
     signature = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
     assert verify_github_signature(body, signature) is None
+
+
+@pytest.mark.parametrize("header", [None, "", "Bearer publisher-token", "Basic operator-token"])
+def test_release_operator_rejects_non_operator_bearer(monkeypatch, header):
+    monkeypatch.setenv("RELEASE_OPERATOR_TOKEN", "operator-token")
+
+    with pytest.raises(HTTPException) as error:
+        require_release_operator(header)
+
+    assert error.value.status_code == 401
+
+
+def test_release_operator_accepts_only_its_own_bearer(monkeypatch):
+    monkeypatch.setenv("RELEASE_OPERATOR_TOKEN", "operator-token")
+
+    assert require_release_operator("Bearer operator-token") is None

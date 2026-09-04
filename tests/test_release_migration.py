@@ -36,6 +36,8 @@ def test_release_lane_metadata_matches_the_lane_ledger_contract():
     assert columns.expected_source_commit.type.length == 40
     assert isinstance(columns.expected_ci_run_id.type, String)
     assert columns.expected_ci_run_id.type.length == 128
+    # A webhook moves the SHA first; a protected CI run binds later.
+    assert columns.expected_ci_run_id.nullable is True
     assert isinstance(columns.updated_at.type, DateTime)
     assert columns.updated_at.type.timezone is True
     assert columns.updated_at.server_default is not None

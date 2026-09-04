@@ -24,7 +24,7 @@ class AppReleaseLane(Base):
     platform: Mapped[str] = mapped_column(String(16), primary_key=True)
     channel: Mapped[str] = mapped_column(String(32), primary_key=True)
     expected_source_commit: Mapped[str] = mapped_column(CHAR(40), nullable=False)
-    expected_ci_run_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    expected_ci_run_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )

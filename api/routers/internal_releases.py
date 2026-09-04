@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.deps import get_db
 from api.schemas.releases import ReleaseNotes, ReleaseRecord
 from api.security.github_webhook import verify_github_signature
-from api.security.release_publisher import require_release_publisher
+from api.security.release_publisher import require_release_operator, require_release_publisher
 from api.services.models import AppRelease, AppReleaseLane
 from api.services.release_registry import (
     IdempotencyConflictError,
@@ -27,6 +27,7 @@ from api.services.release_registry import (
     StaleReleaseError,
     publish_direct_release,
     publish_eas_release,
+    bind_expected_ci_run,
     set_expected_commit,
     set_mandatory,
     withdraw_release,
@@ -41,10 +42,7 @@ from api.routers.releases import release_storage_root
 
 
 webhook_router = APIRouter()
-router = APIRouter(
-    prefix="/internal/app-releases",
-    dependencies=[Depends(require_release_publisher)],
-)
+router = APIRouter(prefix="/internal/app-releases")
 
 _GITHUB_REPOSITORY = "adept132/eurith-mobile"
 _GITHUB_REF = "refs/heads/main"
@@ -88,6 +86,35 @@ class _MandatoryRequest(BaseModel):
     mandatory: bool
 
 
+class _CiRunBindRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    ci_run_id: str = Field(min_length=1, max_length=128)
+
+
+class _LedgerRelease(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    delivery_method: Literal["direct_apk", "eas_update", "google_play"]
+    version_code: int
+    version_name: str
+    fingerprint: str | None
+    runtime_version: str | None
+    eas_build_id: str | None
+    eas_update_group_id: str | None
+
+
+class _LaneLedger(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    platform: Literal["android"]
+    channel: Literal["production-direct", "production-play"]
+    expected_source_commit: str
+    expected_ci_run_id: str | None
+    latest_published: _LedgerRelease | None
+
+
 def _record(release: AppRelease) -> dict:
     return ReleaseRecord.model_validate(release).model_dump(mode="json")
 
@@ -109,16 +136,6 @@ def _publisher_error(error: ReleaseRegistryError) -> HTTPException:
 
 def _storage() -> ReleaseStorage:
     return ReleaseStorage(Path(release_storage_root()))
-
-
-def _manual_operation(value: str | None) -> None:
-    """Keep automatic release automation unable to turn on a mandatory gate."""
-
-    if value != "true":
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            "mandatory changes require an explicit manual operation",
-        )
 
 
 async def _lane(platform: str, channel: str, db: AsyncSession) -> AppReleaseLane | None:
@@ -153,6 +170,7 @@ async def github_mobile_push(
         payload = json.loads(body)
         repository = payload["repository"]["full_name"]
         ref = payload["ref"]
+        before = payload["before"]
         source_commit = payload["after"]
         deleted = payload["deleted"]
     except (KeyError, TypeError, json.JSONDecodeError):
@@ -161,6 +179,8 @@ async def github_mobile_push(
         repository != _GITHUB_REPOSITORY
         or ref != _GITHUB_REF
         or deleted is not False
+        or not isinstance(before, str)
+        or _FULL_SHA.fullmatch(before) is None
         or not isinstance(source_commit, str)
         or _FULL_SHA.fullmatch(source_commit) is None
     ):
@@ -171,22 +191,30 @@ async def github_mobile_push(
         duplicate = all(
             lane is not None
             and lane.expected_source_commit == source_commit
-            and lane.expected_ci_run_id == x_github_delivery
             for lane in existing
         )
-        if not duplicate:
+        advance = all(lane is None for lane in existing) or all(
+            lane is not None and lane.expected_source_commit == before for lane in existing
+        )
+        if not duplicate and not advance:
+            raise HTTPException(status.HTTP_409_CONFLICT, "stale GitHub push delivery")
+        if advance:
             for channel in _CHANNELS:
                 await set_expected_commit(
-                    db, "android", channel, source_commit, x_github_delivery
+                    db, "android", channel, source_commit, None
                 )
     return {"accepted": True, "duplicate": duplicate, "source_commit": source_commit}
 
 
-@router.get("/lanes/android/{channel}")
+@router.get(
+    "/lanes/android/{channel}",
+    response_model=_LaneLedger,
+    dependencies=[Depends(require_release_publisher)],
+)
 async def get_lane_ledger(
     channel: Literal["production-direct", "production-play"],
     db: AsyncSession = Depends(get_db),
-) -> dict:
+) -> _LaneLedger:
     lane = await _lane("android", channel, db)
     if lane is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "release lane not found")
@@ -203,16 +231,53 @@ async def get_lane_ledger(
             .order_by(AppRelease.version_code.desc(), AppRelease.published_at.desc())
         )
     ).scalars().first()
-    return {
-        "platform": "android",
-        "channel": channel,
-        "expected_source_commit": lane.expected_source_commit,
-        "expected_ci_run_id": lane.expected_ci_run_id,
-        "latest_published": _record(latest) if latest is not None else None,
-    }
+    latest_payload = (
+        _LedgerRelease(
+            delivery_method=latest.delivery_method,
+            version_code=latest.version_code,
+            version_name=latest.version_name,
+            fingerprint=latest.fingerprint,
+            runtime_version=latest.runtime_version,
+            eas_build_id=latest.eas_build_id,
+            eas_update_group_id=latest.eas_update_group_id,
+        )
+        if latest is not None
+        else None
+    )
+    return _LaneLedger(
+        platform="android",
+        channel=channel,
+        expected_source_commit=lane.expected_source_commit,
+        expected_ci_run_id=lane.expected_ci_run_id,
+        latest_published=latest_payload,
+    )
 
 
-@router.post("/android/direct-apk")
+@router.post(
+    "/lanes/android/{channel}/ci-run",
+    dependencies=[Depends(require_release_publisher)],
+)
+async def bind_ci_run(
+    channel: Literal["production-direct", "production-play"],
+    request: _CiRunBindRequest,
+    db: AsyncSession = Depends(get_db),
+) -> _LaneLedger:
+    try:
+        lane = await bind_expected_ci_run(
+            db, "android", channel, request.source_commit, request.ci_run_id
+        )
+    except ReleaseRegistryError as error:
+        raise _publisher_error(error)
+    return _LaneLedger(
+        platform="android",
+        channel=channel,
+        expected_source_commit=lane.expected_source_commit,
+        expected_ci_run_id=lane.expected_ci_run_id,
+        latest_published=None,
+    )
+
+
+@router.post("/android/direct-apk", dependencies=[Depends(require_release_publisher)])
 async def publish_direct_apk(
     channel: Annotated[Literal["production-direct", "production-play"], Form()],
     source_commit: Annotated[str, Form(pattern=r"^[0-9a-f]{40}$")],
@@ -286,7 +351,7 @@ async def publish_direct_apk(
     )
 
 
-@router.post("/android/eas-update")
+@router.post("/android/eas-update", dependencies=[Depends(require_release_publisher)])
 async def publish_eas_update(
     command: EASReleaseCommand,
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=128)] = "",
@@ -314,7 +379,7 @@ async def publish_eas_update(
     )
 
 
-@router.post("/{release_id}/withdraw")
+@router.post("/{release_id}/withdraw", dependencies=[Depends(require_release_publisher)])
 async def withdraw(
     release_id: UUID,
     request: _WithdrawalRequest,
@@ -327,14 +392,12 @@ async def withdraw(
     return _release_response(release)
 
 
-@router.patch("/{release_id}/mandatory")
+@router.patch("/{release_id}/mandatory", dependencies=[Depends(require_release_operator)])
 async def mandatory(
     release_id: UUID,
     request: _MandatoryRequest,
-    x_release_manual_operation: Annotated[str | None, Header()] = None,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    _manual_operation(x_release_manual_operation)
     try:
         release = await set_mandatory(db, release_id, request.mandatory)
     except ReleaseRegistryError as error:

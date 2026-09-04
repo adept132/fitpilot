@@ -227,7 +227,7 @@ async def set_expected_commit(
     platform: str,
     channel: str,
     source_commit: str,
-    ci_run_id: str,
+    ci_run_id: str | None,
 ) -> AppReleaseLane:
     """Set the one source commit allowed to publish for a lane."""
 
@@ -246,6 +246,28 @@ async def set_expected_commit(
             lane.expected_source_commit = source_commit
             lane.expected_ci_run_id = ci_run_id
         await session.flush()
+        return lane
+
+
+async def bind_expected_ci_run(
+    session: AsyncSession,
+    platform: str,
+    channel: str,
+    source_commit: str,
+    ci_run_id: str,
+) -> AppReleaseLane:
+    """Bind one concrete CI run only to the currently webhooked target SHA."""
+
+    async with _transaction(session):
+        await _lock_lane(session, platform, channel)
+        lane = await _lane(session, platform, channel)
+        if lane is None or lane.expected_source_commit != source_commit:
+            raise StaleReleaseError("release source commit is no longer expected for this lane")
+        if lane.expected_ci_run_id is None:
+            lane.expected_ci_run_id = ci_run_id
+            await session.flush()
+        elif lane.expected_ci_run_id != ci_run_id:
+            raise ReleaseConflictError("a different CI run is already bound to this lane")
         return lane
 
 
