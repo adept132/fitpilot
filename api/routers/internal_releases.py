@@ -38,6 +38,7 @@ from api.services.release_storage import (
     StagedArtifact,
     StoredArtifact,
 )
+from scripts.cleanup_app_releases import acquire_release_cleanup_lock
 from api.routers.releases import release_storage_root
 
 
@@ -313,6 +314,10 @@ async def publish_direct_apk(
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(error))
         try:
             async with db.begin():
+                # A cleanup run holds this same transaction advisory lock, so it
+                # cannot classify a just-finalized APK as an orphan before its
+                # registry row commits.
+                await acquire_release_cleanup_lock(db)
                 stored = StoredArtifact(
                     storage_key=f"android/sha256/{staged.sha256}.apk",
                     sha256=staged.sha256,
