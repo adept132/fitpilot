@@ -130,6 +130,36 @@ Task 5 is **blocked, not passed**. The reviewed JSON catalog contains exactly 98
 
 Under the rollout constraint that every system exercise needs a reviewed English entry, no integration test or downgrade/upgrade cycle was run: proceeding would not make the copy valid and could be mistaken for a completed migration. The untouched second copy and dump are retained to repeat this task after the catalog is extended (or the data set is otherwise reconciled through a separately reviewed change). Production rollout remains blocked.
 
+### Review remediation round 1 — completed catalog verification
+
+The failing catalog gate above was investigated only on the retained primary disposable copy. A query restricted to `source = 'default'` established that the full local system set is the contiguous range `76..269` (194 rows); no custom/user row was extracted for catalog authoring. The reviewed static catalog was extended with English names and descriptions for `174..269` in commit `56db721c2b39d36a96619eaad4e8b0eef847f2c8`.
+
+TDD evidence: changing the catalog test to expect exact IDs `76..269` and `194` entries first produced one assertion failure (`37 passed, 1 failed`); after adding the static entries, `tests/test_exercise_i18n.py` passed (`38 passed`, exit `0`). The relevant localization unit suite (`test_i18n.py`, `test_exercise_i18n.py`, `test_notification_i18n.py`, `test_workout_router_i18n.py`) passed: **95 passed**, exit `0`. `git diff --check` passed before the implementation commit.
+
+The initial primary check then exited `1` as expected because all existing English fields were empty. Applying the extended catalog succeeded, followed by a clean check:
+
+| Primary-copy operation | Exit | Sanitized result |
+| --- | ---: | --- |
+| Backfill `--check` before apply | 1 | `catalog=194 system=194 updates=0 custom_skipped=18`; expected unapplied drift. |
+| Backfill `--apply` | 0 | `catalog=194 system=194 updates=194 custom_skipped=18`. |
+| Backfill `--check` after apply | 0 | `catalog=194 system=194 updates=0 custom_skipped=18`. |
+| `tests/integration/test_exercise_i18n.py` | 0 | **3 passed** against the explicit primary disposable database. |
+
+The integration assertion was corrected in `f18d13fb59ae53d44e9dd890deb4b4792cee93eb`: full catalog search may legitimately return additional English matches, while the targeted exercise must be present. This is stronger than treating a valid complete catalog as a test failure.
+
+Final primary-copy invariants:
+
+| Invariant | Result |
+| --- | ---: |
+| Alembic revision | `20260830_02` |
+| System exercises | 194 |
+| System rows in exact range `76..269` | 194 |
+| System rows outside that range | 0 |
+| System rows missing English name or description | 0 |
+| Custom-content checksum | `255b5b27aa62d50d43db31eef6a049c5` (unchanged before/after migration, backfill, and integration test) |
+
+On `fitpilot_localization_cycle_20260904_42b6236b`, all required operations exited `0`: initial `upgrade head`, `downgrade 20260830_01`, second `upgrade head`, backfill `--apply` (`catalog=194 system=194 updates=194 custom_skipped=18`), and final `--check` (`updates=0`). The retained dump and both disposable databases remain available for Task 6; the source local database remains unchanged. This resolves the Task 5 catalog-coverage gate; no production mutation was performed.
+
 ---
 
 ## Task 4: localization-only rollout branch verification
