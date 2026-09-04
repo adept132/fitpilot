@@ -84,3 +84,40 @@ The static check of `api/data/exercise_localizations_en.json` exited `0`:
 ## Conclusion
 
 The static checks, focused units, migration graph, and catalog validation pass. The rollout is **not yet integration-verified** until a safe disposable PostgreSQL test database is supplied; this is a release gate, not a passing result.
+
+---
+
+## Task 4: localization-only rollout branch verification
+
+Date: 2026-09-04
+Dedicated worktree: `C:\\Users\\Admin\\fitpilot-mobile\\.worktrees\\localization-rollout-backend`
+Branch: `codex/localization-rollout`
+Branch base: `1a8fa9c3fe07f4afcb85957ca98e9e2650e884ce`
+Documentation cherry-pick: `2124fefac7e208ff6b4bc53e188f762e6a778326`
+
+### Branch integrity
+
+- The target worktree directory was absent and branch `codex/localization-rollout` did not exist before creation.
+- `c79dd42` (the snapshot of the six pre-localization user changes) is an ancestor of `HEAD` (exit `0`).
+- `1a8fa9c` (the end of the 16-commit localization range beginning at `cfc1474`) is an ancestor of `HEAD` (exit `0`).
+- Forbidden update-center/security commits are not ancestors of `HEAD`: `dacaf7d` exit `1`, `0855711` exit `1`, `c938d9a` exit `1`. Exit `1` is expected for each negative ancestry check.
+- `git diff --check 06e31f1...HEAD` exited `0`.
+
+### Safe automated verification
+
+The reusable backend virtual environment was `C:\\Users\\Admin\\PycharmProjects\\FitPilotBot\\.venv\\Scripts\\python.exe`. Unit tests used the synthetic, non-routable local database configuration `postgresql+asyncpg://127.0.0.1:54329/fitpilot_test`; no database connection was made by the passing unit tests. Firebase was initialized in-process with the SDK default credential only to avoid reading a missing local service-account file; no Firebase request was made.
+
+| Command scope | Result |
+| --- | --- |
+| `tests/test_i18n.py`, `tests/test_exercise_i18n.py`, `tests/test_notification_i18n.py`, `tests/test_workout_router_i18n.py` | exit `0`; **95 passed**; 7 pre-existing Pydantic deprecation warnings |
+| `python -m alembic heads` | exit `0`; exactly one head: `20260830_02` |
+| `python -m alembic history` | exit `0`; `20260830_02` descends from `20260830_01` |
+| `git diff --check 06e31f1...HEAD` | exit `0` |
+
+The exercise tests cover static English catalog completeness and the preservation of legacy `name`/`description` alongside additive localization maps. The covered behavior keeps custom exercise text unchanged; no runtime translation service is present.
+
+### Full-suite / integration gate
+
+The full backend suite was attempted with only `DATABASE_URL` and `TEST_DATABASE_URL` set to the same synthetic URL above and `--maxfail=1`. It exited `1` at `tests/integration/test_account_lifecycle.py::test_purge_removes_every_trace`: the test fixture called `init_db()` and received `ConnectionRefusedError` for `127.0.0.1:54329`.
+
+No production or unknown database was read or contacted. Therefore integration coverage (including `tests/integration/test_exercise_i18n.py`) remains **blocked** until an explicit disposable or restored PostgreSQL test database is provided. This branch is ready for review but is not approved for production rollout on the strength of unit tests alone.
