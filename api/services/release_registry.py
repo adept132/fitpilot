@@ -257,12 +257,17 @@ async def publish_direct_release(
     platform = _command_value(command, "platform")
     channel = _command_value(command, "channel")
     source_commit = _command_value(command, "source_commit")
+    ci_run_id = _command_value(command, "ci_run_id")
     idempotency_key = _command_value(command, "idempotency_key")
 
     async with _transaction(session):
         await _lock_lane(session, platform, channel)
         lane = await _lane(session, platform, channel)
-        if lane is None or lane.expected_source_commit != source_commit:
+        if (
+            lane is None
+            or lane.expected_source_commit != source_commit
+            or lane.expected_ci_run_id != ci_run_id
+        ):
             raise StaleReleaseError("release source commit is no longer expected for this lane")
 
         existing = await _release_by_idempotency(session, idempotency_key)
@@ -301,7 +306,7 @@ async def publish_direct_release(
             artifact_sha256=_stored_value(stored, "sha256"),
             artifact_size_bytes=_stored_value(stored, "size_bytes"),
             source_commit=source_commit,
-            ci_run_id=_command_value(command, "ci_run_id"),
+            ci_run_id=ci_run_id,
             idempotency_key=idempotency_key,
             eas_build_id=_command_value(command, "eas_build_id"),
             eas_update_group_id=None,
@@ -320,6 +325,7 @@ async def publish_eas_release(session: AsyncSession, command: Any) -> PublishRes
     platform = _command_value(command, "platform")
     channel = _command_value(command, "channel")
     source_commit = _command_value(command, "source_commit")
+    ci_run_id = _command_value(command, "ci_run_id")
     idempotency_key = _command_value(command, "idempotency_key")
     runtime_version = _command_value(command, "runtime_version")
     update_group = _command_value(command, "eas_update_group_id")
@@ -329,7 +335,11 @@ async def publish_eas_release(session: AsyncSession, command: Any) -> PublishRes
     async with _transaction(session):
         await _lock_lane(session, platform, channel)
         lane = await _lane(session, platform, channel)
-        if lane is None or lane.expected_source_commit != source_commit:
+        if (
+            lane is None
+            or lane.expected_source_commit != source_commit
+            or lane.expected_ci_run_id != ci_run_id
+        ):
             raise StaleReleaseError("release source commit is no longer expected for this lane")
 
         existing = await _release_by_idempotency(session, idempotency_key)
@@ -362,7 +372,7 @@ async def publish_eas_release(session: AsyncSession, command: Any) -> PublishRes
             artifact_sha256=None,
             artifact_size_bytes=None,
             source_commit=source_commit,
-            ci_run_id=_command_value(command, "ci_run_id"),
+            ci_run_id=ci_run_id,
             idempotency_key=idempotency_key,
             eas_build_id=_command_value(command, "eas_build_id"),
             eas_update_group_id=update_group,

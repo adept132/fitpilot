@@ -259,7 +259,7 @@ def eas_row(value: SimpleNamespace) -> AppRelease:
 
 
 async def publish_direct(session: RegistrySession, **overrides: object):
-    await set_expected_commit(session, "android", "production-direct", "a" * 40, "target")
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "run-2")
     return await publish_direct_release(session, command(**overrides), stored())
 
 
@@ -269,6 +269,60 @@ async def test_stale_commit_cannot_publish() -> None:
 
     with pytest.raises(StaleReleaseError):
         await publish_direct_release(session, command(source_commit="b" * 40), stored())
+
+
+async def test_direct_publish_requires_the_expected_ci_run_for_the_expected_commit() -> None:
+    session = RegistrySession()
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "target")
+
+    with pytest.raises(StaleReleaseError):
+        await publish_direct_release(session, command(ci_run_id="other-run"), stored())
+
+    first = await publish_direct_release(
+        session,
+        command(ci_run_id="target", idempotency_key="matching-direct"),
+        stored(),
+    )
+    second = await publish_direct_release(
+        session,
+        command(ci_run_id="target", idempotency_key="matching-direct"),
+        stored(),
+    )
+
+    assert second.release.id == first.release.id
+    assert second.created is False
+
+
+async def test_eas_publish_requires_the_expected_ci_run_for_the_expected_commit() -> None:
+    session = RegistrySession()
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "target")
+
+    with pytest.raises(StaleReleaseError):
+        await publish_eas_release(
+            session,
+            command(
+                ci_run_id="other-run",
+                version_code=1,
+                version_name="1.0.0",
+                runtime_version="runtime-1",
+                eas_update_group_id="matching-group",
+                idempotency_key="matching-eas",
+            ),
+        )
+
+    matching = command(
+        ci_run_id="target",
+        version_code=1,
+        version_name="1.0.0",
+        runtime_version="runtime-1",
+        eas_update_group_id="matching-group",
+        idempotency_key="matching-eas",
+    )
+    first = await publish_eas_release(session, matching)
+    second = await publish_eas_release(session, matching)
+
+    assert second.release.id == first.release.id
+    assert second.created is False
 
 
 async def test_idempotent_retry_returns_existing_release() -> None:
@@ -289,7 +343,6 @@ async def test_idempotent_retry_returns_existing_release() -> None:
         ("fingerprint", "fingerprint-other"),
         ("release_notes", {"ru": "Другое", "en": "Different"}),
         ("min_supported_version_code", 2),
-        ("ci_run_id", "other-run"),
         ("eas_build_id", "other-build"),
     ],
 )
@@ -323,7 +376,7 @@ async def test_direct_idempotency_key_rejects_every_changed_artifact_field(
 
 async def test_eas_idempotency_key_rejects_a_different_runtime() -> None:
     session = RegistrySession()
-    await set_expected_commit(session, "android", "production-direct", "a" * 40, "target")
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "run-2")
     original = command(
         version_code=1,
         version_name="1.0.0",
@@ -345,7 +398,7 @@ async def test_eas_idempotency_key_rejects_a_different_runtime() -> None:
 
 async def test_unique_idempotency_race_returns_the_complete_matching_release() -> None:
     session = RacingRegistrySession()
-    await set_expected_commit(session, "android", "production-direct", "a" * 40, "target")
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "run-2")
     value = command(idempotency_key="racing")
     artifact = stored()
     remote = direct_row(value, artifact)
@@ -359,8 +412,8 @@ async def test_unique_idempotency_race_returns_the_complete_matching_release() -
 
 async def test_cross_lane_idempotency_unique_race_is_a_registry_conflict() -> None:
     session = RacingRegistrySession()
-    await set_expected_commit(session, "android", "production-direct", "a" * 40, "direct")
-    await set_expected_commit(session, "android", "production-play", "a" * 40, "play")
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "run-2")
+    await set_expected_commit(session, "android", "production-play", "a" * 40, "run-2")
     remote = direct_row(command(idempotency_key="shared"), stored())
     session.arm_unique_race(remote)
 
@@ -374,8 +427,8 @@ async def test_cross_lane_idempotency_unique_race_is_a_registry_conflict() -> No
 
 async def test_cross_lane_eas_group_unique_race_is_a_registry_conflict() -> None:
     session = RacingRegistrySession()
-    await set_expected_commit(session, "android", "production-direct", "a" * 40, "direct")
-    await set_expected_commit(session, "android", "production-play", "a" * 40, "play")
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "run-2")
+    await set_expected_commit(session, "android", "production-play", "a" * 40, "run-2")
     remote = eas_row(command(
         version_code=1,
         version_name="1.0.0",
@@ -398,8 +451,8 @@ async def test_cross_lane_eas_group_unique_race_is_a_registry_conflict() -> None
 
 async def test_lane_lock_is_stable_signed_int64_and_isolated_by_channel() -> None:
     session = RegistrySession()
-    await set_expected_commit(session, "android", "production-direct", "a" * 40, "direct")
-    await set_expected_commit(session, "android", "production-play", "b" * 40, "play")
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "run-2")
+    await set_expected_commit(session, "android", "production-play", "b" * 40, "run-2")
 
     assert session.advisory_keys[-2:] == [
         advisory_key("android", "production-direct"),
@@ -413,8 +466,8 @@ async def test_lane_lock_is_stable_signed_int64_and_isolated_by_channel() -> Non
 
 async def test_lane_isolation_rejects_a_commit_expected_only_in_another_channel() -> None:
     session = RegistrySession()
-    await set_expected_commit(session, "android", "production-direct", "a" * 40, "direct")
-    await set_expected_commit(session, "android", "production-play", "b" * 40, "play")
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "run-2")
+    await set_expected_commit(session, "android", "production-play", "b" * 40, "run-2")
 
     with pytest.raises(StaleReleaseError):
         await publish_direct_release(session, command(source_commit="b" * 40), stored())
@@ -487,7 +540,7 @@ async def test_newer_direct_binary_has_priority_over_runtime_compatible_ota() ->
 
 async def test_ota_requires_matching_runtime_and_current_native_version() -> None:
     session = RegistrySession()
-    await set_expected_commit(session, "android", "production-direct", "a" * 40, "target")
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "run-2")
     ota = await publish_eas_release(
         session,
         command(
@@ -526,7 +579,7 @@ async def test_automatic_publication_never_sets_mandatory() -> None:
 
 async def test_automatic_eas_publication_never_sets_mandatory() -> None:
     session = RegistrySession()
-    await set_expected_commit(session, "android", "production-direct", "a" * 40, "target")
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "run-2")
 
     published = await publish_eas_release(session, command(
         version_code=1,
