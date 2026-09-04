@@ -215,3 +215,48 @@ The exercise tests cover static English catalog completeness and the preservatio
 The full backend suite was attempted with only `DATABASE_URL` and `TEST_DATABASE_URL` set to the same synthetic URL above and `--maxfail=1`. It exited `1` at `tests/integration/test_account_lifecycle.py::test_purge_removes_every_trace`: the test fixture called `init_db()` and received `ConnectionRefusedError` for `127.0.0.1:54329`.
 
 No production or unknown database was read or contacted. Therefore integration coverage (including `tests/integration/test_exercise_i18n.py`) remains **blocked** until an explicit disposable or restored PostgreSQL test database is provided. This branch is ready for review but is not approved for production rollout on the strength of unit tests alone.
+
+---
+
+## Task 6: local bilingual end-to-end smoke (fallback evidence)
+
+Date: 2026-09-04
+Backend SHA: `c76a16cd4910754e431bbad18d0ed4db6582ef12`
+Mobile SHA: `70c448cedbfe14ed6024a6cf9e02ee5a5f9494c1`
+Device: Android 13 / API 33, emulator `emulator-5554`
+
+### Safety and service boundary
+
+- The only database used by the local API and integration test was the retained disposable copy `fitpilot_localization_primary_20260904_066c4a9a`; the source and production databases were not contacted by migration, backfill, test, or API writes.
+- A separate Uvicorn process served this copy on `0.0.0.0:8002`. `GET /health` returned `200` with `status=ok` and `database=connected`; `/openapi.json` exposed `/auth/me`, `/profile/settings`, and exercise routes.
+- Metro was started from `C:\\Users\\Admin\\fitpilot-localization-worktrees\\mobile` on port `8082` with `EXPO_PUBLIC_API_URL=http://10.0.2.2:8002`; its status endpoint returned `packager-status:running`.
+- The emulator had both `adb reverse tcp:8082 tcp:8082` and the pre-existing 8081 reverse. The fresh dev-client deep link targeted `http://10.0.2.2:8082`; Android log evidence shows the client attempting `127.0.0.1:8082`, so the 8082 bundle connection path was exercised.
+- The temporary Firebase account was identified only by the sanitized marker `a24d940339cf`. Its generated password and token were never written to logs or this record. The account was deleted after the smoke.
+
+### Direct local API results
+
+| Check | Result |
+| --- | --- |
+| Profile language persistence `en` | PASS |
+| Profile language persistence `ru` | PASS |
+| System detail localized maps for IDs `76`, `77` (non-empty RU/EN name and description) | PASS |
+| English search finds tested system ID `76` | PASS |
+| Cyrillic custom exercise is byte-identical through English and Russian profile requests | PASS |
+| Backend `tests/integration/test_exercise_i18n.py -q` on the disposable copy | PASS: **3 passed** |
+
+### Mobile fallback results
+
+| Check | Result |
+| --- | --- |
+| `localizedExercise`, API client localization, and API-origin tests | PASS: **28 passed** |
+| Cached localized-exercise, exercise-cache, offline flow, and profile-language-sync tests | PASS: **41 passed** |
+| Device online RU/EN catalog/search/detail/picker smoke | BLOCKED |
+| Device offline cache smoke across app relaunch | BLOCKED |
+
+The device checks could not be observed because the installed development build does not contain the native `ExpoLocalization` module. Once the fresh 8082 bundle was loaded, Android emitted repeated `Error: Cannot find native module 'ExpoLocalization'`; Expo Router then marked affected routes as lacking a default export. The same native-binary mismatch is corroborated by the test environment warning that MMKV/NitroModules are unavailable, which means cache persistence across a real relaunch cannot be represented by that old binary. This is a reproducible development-build defect, not a localization-code change made in this task.
+
+Sanitized device captures (no credentials or user content) are retained outside the repository for diagnosis: `C:\\Users\\Admin\\AppData\\Local\\Temp\\fitpilot-task6-screen-local-8002.png` and `C:\\Users\\Admin\\AppData\\Local\\Temp\\fitpilot-task6-expo-localization-missing.png`.
+
+### Final local state
+
+The emulator network was restored and verified enabled after the attempted offline path (`airplane_mode_on=0`, Wi-Fi enabled). Existing processes on ports 8000 and 8081 were left untouched. The isolated 8002 API and 8082 Metro sessions are to be stopped after this record is committed. A new development build containing `expo-localization` and the current native MMKV dependencies is required before device UI/offline checks can move from BLOCKED to PASS.
