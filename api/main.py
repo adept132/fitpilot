@@ -33,6 +33,7 @@ from api.routers.periodization import router as periodization_router
 from api.routers.notifications import router as notifications_router
 from api.routers.reports import router as reports_router
 from api.routers.releases import router as releases_router
+from api.routers.internal_releases import router as internal_releases_router, webhook_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -109,6 +110,8 @@ app.include_router(periodization_router)
 app.include_router(notifications_router)
 app.include_router(reports_router)
 app.include_router(releases_router)
+app.include_router(webhook_router, include_in_schema=False)
+app.include_router(internal_releases_router, include_in_schema=False)
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check(db: AsyncSession = Depends(get_db)):

@@ -72,3 +72,15 @@ def test_github_signature_rejects_non_ascii_digest_with_401(monkeypatch):
         verify_github_signature(b'{"action":"published"}', "sha256=" + "a" * 63 + "\u00e9")
 
     assert error.value.status_code == 401
+
+
+def test_webhook_hmac_is_independent_from_publisher_bearer_token(monkeypatch):
+    """A GitHub delivery authenticates with its own secret, never CI bearer auth."""
+
+    body = b'{"ref":"refs/heads/main"}'
+    secret = "github-webhook-secret"
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", secret)
+    monkeypatch.setenv("RELEASE_PUBLISHER_TOKEN", "publisher-token-that-is-not-a-webhook-secret")
+    signature = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+    assert verify_github_signature(body, signature) is None
