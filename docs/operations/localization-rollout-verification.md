@@ -160,6 +160,25 @@ Final primary-copy invariants:
 
 On `fitpilot_localization_cycle_20260904_42b6236b`, all required operations exited `0`: initial `upgrade head`, `downgrade 20260830_01`, second `upgrade head`, backfill `--apply` (`catalog=194 system=194 updates=194 custom_skipped=18`), and final `--check` (`updates=0`). The retained dump and both disposable databases remain available for Task 6; the source local database remains unchanged. This resolves the Task 5 catalog-coverage gate; no production mutation was performed.
 
+### Review remediation round 2 — technique-copy correction
+
+Quality review identified six static English descriptions whose movement sequence or grip/position cue needed greater fidelity to the reviewed Russian system content. Commit `82b5862ac86940fba695eb9d95205f04e32b2409` updates only IDs `205`, `206`, `229`, `242`, `255`, and `256`: Cuban press equipment and scarecrow start, alternating-curl supination, incline-cable-pullover phase order, scaption thumbs-up grip, squat clean and split-jerk reception, and squat clean/front-rack/press sequencing.
+
+All checks used the same explicit disposable primary database where applicable and exited `0`:
+
+| Check | Result |
+| --- | --- |
+| Catalog JSON parse | valid JSON |
+| `tests/test_exercise_i18n.py` | **38 passed** |
+| Relevant localization unit suite | **95 passed** |
+| Backfill check before apply | exit `1`, expected drift limited to IDs `205, 206, 229, 242, 255, 256` |
+| Backfill apply | exit `0`; `catalog=194 system=194 updates=6 custom_skipped=18` |
+| Backfill final check | exit `0`; `updates=0` |
+| `tests/integration/test_exercise_i18n.py` | **3 passed** |
+| `git diff --check` | exit `0` before commit |
+
+This review correction changed no Russian legacy field and no custom/user content. It was applied only to the primary disposable copy; the source database remains unchanged.
+
 ---
 
 ## Task 4: localization-only rollout branch verification
