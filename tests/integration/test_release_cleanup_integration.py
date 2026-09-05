@@ -1,139 +1,122 @@
-"""Real PostgreSQL checks for the cleanup commit/unlink and advisory-lock boundary."""
-
+"""Fail-closed real-PostgreSQL tests for release artifact cleanup."""
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-import hashlib
-import os
+from io import BytesIO
+import hashlib, os
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import uuid4
 
-import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+import pytest, pytest_asyncio
+from fastapi import UploadFile
+from sqlalchemy import delete, text
 
 from app.database import SessionLocal, engine
+from api.routers import internal_releases
 from api.services.models import AppRelease
-from api.services.release_artifact_lock import hold_release_artifact_lock
+from api.services.release_registry import set_expected_commit
+from api.services.release_storage import ReleaseStorage
 from scripts import cleanup_app_releases
-
 
 NOW = datetime(2026, 9, 5, tzinfo=UTC)
 
 
-def _artifact(root: Path) -> tuple[str, str, Path]:
-    payload = b"PK\x03\x04cleanup-integration"
-    digest = hashlib.sha256(payload).hexdigest()
-    key = f"android/sha256/{digest}.apk"
-    path = root / key
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(payload)
-    old = NOW - timedelta(days=31)
-    os.utime(path, (old.timestamp(), old.timestamp()))
+@pytest_asyncio.fixture(autouse=True)
+async def disposable_cleanup_database() -> list[str]:
+    url = os.environ.get("TEST_DATABASE_URL")
+    parsed = urlparse((url or "").replace("postgresql+asyncpg", "postgresql", 1))
+    if not url or parsed.hostname not in {"localhost", "127.0.0.1", "::1"} or not parsed.path.lstrip("/").startswith("fitpilot_task7_"):
+        pytest.fail("TEST_DATABASE_URL must name a local fitpilot_task7_* disposable database")
+    commits: list[str] = []
+    try:
+        yield commits
+    finally:
+        if commits:
+            async with SessionLocal() as session:
+                await session.execute(delete(AppRelease).where(AppRelease.source_commit.in_(commits)))
+                await session.commit()
+
+
+def identity() -> tuple[str, str]:
+    marker = uuid4().hex
+    return hashlib.sha1(marker.encode()).hexdigest(), marker
+
+
+def artifact(root: Path, marker: str) -> tuple[str, str, Path]:
+    payload = b"PK\x03\x04" + marker.encode(); digest = hashlib.sha256(payload).hexdigest()
+    key = f"android/sha256/{digest}.apk"; path = root / key; path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload); old = NOW - timedelta(days=31); os.utime(path, (old.timestamp(), old.timestamp()))
     return key, digest, path
 
 
-def _withdrawn_release(key: str, digest: str, size: int) -> AppRelease:
-    return AppRelease(
-        id=uuid4(),
-        platform="android",
-        channel="production-direct",
-        delivery_method="direct_apk",
-        version_code=1,
-        version_name="1.0.0",
-        runtime_version=None,
-        fingerprint=None,
-        release_notes={"ru": "Исправление", "en": "Fix"},
-        status="withdrawn",
-        is_mandatory=False,
-        min_supported_version_code=None,
-        artifact_storage_key=key,
-        artifact_sha256=digest,
-        artifact_size_bytes=size,
-        source_commit="a" * 40,
-        ci_run_id="cleanup-integration",
-        idempotency_key=f"cleanup-{uuid4().hex}",
-        eas_build_id=None,
-        eas_update_group_id=None,
-        withdrawn_at=NOW - timedelta(days=31),
-        withdrawal_reason="integration fixture",
-    )
+def withdrawn(key: str, digest: str, size: int, source: str, marker: str) -> AppRelease:
+    return AppRelease(id=uuid4(), platform="android", channel="production-direct", delivery_method="direct_apk", version_code=1, version_name="1.0.0", runtime_version=None, fingerprint=None, release_notes={"ru":"Исправление","en":"Fix"}, status="withdrawn", is_mandatory=False, min_supported_version_code=None, artifact_storage_key=key, artifact_sha256=digest, artifact_size_bytes=size, source_commit=source, ci_run_id=f"cleanup-{marker}", idempotency_key=f"cleanup-{marker}", eas_build_id=None, eas_update_group_id=None, withdrawn_at=NOW-timedelta(days=31), withdrawal_reason="fixture")
+
+
+async def add_withdrawn(db, root: Path, commits: list[str]) -> tuple[AppRelease, Path]:
+    source, marker = identity(); commits.append(source); key, digest, path = artifact(root, marker)
+    row = withdrawn(key, digest, path.stat().st_size, source, marker); db.add(row); await db.commit(); return row, path
 
 
 @pytest.mark.asyncio
-async def test_cleanup_recovers_after_commit_before_unlink_with_real_postgresql(
-    db, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Catches missing artifact + unmarked row when the process dies after its commit."""
-    root = tmp_path / "release-volume"
-    key, digest, path = _artifact(root)
-    row = _withdrawn_release(key, digest, path.stat().st_size)
-    db.add(row)
-    await db.commit()
-
-    original_apply = cleanup_app_releases.apply_cleanup_candidates
-
-    def crash_after_marker(*args, **kwargs) -> None:
-        raise RuntimeError("simulated crash after marker commit")
-
-    monkeypatch.setattr(cleanup_app_releases, "apply_cleanup_candidates", crash_after_marker)
-    with pytest.raises(RuntimeError, match="simulated crash"):
+async def test_cleanup_recovers_after_commit_before_unlink_with_real_postgresql(db, tmp_path, monkeypatch, disposable_cleanup_database):
+    root = tmp_path / "release-volume"; row, path = await add_withdrawn(db, root, disposable_cleanup_database)
+    monkeypatch.setattr(cleanup_app_releases, "apply_cleanup_candidates", lambda *_: (_ for _ in ()).throw(RuntimeError("crash after marker")))
+    with pytest.raises(RuntimeError, match="crash after marker"):
         await cleanup_app_releases.cleanup_release_volume(engine, root, apply=True, now=NOW)
-
     async with SessionLocal() as session:
-        marked = await session.get(AppRelease, row.id)
-        assert marked is not None
-        assert marked.artifact_deleted_at == NOW
-    assert path.exists()
-
-    monkeypatch.setattr(cleanup_app_releases, "apply_cleanup_candidates", original_apply)
-    await cleanup_app_releases.cleanup_release_volume(engine, root, apply=True, now=NOW)
-
-    assert not path.exists()
-    async with SessionLocal() as session:
-        reconciled = await session.get(AppRelease, row.id)
-        assert reconciled is not None
-        assert reconciled.artifact_deleted_at == NOW
+        assert (await session.get(AppRelease, row.id)).artifact_deleted_at == NOW
+    assert path.exists(); monkeypatch.undo()
+    await cleanup_app_releases.cleanup_release_volume(engine, root, apply=True, now=NOW); assert not path.exists()
 
 
 @pytest.mark.asyncio
-async def test_cleanup_and_direct_publication_share_a_real_session_advisory_lock(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Catches cleanup and direct publishing taking different PostgreSQL locks."""
-    root = tmp_path / "release-volume"
-    key, _digest, path = _artifact(root)
-    # No registry row: the cleaner will plan an orphan while holding the lock.
-    cleaner_entered = asyncio.Event()
-    release_cleaner = asyncio.Event()
-    publisher_entered = asyncio.Event()
-    original_plan = cleanup_app_releases.cleanup_release_storage
-
-    async def pause_cleaner(*args, **kwargs):
-        result = await original_plan(*args, **kwargs)
-        cleaner_entered.set()
-        await release_cleaner.wait()
-        return result
-
-    monkeypatch.setattr(cleanup_app_releases, "cleanup_release_storage", pause_cleaner)
-
-    cleaner = asyncio.create_task(
-        cleanup_app_releases.cleanup_release_volume(engine, root, apply=False, now=NOW)
-    )
-    await cleaner_entered.wait()
-
-    async def publish_critical_section() -> None:
-        async with hold_release_artifact_lock(engine):
-            publisher_entered.set()
-
-    publisher = asyncio.create_task(publish_critical_section())
-    await asyncio.sleep(0.1)
-    assert not publisher_entered.is_set()
+async def test_cleanup_flush_failure_rolls_back_marker_without_unlink(db, tmp_path, monkeypatch, disposable_cleanup_database):
+    root = tmp_path / "release-volume"; row, path = await add_withdrawn(db, root, disposable_cleanup_database)
+    async def fail_flush(*args, **kwargs): raise RuntimeError("marker flush failure")
+    monkeypatch.setattr(cleanup_app_releases, "mark_cleanup_deletions", fail_flush)
+    with pytest.raises(RuntimeError, match="flush failure"):
+        await cleanup_app_releases.cleanup_release_volume(engine, root, apply=True, now=NOW)
+    async with SessionLocal() as session:
+        assert (await session.get(AppRelease, row.id)).artifact_deleted_at is None
     assert path.exists()
 
-    release_cleaner.set()
-    await cleaner
-    await publisher
-    assert publisher_entered.is_set()
-    assert key.endswith(".apk")
+
+@pytest.mark.asyncio
+async def test_cleanup_commit_failure_rolls_back_marker_without_unlink(db, tmp_path, monkeypatch, disposable_cleanup_database):
+    root = tmp_path / "release-volume"; row, path = await add_withdrawn(db, root, disposable_cleanup_database); original = cleanup_app_releases.mark_cleanup_deletions
+    async def break_commit(session, candidates, *, now):
+        await original(session, candidates, now=now); await session.execute(text("SELECT pg_terminate_backend(pg_backend_pid())"))
+    monkeypatch.setattr(cleanup_app_releases, "mark_cleanup_deletions", break_commit)
+    with pytest.raises(Exception):
+        await cleanup_app_releases.cleanup_release_volume(engine, root, apply=True, now=NOW)
+    async with SessionLocal() as session:
+        assert (await session.get(AppRelease, row.id)).artifact_deleted_at is None
+    assert path.exists()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_blocks_real_direct_apk_route(tmp_path, monkeypatch, disposable_cleanup_database):
+    source, marker = identity(); disposable_cleanup_database.append(source); root = tmp_path / "release-volume"; artifact(root, marker)
+    cleaner_entered, release_cleaner, publisher_waiting, publisher_acquired = (asyncio.Event() for _ in range(4)); plan = cleanup_app_releases.cleanup_release_storage; route_lock = internal_releases.hold_release_artifact_lock
+    async def pause(*args, **kwargs):
+        result = await plan(*args, **kwargs); cleaner_entered.set(); await release_cleaner.wait(); return result
+    @asynccontextmanager
+    async def observe(bound_engine):
+        publisher_waiting.set()
+        async with route_lock(bound_engine) as connection:
+            publisher_acquired.set(); yield connection
+    monkeypatch.setattr(cleanup_app_releases, "cleanup_release_storage", pause); monkeypatch.setattr(internal_releases, "hold_release_artifact_lock", observe)
+    monkeypatch.setattr(internal_releases, "_storage", lambda: ReleaseStorage(root))
+    cleaner = asyncio.create_task(cleanup_app_releases.cleanup_release_volume(engine, root, now=NOW)); await cleaner_entered.wait()
+    async def publish():
+        payload = b"PK\x03\x04route-publication"
+        async with SessionLocal() as setup:
+            async with setup.begin(): await set_expected_commit(setup, "android", "production-direct", source, f"route-{marker}")
+        async with SessionLocal() as request_db:
+            return await internal_releases.publish_direct_apk(channel="production-direct", source_commit=source, ci_run_id=f"route-{marker}", version_code=2, version_name="1.0.1", release_notes_ru="Исправление", release_notes_en="Fix", artifact=UploadFile(file=BytesIO(payload), filename="route.apk"), idempotency_key=f"route-{marker}", artifact_sha256=hashlib.sha256(payload).hexdigest(), db=request_db)
+    publisher = asyncio.create_task(publish()); await publisher_waiting.wait(); await asyncio.sleep(.1); assert not publisher_acquired.is_set() and not publisher.done()
+    release_cleaner.set(); await cleaner; response = await publisher; assert publisher_acquired.is_set() and getattr(response, "status_code", 201) == 201

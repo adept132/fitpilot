@@ -51,7 +51,7 @@ install -d -o 1000 -g 1000 -m 0750 /opt/eurith/releases
 ```
 
 В `/etc/eurith/release-cleanup.env` задаются `DATABASE_URL`,
-`RELEASE_STORAGE_ROOT=/var/lib/eurith/releases`, `RELEASE_PUBLISHER_TOKEN`,
+`RELEASE_STORAGE_ROOT=/opt/eurith/releases`, `RELEASE_PUBLISHER_TOKEN`,
 `RELEASE_OPERATOR_TOKEN` и `GITHUB_WEBHOOK_SECRET`. Значения генерируют вне
 репозитория, например `openssl rand -hex 32`, и передают GitHub production
 environment только через секреты. Токен publisher доступен CI, operator — только
@@ -67,8 +67,9 @@ nginx -t && systemctl reload nginx
 ```
 
 `/_release_files/` — internal location: внешний HTTP-клиент не получает доступ к
-пути volume напрямую. Upload location имеет лимит 250 MiB и выключенную request
-buffering; к Uvicorn/container port извне доступа быть не должно.
+пути volume напрямую. Nginx допускает запрос multipart до 256 MiB, чтобы вместить
+обёртку multipart; API по-прежнему отклоняет сам APK payload больше 250 MiB.
+Request buffering выключен, к Uvicorn/container port извне доступа быть не должно.
 
 ### Ежедневная очистка и контроль места
 
