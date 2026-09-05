@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from contextlib import asynccontextmanager
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -276,6 +277,33 @@ async def test_cleanup_rejects_filesystem_root_anchor_before_scanning() -> None:
     """Catches a misconfigured storage root that could sweep an entire filesystem."""
     with pytest.raises(CleanupSafetyError, match="anchor"):
         await cleanup_release_storage(CleanupSession([]), Path("/"), now=NOW)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_apply_fails_before_lock_database_or_marker_when_unlink_is_unsupported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches committing a deletion intent on a host that can never unlink safely."""
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def unexpected_lock(engine):
+        events.append("lock")
+        yield object()
+
+    async def unexpected_marker(*args, **kwargs):
+        events.append("marker")
+
+    monkeypatch.setattr(cleanup_app_releases, "_SUPPORTS_SECURE_UNLINK", False)
+    monkeypatch.setattr(cleanup_app_releases, "hold_release_artifact_lock", unexpected_lock)
+    monkeypatch.setattr(cleanup_app_releases, "mark_cleanup_deletions", unexpected_marker)
+
+    with pytest.raises(CleanupSafetyError, match="descriptor-relative"):
+        await cleanup_app_releases.cleanup_release_volume(
+            object(), tmp_path, apply=True, now=NOW
+        )
+
+    assert events == []
 
 
 def test_cleanup_apply_fails_closed_without_descriptor_relative_unlink(

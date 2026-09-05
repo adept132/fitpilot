@@ -332,6 +332,12 @@ async def cleanup_release_volume(
     The session advisory lock stays on one explicitly owned connection across
     both phases.  A crash after the marker commit is converged by the next run.
     """
+    if apply and not _SUPPORTS_SECURE_UNLINK:
+        # Never persist an irreversible deletion intent on a platform where
+        # the filesystem half of the protocol is intentionally unavailable.
+        raise CleanupSafetyError(
+            "cleanup apply requires descriptor-relative unlink support"
+        )
     timestamp = _now(now)
     async with hold_release_artifact_lock(engine) as connection:
         async with AsyncSession(bind=connection, expire_on_commit=False) as session:

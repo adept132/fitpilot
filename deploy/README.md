@@ -86,13 +86,51 @@ the shared GID. Staging files stay `0600` while validation is in progress;
 after atomic finalization the API sets the final APK to `0640`, so nginx can
 read it but cannot change it. The API runtime identity owns writes; the host
 cleanup service runs as `eurith` with `SupplementaryGroups=eurith-releases`.
+Paths deliberately differ by mount namespace: the API/container uses
+`RELEASE_STORAGE_ROOT=/var/lib/eurith/releases`, while host cleanup uses
+`RELEASE_STORAGE_ROOT=/opt/eurith/releases`.
 
-`/etc/eurith/release-cleanup.env` содержит только `DATABASE_URL` и
-`RELEASE_STORAGE_ROOT=/opt/eurith/releases`. API secrets (`RELEASE_PUBLISHER_TOKEN`,
-`RELEASE_OPERATOR_TOKEN`, `GITHUB_WEBHOOK_SECRET`) остаются в отдельном API
-EnvironmentFile; их нельзя давать cleanup service. Оба файла принадлежат
-`root:eurith` и имеют режим `0640`; не копируйте их в checkout, image, логи или
-systemd unit.
+### Release secrets and environment files
+
+Generate three independent 256-bit values directly into the protected API
+EnvironmentFile. Do this once on the server as root; never replace them with
+shared or human-created passwords:
+
+```bash
+install -o root -g eurith -m 0640 /dev/null /etc/eurith/api-release.env
+{
+  printf 'RELEASE_PUBLISHER_TOKEN='
+  openssl rand -hex 32
+  printf 'RELEASE_OPERATOR_TOKEN='
+  openssl rand -hex 32
+  printf 'GITHUB_WEBHOOK_SECRET='
+  openssl rand -hex 32
+  printf 'RELEASE_STORAGE_ROOT=/var/lib/eurith/releases\n'
+} > /etc/eurith/api-release.env
+chown root:eurith /etc/eurith/api-release.env
+chmod 0640 /etc/eurith/api-release.env
+```
+
+- `RELEASE_PUBLISHER_TOKEN` authenticates CI publication, CI-run binding and
+  withdrawal endpoints. Store the matching value as a masked GitHub Actions
+  repository/environment secret and in `/etc/eurith/api-release.env`; do not
+  give it to cleanup.
+- `RELEASE_OPERATOR_TOKEN` controls the manual mandatory-update endpoint.
+  Store its client copy in the operator password manager/secret vault and its
+  server copy only in `/etc/eurith/api-release.env`; do not put it in GitHub
+  Actions or cleanup.
+- `GITHUB_WEBHOOK_SECRET` verifies `X-Hub-Signature-256` on push webhooks.
+  Copy the matching value into the GitHub repository webhook **Secret** field
+  and keep its server copy only in `/etc/eurith/api-release.env`; it is not a
+  bearer token and must not be reused as either release token.
+
+Create `/etc/eurith/release-cleanup.env` separately. It contains only
+`DATABASE_URL` and host-visible
+`RELEASE_STORAGE_ROOT=/opt/eurith/releases`; it never receives publisher,
+operator or webhook secrets. Both EnvironmentFiles are `root:eurith` mode
+`0640`; never copy them into checkout, image, command output, logs or unit
+files. Point only the API/container service at `api-release.env`, and only the
+host cleanup unit below at `release-cleanup.env`.
 
 Подключите `deploy/nginx/releases.conf` к HTTPS virtual host. До reload проверьте
 конфигурацию, затем примените её:
