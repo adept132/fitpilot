@@ -526,6 +526,21 @@ async def _compatible_ota(
     ).scalars().first()
 
 
+def _mandatory_for_available_release(
+    release: AppRelease,
+    current_version_code: int,
+    current_is_withdrawn: bool,
+) -> bool:
+    return (
+        bool(release.is_mandatory)
+        or (
+            release.min_supported_version_code is not None
+            and current_version_code < release.min_supported_version_code
+        )
+        or current_is_withdrawn
+    )
+
+
 async def latest_instruction(session: AsyncSession, query: Any) -> LatestResult:
     """Choose a direct binary first, then an exactly compatible EAS update."""
 
@@ -539,7 +554,9 @@ async def latest_instruction(session: AsyncSession, query: Any) -> LatestResult:
         session, platform, channel, current_version_code
     )
     if direct is not None and direct.version_code > current_version_code:
-        mandatory = bool(direct.is_mandatory) or current_is_withdrawn
+        mandatory = _mandatory_for_available_release(
+            direct, current_version_code, current_is_withdrawn
+        )
         return LatestResult(
             current_version_code=current_version_code,
             update_available=True,
@@ -552,10 +569,13 @@ async def latest_instruction(session: AsyncSession, query: Any) -> LatestResult:
         session, platform, channel, current_version_code, runtime_version
     )
     if ota is not None:
+        mandatory = _mandatory_for_available_release(
+            ota, current_version_code, current_is_withdrawn
+        )
         return LatestResult(
             current_version_code=current_version_code,
             update_available=True,
-            mandatory=bool(ota.is_mandatory),
+            mandatory=mandatory,
             current_release_withdrawn=current_is_withdrawn,
             release=ota,
         )

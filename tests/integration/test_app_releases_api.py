@@ -37,8 +37,14 @@ def _commit(seed: str) -> str:
     return hashlib.sha1(seed.encode("utf-8")).hexdigest()
 
 
-def _metadata(*, source_commit: str, ci_run_id: str, version_code: int) -> dict[str, str]:
-    return {
+def _metadata(
+    *,
+    source_commit: str,
+    ci_run_id: str,
+    version_code: int,
+    min_supported_version_code: int | None = None,
+) -> dict[str, str]:
+    metadata = {
         "channel": "production-direct",
         "source_commit": source_commit,
         "ci_run_id": ci_run_id,
@@ -49,6 +55,9 @@ def _metadata(*, source_commit: str, ci_run_id: str, version_code: int) -> dict[
         "release_notes_ru": "Исправления",
         "release_notes_en": "Fixes",
     }
+    if min_supported_version_code is not None:
+        metadata["min_supported_version_code"] = str(min_supported_version_code)
+    return metadata
 
 
 async def _signed_push(
@@ -133,7 +142,10 @@ async def test_publish_latest_download_withdraw_cycle(client, release_headers, t
             "X-Artifact-SHA256": _sha256(),
         },
         data=_metadata(
-            source_commit=source_commit, ci_run_id=delivery_id, version_code=version_code
+            source_commit=source_commit,
+            ci_run_id=delivery_id,
+            version_code=version_code,
+            min_supported_version_code=version_code - 1,
         ),
         files={"artifact": ("eurith.apk", APK_BYTES, "application/vnd.android.package-archive")},
     )
@@ -144,12 +156,39 @@ async def test_publish_latest_download_withdraw_cycle(client, release_headers, t
         "/app-releases/android/latest",
         params={
             "channel": "production-direct",
-            "current_version_code": version_code - 1,
+            "current_version_code": version_code - 2,
             "runtime_version": "1.0.0",
         },
     )
     assert latest.status_code == 200
     assert latest.json()["release"]["id"] == release_id
+    assert latest.json()["release"]["min_supported_version_code"] == version_code - 1
+    assert latest.json()["mandatory"] is True
+
+    at_threshold = await client.get(
+        "/app-releases/android/latest",
+        params={
+            "channel": "production-direct",
+            "current_version_code": version_code - 1,
+            "runtime_version": "1.0.0",
+        },
+    )
+    assert at_threshold.status_code == 200
+    assert at_threshold.json()["update_available"] is True
+    assert at_threshold.json()["mandatory"] is False
+
+    no_downgrade = await client.get(
+        "/app-releases/android/latest",
+        params={
+            "channel": "production-direct",
+            "current_version_code": version_code,
+            "runtime_version": "1.0.0",
+        },
+    )
+    assert no_downgrade.status_code == 200
+    assert no_downgrade.json()["update_available"] is False
+    assert no_downgrade.json()["mandatory"] is False
+    assert no_downgrade.json()["release"] is None
     ledger = await client.get(
         "/internal/app-releases/lanes/android/production-direct", headers=release_headers
     )
@@ -439,10 +478,23 @@ async def test_eas_ledger_mandatory_and_concurrent_publish(client, release_heade
             "fingerprint": "fingerprint-1",
             "eas_update_group_id": str(uuid4()),
             "release_notes": {"ru": "Исправления", "en": "Fixes"},
+            "min_supported_version_code": 104,
         },
     )
     assert eas.status_code == 201
     eas_id = eas.json()["release"]["id"]
+    eas_latest = await client.get(
+        "/app-releases/android/latest",
+        params={
+            "channel": "production-direct",
+            "current_version_code": 104,
+            "runtime_version": "1.0.0",
+        },
+    )
+    assert eas_latest.status_code == 200
+    assert eas_latest.json()["release"]["id"] == eas_id
+    assert eas_latest.json()["release"]["min_supported_version_code"] == 104
+    assert eas_latest.json()["mandatory"] is False
     not_manual = await client.patch(
         f"/internal/app-releases/{eas_id}/mandatory",
         headers={**release_headers, "X-Release-Manual-Operation": "true"},
@@ -455,6 +507,16 @@ async def test_eas_ledger_mandatory_and_concurrent_publish(client, release_heade
         json={"mandatory": True},
     )
     assert manual.status_code == 200
+    mandatory_latest = await client.get(
+        "/app-releases/android/latest",
+        params={
+            "channel": "production-direct",
+            "current_version_code": 104,
+            "runtime_version": "1.0.0",
+        },
+    )
+    assert mandatory_latest.status_code == 200
+    assert mandatory_latest.json()["mandatory"] is True
 
     headers = {
         **release_headers,

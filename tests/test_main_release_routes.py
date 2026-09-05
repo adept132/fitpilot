@@ -123,6 +123,31 @@ def test_latest_returns_direct_download_instruction(monkeypatch):
     assert instruction["download_url"].endswith(f"/app-releases/{release.id}/download")
     assert instruction["sha256"] == release.artifact_sha256
     assert instruction["size_bytes"] == release.artifact_size_bytes
+    assert instruction["min_supported_version_code"] is None
+
+
+def test_latest_exposes_minimum_supported_version_code(monkeypatch):
+    routes = _router_module()
+    release = _release(min_supported_version_code=2)
+
+    async def selected_instruction(_db, _query):
+        return SimpleNamespace(
+            current_version_code=1,
+            update_available=True,
+            mandatory=True,
+            current_release_withdrawn=False,
+            release=release,
+        )
+
+    monkeypatch.setattr(routes, "latest_instruction", selected_instruction)
+    response = TestClient(app).get(
+        "/app-releases/android/latest",
+        params={"channel": "production-direct", "current_version_code": 1},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["mandatory"] is True
+    assert response.json()["release"]["min_supported_version_code"] == 2
 
 
 def test_latest_returns_compatible_eas_instruction(monkeypatch):
@@ -133,6 +158,7 @@ def test_latest_returns_compatible_eas_instruction(monkeypatch):
         artifact_sha256=None,
         artifact_size_bytes=None,
         eas_update_group_id="update-group-1",
+        min_supported_version_code=2,
     )
 
     async def selected_instruction(_db, _query):
@@ -160,6 +186,7 @@ def test_latest_returns_compatible_eas_instruction(monkeypatch):
     assert instruction["eas_update_group_id"] == "update-group-1"
     assert instruction["download_url"] is None
     assert instruction["sha256"] is None
+    assert instruction["min_supported_version_code"] == 2
 
 
 def test_latest_rejects_unknown_channel_and_non_positive_version():

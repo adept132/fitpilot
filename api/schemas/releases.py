@@ -102,6 +102,7 @@ class PublicRelease(BaseModel):
     delivery_method: DeliveryMethod
     version_code: VersionCode
     version_name: VersionName
+    min_supported_version_code: VersionCode | None = None
     runtime_version: str | None = None
     release_notes: ReleaseNotes
     published_at: datetime

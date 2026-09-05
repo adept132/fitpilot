@@ -52,6 +52,7 @@ def _public_release(release: AppRelease, request: Request) -> PublicRelease:
         delivery_method=record.delivery_method,
         version_code=record.version_code,
         version_name=record.version_name,
+        min_supported_version_code=record.min_supported_version_code,
         runtime_version=record.runtime_version,
         release_notes=record.release_notes,
         published_at=record.published_at,

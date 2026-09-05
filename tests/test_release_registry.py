@@ -593,6 +593,123 @@ async def test_direct_binary_is_not_offered_when_current_version_is_equal_or_new
 
     assert result.release is None
     assert result.update_available is False
+    assert result.mandatory is False
+
+
+@pytest.mark.parametrize(
+    ("current_version_code", "expected_mandatory"),
+    [(2, True), (3, False), (4, False)],
+)
+async def test_minimum_supported_version_makes_available_direct_update_mandatory_only_below_threshold(
+    current_version_code: int,
+    expected_mandatory: bool,
+) -> None:
+    session = RegistrySession()
+    await publish_direct(
+        session,
+        version_code=5,
+        version_name="1.0.5",
+        idempotency_key="v5-min-3",
+        min_supported_version_code=3,
+    )
+
+    result = await latest_instruction(
+        session, latest(current_version_code=current_version_code)
+    )
+
+    assert result.release is not None
+    assert result.mandatory is expected_mandatory
+
+
+async def test_null_minimum_supported_version_does_not_make_direct_update_mandatory() -> None:
+    session = RegistrySession()
+    await publish_direct(
+        session,
+        version_code=5,
+        version_name="1.0.5",
+        idempotency_key="v5-no-min",
+        min_supported_version_code=None,
+    )
+
+    result = await latest_instruction(session, latest(current_version_code=1))
+
+    assert result.release is not None
+    assert result.mandatory is False
+
+
+async def test_explicit_mandatory_still_makes_available_direct_update_mandatory() -> None:
+    session = RegistrySession()
+    published = await publish_direct(
+        session,
+        version_code=5,
+        version_name="1.0.5",
+        idempotency_key="v5-explicit",
+        min_supported_version_code=3,
+    )
+    published.release.is_mandatory = True
+
+    result = await latest_instruction(session, latest(current_version_code=4))
+
+    assert result.release is not None
+    assert result.mandatory is True
+
+
+async def test_compatible_eas_at_its_minimum_supported_version_is_not_implicitly_mandatory() -> None:
+    session = RegistrySession()
+    await set_expected_commit(
+        session, "android", "production-direct", "a" * 40, "run-2"
+    )
+    await publish_eas_release(
+        session,
+        command(
+            delivery_method="eas_update",
+            version_code=2,
+            version_name="1.0.2",
+            runtime_version="runtime-2",
+            eas_update_group_id="group-min-2",
+            idempotency_key="ota-min-2",
+            min_supported_version_code=2,
+        ),
+    )
+
+    result = await latest_instruction(
+        session, latest(current_version_code=2, runtime_version="runtime-2")
+    )
+
+    assert result.release is not None
+    assert result.mandatory is False
+
+
+async def test_withdrawn_installed_direct_forces_compatible_eas_update_mandatory() -> None:
+    session = RegistrySession()
+    installed = await publish_direct(
+        session,
+        version_code=2,
+        version_name="1.0.2",
+        runtime_version="runtime-2",
+        idempotency_key="withdrawn-v2",
+    )
+    await withdraw_release(session, installed.release.id, "broken runtime")
+    await publish_eas_release(
+        session,
+        command(
+            delivery_method="eas_update",
+            version_code=2,
+            version_name="1.0.2",
+            runtime_version="runtime-2",
+            eas_update_group_id="replacement-group-v2",
+            idempotency_key="replacement-ota-v2",
+        ),
+    )
+
+    result = await latest_instruction(
+        session, latest(current_version_code=2, runtime_version="runtime-2")
+    )
+
+    assert result.release is not None
+    assert result.release.delivery_method == "eas_update"
+    assert result.current_release_withdrawn is True
+    assert result.mandatory is True
 
 
 async def test_automatic_publication_never_sets_mandatory() -> None:
