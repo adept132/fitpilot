@@ -1,14 +1,16 @@
 # Backend update-center verification checklist
 
-Verification timestamp (UTC): `2026-09-05T03:30:26Z`
+Verification updated (UTC): `2026-09-06`
 
-Implementation HEAD under test: `36eb2b7408db1b11309f34ca95390b33b2565c83`
+Baseline before the CI retry-binding delta: `000c974`. The delta described
+below was verified from that baseline; its exact commit is recorded in Git
+history rather than embedded in the commit itself.
 
 Environment: Windows 11, Python 3.13.7, PostgreSQL client 17.7, local PostgreSQL only.
 
 This checklist contains no token, password, database URL, Firebase credential, or
 artifact from a real release. Every database used by the checks had a unique
-`fitpilot_task8_*` name and was dropped after the check. The local source
+`fitpilot_task8_*` or `fitpilot_task9_*` name and was dropped after its checks. The local source
 `fitpilot` database was only read by `pg_dump --schema-only`; no source rows or
 schema objects were changed.
 
@@ -37,11 +39,11 @@ this Firebase fixture even when the row abbreviates the environment to
 
 | Area | Sanitized command | Result |
 | --- | --- | --- |
-| Focused config/auth/storage/registry/cleanup/public API | `FIREBASE_CREDENTIALS=<external-test-fixture-json> python -m pytest tests/test_required_config.py tests/test_release_auth.py tests/test_release_migration.py tests/test_release_storage.py tests/test_release_registry.py tests/test_release_cleanup.py tests/test_main_release_routes.py -q` with synthetic required settings | PASS — 109 passed, 8 skipped, 15 warnings; includes `min_supported_version_code` below/equal/above/null, explicit mandatory, withdrawn escalation, and public direct/EAS response contracts |
+| Focused config/auth/storage/registry/cleanup/public API | `FIREBASE_CREDENTIALS=<external-test-fixture-json> python -m pytest tests/test_required_config.py tests/test_release_auth.py tests/test_release_migration.py tests/test_release_storage.py tests/test_release_registry.py tests/test_release_cleanup.py tests/test_main_release_routes.py -q` with synthetic required settings | PASS — 110 passed, 8 skipped, 15 warnings; includes retry binding takeover/revocation, `min_supported_version_code` below/equal/above/null, explicit mandatory, withdrawn escalation, and public direct/EAS response contracts |
 | Test database guards | `FIREBASE_CREDENTIALS=<external-test-fixture-json> python -m pytest tests/test_release_cleanup_guard.py tests/test_integration_database_guard.py -q` with synthetic required settings | PASS — 14 passed |
-| Full non-integration suite | `FIREBASE_CREDENTIALS=<external-test-fixture-json> python -m pytest tests --ignore=tests/integration -q` with synthetic required settings | PASS — 1,951 passed, 8 skipped, 15 warnings |
+| Full non-integration suite | `FIREBASE_CREDENTIALS=<external-test-fixture-json> python -m pytest tests --ignore=tests/integration -q` with synthetic required settings | PASS — 1,952 passed, 8 skipped, 15 warnings |
 | Current-like schema upgrade | `pg_dump --schema-only --no-owner --no-privileges <source-db> -f <temp-schema>; psql <task8-db> -f <temp-schema>; DATABASE_URL=<task8-url> alembic stamp 20260822_02; alembic upgrade head; alembic current` | PASS — restored schema upgraded through `20260830_01`, `20260830_02`, `20260902_01`; current is `20260902_01 (head)` |
-| Release PostgreSQL integration | `FIREBASE_CREDENTIALS=<external-test-fixture-json> TEST_DATABASE_URL=<task8-url> python -m pytest tests/integration/test_app_releases_api.py tests/integration/test_release_cleanup_integration.py -q` with synthetic required settings | PASS WITH PLATFORM SKIPS — 9 passed, 4 skipped; direct publication verifies below-threshold mandatory, equal-threshold optional, no-update/non-downgrade behavior and the response field; EAS verifies the response field plus explicit mandatory |
+| Release PostgreSQL integration | `FIREBASE_CREDENTIALS=<external-test-fixture-json> TEST_DATABASE_URL=<task-url> python -m pytest tests/integration/test_app_releases_api.py tests/integration/test_release_cleanup_integration.py -q` with synthetic required settings | PASS WITH PLATFORM SKIPS — 10 passed, 4 skipped; includes same-SHA CI retry takeover, old-run publish rejection, newest-run publish success, direct publication thresholds, and EAS mandatory behavior |
 | Release migration boundary | `DATABASE_URL=<task8-url> alembic downgrade 20260830_02; alembic upgrade head; alembic current` | PASS — returned to `20260902_01 (head)` |
 | Protected publish/public API smoke | `FIREBASE_CREDENTIALS=<external-test-fixture-json> TEST_DATABASE_URL=<task8-url> python -m pytest tests/integration/test_app_releases_api.py::test_publish_latest_download_withdraw_cycle -q` with synthetic required settings | PASS — 1 passed; checks webhook target and CI binding, synthetic APK publication, latest, `X-Accel-Redirect`, local stored bytes and SHA-256, withdrawal, download `410`, and no update after withdrawal |
 | Explicit-Russian legacy regressions | `FIREBASE_CREDENTIALS=<external-test-fixture-json> TEST_DATABASE_URL=<task8-url> python -m pytest <two-goal-primary-cases> <two-microcycle-conflict-cases> -q` with synthetic required settings after adding `Accept-Language: ru` | PASS — 4 passed |
@@ -108,3 +110,19 @@ observed.
 
 Release publication and production deployment remain prohibited until every
 applicable gate above has explicit evidence and operator approval.
+
+## CI retry-binding delta — 2026-09-06
+
+- Unit policy regression: `tests/test_release_registry.py` verifies that a new
+  CI run can take over the unchanged expected SHA, the previous run is rejected
+  on publish, and the newest run publishes successfully.
+- Disposable PostgreSQL API regression:
+  `tests/integration/test_app_releases_api.py::test_retry_binding_revokes_old_run_and_accepts_new_run`
+  passed against a unique local `fitpilot_task9_*` database with synthetic
+  Firebase and release credentials. The source database was not changed.
+- The complete release API integration file passed: **10 passed**, with only
+  the pre-existing Pydantic/FastAPI deprecation warnings and Windows pytest
+  temporary-directory cleanup warning.
+- The endpoint remains protected by `RELEASE_PUBLISHER_TOKEN`; stale SHA binds
+  remain `409`. Same-SHA retries are latest-attempt-wins under the same lane
+  advisory lock used by publication.

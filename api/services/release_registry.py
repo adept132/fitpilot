@@ -310,18 +310,21 @@ async def bind_expected_ci_run(
     source_commit: str,
     ci_run_id: str,
 ) -> AppReleaseLane:
-    """Bind one concrete CI run only to the currently webhooked target SHA."""
+    """Bind the newest CI attempt only to the currently webhooked target SHA.
+
+    The lane lock serializes retries for the same commit.  Rebinding revokes
+    the previous attempt immediately because publication checks this field
+    while holding the same lock.
+    """
 
     async with _transaction(session):
         await _lock_lane(session, platform, channel)
         lane = await _lane(session, platform, channel)
         if lane is None or lane.expected_source_commit != source_commit:
             raise StaleReleaseError("release source commit is no longer expected for this lane")
-        if lane.expected_ci_run_id is None:
+        if lane.expected_ci_run_id != ci_run_id:
             lane.expected_ci_run_id = ci_run_id
             await session.flush()
-        elif lane.expected_ci_run_id != ci_run_id:
-            raise ReleaseConflictError("a different CI run is already bound to this lane")
         return lane
 
 

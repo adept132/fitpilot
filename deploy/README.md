@@ -124,6 +124,25 @@ chmod 0640 /etc/eurith/api-release.env
   and keep its server copy only in `/etc/eurith/api-release.env`; it is not a
   bearer token and must not be reused as either release token.
 
+### CI retry binding contract
+
+The protected `POST /internal/app-releases/lanes/android/{channel}/ci-run`
+endpoint is **latest-attempt-wins for the lane's current webhook target SHA**.
+The workflow must bind its own CI run immediately before publishing. A retry
+for the exact same `source_commit` atomically replaces the earlier run ID; the
+earlier run then receives `409` from every subsequent publish attempt, while an
+idempotent repeat of the newest binding remains successful. A bind for any SHA
+other than the lane's current webhook target receives `409` and cannot change
+the lane. The next accepted GitHub push advances the target SHA and clears the
+run binding before a new workflow binds.
+
+Keep GitHub workflow concurrency serialized per release lane. The backend also
+serializes bind and publish decisions with the same PostgreSQL lane lock, so a
+late request can never publish after a newer binding has committed. Only the
+trusted release workflow may receive `RELEASE_PUBLISHER_TOKEN`; never expose
+the binding endpoint or token to an artifact, pull-request job, or mobile
+client.
+
 Create `/etc/eurith/release-cleanup.env` separately. It contains only
 `DATABASE_URL` and host-visible
 `RELEASE_STORAGE_ROOT=/opt/eurith/releases`; it never receives publisher,

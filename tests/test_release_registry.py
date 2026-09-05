@@ -17,6 +17,7 @@ from api.services.release_registry import (
     StaleReleaseError,
     VersionConflictError,
     advance_github_mobile_push_targets,
+    bind_expected_ci_run,
     VersionRegressionError,
     advisory_key,
     latest_instruction,
@@ -295,6 +296,33 @@ async def test_direct_publish_requires_the_expected_ci_run_for_the_expected_comm
 
     assert second.release.id == first.release.id
     assert second.created is False
+
+
+async def test_retry_ci_run_takes_over_same_commit_and_revokes_previous_run() -> None:
+    session = RegistrySession()
+    source_commit = "a" * 40
+    await set_expected_commit(
+        session, "android", "production-direct", source_commit, "first-run"
+    )
+
+    rebound = await bind_expected_ci_run(
+        session, "android", "production-direct", source_commit, "retry-run"
+    )
+
+    assert rebound.expected_ci_run_id == "retry-run"
+    with pytest.raises(StaleReleaseError):
+        await publish_direct_release(
+            session,
+            command(ci_run_id="first-run", idempotency_key="revoked-run"),
+            stored(),
+        )
+
+    published = await publish_direct_release(
+        session,
+        command(ci_run_id="retry-run", idempotency_key="retry-run"),
+        stored(),
+    )
+    assert published.created is True
 
 
 async def test_eas_publish_requires_the_expected_ci_run_for_the_expected_commit() -> None:

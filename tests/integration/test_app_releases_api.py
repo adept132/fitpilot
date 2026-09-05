@@ -458,7 +458,7 @@ async def test_eas_ledger_mandatory_and_concurrent_publish(client, release_heade
         await _bind_ci_run(
             client, release_headers, source_commit=source_commit, ci_run_id="another-run"
         )
-    ).status_code == 409
+    ).status_code == 200
     assert (
         await _bind_ci_run(
             client, release_headers, source_commit=_commit("wrong-target"), ci_run_id="wrong"
@@ -471,7 +471,7 @@ async def test_eas_ledger_mandatory_and_concurrent_publish(client, release_heade
         json={
             "channel": "production-direct",
             "source_commit": source_commit,
-            "ci_run_id": delivery_id,
+            "ci_run_id": "another-run",
             "version_code": 104,
             "version_name": "1.0.0",
             "runtime_version": "1.0.0",
@@ -523,7 +523,8 @@ async def test_eas_ledger_mandatory_and_concurrent_publish(client, release_heade
         "Idempotency-Key": "direct:concurrent",
         "X-Artifact-SHA256": _sha256(),
     }
-    payload = _metadata(source_commit=source_commit, ci_run_id=delivery_id, version_code=105)
+    payload = _metadata(source_commit=source_commit, ci_run_id="another-run", version_code=105)
+
     async def publish():
         return await client.post(
             "/internal/app-releases/android/direct-apk", headers=headers, data=payload,
@@ -533,3 +534,52 @@ async def test_eas_ledger_mandatory_and_concurrent_publish(client, release_heade
     responses = await asyncio.gather(publish(), publish())
     assert sorted(response.status_code for response in responses) == [200, 201]
     assert len({response.json()["release"]["id"] for response in responses}) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_binding_revokes_old_run_and_accepts_new_run(client, release_headers):
+    source_commit = _commit("retry-binding")
+    first_run = "retry-binding-first"
+    newest_run = "retry-binding-newest"
+    assert (
+        await _signed_push(
+            client, source_commit=source_commit, delivery_id="retry-binding-push"
+        )
+    ).status_code == 200
+
+    first = await _bind_ci_run(
+        client, release_headers, source_commit=source_commit, ci_run_id=first_run
+    )
+    retry = await _bind_ci_run(
+        client, release_headers, source_commit=source_commit, ci_run_id=newest_run
+    )
+    assert first.status_code == 200
+    assert retry.status_code == 200
+    assert retry.json()["expected_ci_run_id"] == newest_run
+
+    def eas_payload(ci_run_id: str, group_id: str) -> dict:
+        return {
+            "channel": "production-direct",
+            "source_commit": source_commit,
+            "ci_run_id": ci_run_id,
+            "version_code": 106,
+            "version_name": "1.0.0",
+            "runtime_version": "1.0.0",
+            "fingerprint": "retry-binding-fingerprint",
+            "eas_update_group_id": group_id,
+            "release_notes": {"ru": "Исправления", "en": "Fixes"},
+        }
+
+    old_publish = await client.post(
+        "/internal/app-releases/android/eas-update",
+        headers={**release_headers, "Idempotency-Key": "retry-binding:old"},
+        json=eas_payload(first_run, str(uuid4())),
+    )
+    new_publish = await client.post(
+        "/internal/app-releases/android/eas-update",
+        headers={**release_headers, "Idempotency-Key": "retry-binding:new"},
+        json=eas_payload(newest_run, str(uuid4())),
+    )
+
+    assert old_publish.status_code == 409
+    assert new_publish.status_code == 201
