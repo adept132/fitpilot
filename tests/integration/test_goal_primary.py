@@ -10,6 +10,10 @@ from app.database import SessionLocal
 pytestmark = pytest.mark.asyncio
 
 
+def _ru_headers(headers: dict[str, str]) -> dict[str, str]:
+    return {**headers, "Accept-Language": "ru"}
+
+
 async def _make_goal(user_id: int, exercise_id: int | None, deadline, goal_type="strength"):
     async with SessionLocal() as db:
         goal = UserGoal(
@@ -44,14 +48,22 @@ async def test_non_strength_goal_cannot_be_primary(client, auth_headers, test_us
     goal_id = await _make_goal(
         test_user.id, None, date.today() + timedelta(days=90), goal_type="bodyweight"
     )
-    r = await client.patch(f"/goals/{goal_id}", json={"is_primary": True}, headers=auth_headers)
+    r = await client.patch(
+        f"/goals/{goal_id}",
+        json={"is_primary": True},
+        headers=_ru_headers(auth_headers),
+    )
     assert r.status_code == 400
     assert "силов" in r.json()["detail"].lower()
 
 
 async def test_goal_without_deadline_cannot_be_primary(client, auth_headers, test_user, fresh_exercise):
     goal_id = await _make_goal(test_user.id, fresh_exercise.id, None)
-    r = await client.patch(f"/goals/{goal_id}", json={"is_primary": True}, headers=auth_headers)
+    r = await client.patch(
+        f"/goals/{goal_id}",
+        json={"is_primary": True},
+        headers=_ru_headers(auth_headers),
+    )
     assert r.status_code == 400
     assert "срок" in r.json()["detail"].lower()
 

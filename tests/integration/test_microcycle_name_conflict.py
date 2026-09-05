@@ -12,6 +12,10 @@ pytestmark = pytest.mark.asyncio
 _PAYLOAD_DAYS = {"1": {"type": "hard", "tag": "push"}, "2": {"type": "rest", "tag": None}}
 
 
+def _ru_headers(headers: dict[str, str]) -> dict[str, str]:
+    return {**headers, "Accept-Language": "ru"}
+
+
 def _payload(name: str) -> dict:
     return {"name": name, "length_days": 2, "days_mapping": _PAYLOAD_DAYS}
 
@@ -32,7 +36,9 @@ async def test_create_with_taken_name_is_409(client, auth_headers, test_user):
     name = f"Занято {uuid.uuid4().hex[:8]}"
     await _make_microcycle(test_user.id, name)
 
-    r = await client.post("/microcycles/", json=_payload(name), headers=auth_headers)
+    r = await client.post(
+        "/microcycles/", json=_payload(name), headers=_ru_headers(auth_headers)
+    )
     assert r.status_code == 409, r.text
     assert "имен" in r.json()["detail"].lower()
 
@@ -43,7 +49,9 @@ async def test_rename_into_taken_name_is_409(client, auth_headers, test_user):
     editable_id = await _make_microcycle(test_user.id, f"Своё {uuid.uuid4().hex[:8]}")
 
     r = await client.put(
-        f"/microcycles/{editable_id}", json=_payload(taken), headers=auth_headers
+        f"/microcycles/{editable_id}",
+        json=_payload(taken),
+        headers=_ru_headers(auth_headers),
     )
     assert r.status_code == 409, r.text
     assert "имен" in r.json()["detail"].lower()

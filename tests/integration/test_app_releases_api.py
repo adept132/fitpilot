@@ -110,7 +110,7 @@ def release_headers() -> dict[str, str]:
 
 
 @pytest.mark.asyncio
-async def test_publish_latest_download_withdraw_cycle(client, release_headers):
+async def test_publish_latest_download_withdraw_cycle(client, release_headers, tmp_path):
     source_commit = _commit("publish-cycle")
     delivery_id = "delivery-publish-cycle"
     version_code = 101
@@ -168,7 +168,14 @@ async def test_publish_latest_download_withdraw_cycle(client, release_headers):
             "eas_update_group_id": None,
         },
     }
-    assert (await client.get(f"/app-releases/{release_id}/download")).status_code == 200
+    download = await client.get(f"/app-releases/{release_id}/download")
+    assert download.status_code == 200
+    assert download.headers["x-accel-redirect"] == (
+        f"/_release_files/android/sha256/{_sha256()}.apk"
+    )
+    stored_artifact = tmp_path / "releases" / "android" / "sha256" / f"{_sha256()}.apk"
+    assert stored_artifact.read_bytes() == APK_BYTES
+    assert hashlib.sha256(stored_artifact.read_bytes()).hexdigest() == _sha256()
 
     withdrawn = await client.post(
         f"/internal/app-releases/{release_id}/withdraw",
@@ -177,6 +184,16 @@ async def test_publish_latest_download_withdraw_cycle(client, release_headers):
     )
     assert withdrawn.status_code == 200
     assert (await client.get(f"/app-releases/{release_id}/download")).status_code == 410
+    after_withdrawal = await client.get(
+        "/app-releases/android/latest",
+        params={
+            "channel": "production-direct",
+            "current_version_code": version_code - 1,
+            "runtime_version": "1.0.0",
+        },
+    )
+    assert after_withdrawal.status_code == 200
+    assert after_withdrawal.json()["update_available"] is False
 
 
 @pytest.mark.asyncio
