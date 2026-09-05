@@ -12,19 +12,40 @@ artifact from a real release. Every database used by the checks had a unique
 `fitpilot` database was only read by `pg_dump --schema-only`; no source rows or
 schema objects were changed.
 
+### Test-only Firebase import prerequisite
+
+Tests that import `api.main` require Firebase Admin initialization even though
+they replace authentication and never call Firebase. Before each such command,
+set `FIREBASE_CREDENTIALS=<external-test-fixture-json>`, where the value is a
+synthetic service-account-shaped JSON object with a freshly generated temporary
+RSA private key and an unmistakably test-only project/email. Generate it in
+memory in the invoking shell (the verification used Windows/.NET RSA), pass it
+only through the child process environment, and remove the environment variable
+and key object in `finally`. Do not copy a real service account, write the
+fixture into the checkout, commit it, print its JSON/key, or reuse it outside
+this test process. An equivalent import-only fixture outside the repository is
+acceptable if it has the same lifecycle and never weakens application auth.
+
+Every sanitized pytest command below that says `with synthetic required
+settings` therefore includes
+`FIREBASE_CREDENTIALS=<external-test-fixture-json>` plus distinct synthetic
+publisher/operator/webhook values. PostgreSQL integration commands also include
+this Firebase fixture even when the row abbreviates the environment to
+`TEST_DATABASE_URL=<task8-url>`.
+
 ## Automated evidence
 
 | Area | Sanitized command | Result |
 | --- | --- | --- |
-| Focused config/auth/storage/registry/cleanup/public API | `python -m pytest tests/test_required_config.py tests/test_release_auth.py tests/test_release_migration.py tests/test_release_storage.py tests/test_release_registry.py tests/test_release_cleanup.py tests/test_main_release_routes.py -q` with synthetic required settings | PASS — 101 passed, 8 skipped, 15 warnings |
-| Test database guards | `python -m pytest tests/test_release_cleanup_guard.py tests/test_integration_database_guard.py -q` | PASS — 14 passed |
-| Full non-integration suite | `python -m pytest tests --ignore=tests/integration -q` with synthetic required settings | PASS — 1,943 passed, 8 skipped, 15 warnings |
+| Focused config/auth/storage/registry/cleanup/public API | `FIREBASE_CREDENTIALS=<external-test-fixture-json> python -m pytest tests/test_required_config.py tests/test_release_auth.py tests/test_release_migration.py tests/test_release_storage.py tests/test_release_registry.py tests/test_release_cleanup.py tests/test_main_release_routes.py -q` with synthetic required settings | PASS — 101 passed, 8 skipped, 15 warnings |
+| Test database guards | `FIREBASE_CREDENTIALS=<external-test-fixture-json> python -m pytest tests/test_release_cleanup_guard.py tests/test_integration_database_guard.py -q` with synthetic required settings | PASS — 14 passed |
+| Full non-integration suite | `FIREBASE_CREDENTIALS=<external-test-fixture-json> python -m pytest tests --ignore=tests/integration -q` with synthetic required settings | PASS — 1,943 passed, 8 skipped, 15 warnings |
 | Current-like schema upgrade | `pg_dump --schema-only --no-owner --no-privileges <source-db> -f <temp-schema>; psql <task8-db> -f <temp-schema>; DATABASE_URL=<task8-url> alembic stamp 20260822_02; alembic upgrade head; alembic current` | PASS — restored schema upgraded through `20260830_01`, `20260830_02`, `20260902_01`; current is `20260902_01 (head)` |
-| Release PostgreSQL integration | `TEST_DATABASE_URL=<task8-url> python -m pytest tests/integration/test_app_releases_api.py tests/integration/test_release_cleanup_integration.py -vv` | PASS WITH PLATFORM SKIPS — 9 passed, 4 skipped |
+| Release PostgreSQL integration | `FIREBASE_CREDENTIALS=<external-test-fixture-json> TEST_DATABASE_URL=<task8-url> python -m pytest tests/integration/test_app_releases_api.py tests/integration/test_release_cleanup_integration.py -vv` with synthetic required settings | PASS WITH PLATFORM SKIPS — 9 passed, 4 skipped |
 | Release migration boundary | `DATABASE_URL=<task8-url> alembic downgrade 20260830_02; alembic upgrade head; alembic current` | PASS — returned to `20260902_01 (head)` |
-| Protected publish/public API smoke | `TEST_DATABASE_URL=<task8-url> python -m pytest tests/integration/test_app_releases_api.py::test_publish_latest_download_withdraw_cycle -q` | PASS — 1 passed; checks webhook target and CI binding, synthetic APK publication, latest, `X-Accel-Redirect`, local stored bytes and SHA-256, withdrawal, download `410`, and no update after withdrawal |
-| Explicit-Russian legacy regressions | `TEST_DATABASE_URL=<task8-url> python -m pytest <two-goal-primary-cases> <two-microcycle-conflict-cases> -q` after adding `Accept-Language: ru` | PASS — 4 passed |
-| Full PostgreSQL integration suite | `TEST_DATABASE_URL=<task8-url> python -m pytest tests/integration -q --maxfail=1` after current-like upgrade | INCOMPLETE — reached 29% with no failure after the four localization fixes, then made no progress for more than 90 seconds at the transition to `test_offline_idempotency.py::test_custom_exercise_idempotent`; manually interrupted |
+| Protected publish/public API smoke | `FIREBASE_CREDENTIALS=<external-test-fixture-json> TEST_DATABASE_URL=<task8-url> python -m pytest tests/integration/test_app_releases_api.py::test_publish_latest_download_withdraw_cycle -q` with synthetic required settings | PASS — 1 passed; checks webhook target and CI binding, synthetic APK publication, latest, `X-Accel-Redirect`, local stored bytes and SHA-256, withdrawal, download `410`, and no update after withdrawal |
+| Explicit-Russian legacy regressions | `FIREBASE_CREDENTIALS=<external-test-fixture-json> TEST_DATABASE_URL=<task8-url> python -m pytest <two-goal-primary-cases> <two-microcycle-conflict-cases> -q` with synthetic required settings after adding `Accept-Language: ru` | PASS — 4 passed |
+| Full PostgreSQL integration suite | `FIREBASE_CREDENTIALS=<external-test-fixture-json> TEST_DATABASE_URL=<task8-url> python -m pytest tests/integration -q --maxfail=1` with synthetic required settings after current-like upgrade | INCOMPLETE — reached 29% with no failure after the four localization fixes, then made no progress for more than 90 seconds at the transition to `test_offline_idempotency.py::test_custom_exercise_idempotent`; manually interrupted |
 | Compilation | `python -m compileall -q api app scripts` | PASS |
 | Alembic graph | `DATABASE_URL=<synthetic-url> python -m alembic heads` | PASS — one head, `20260902_01` |
 | Patch whitespace | `git diff --check` | PASS |
