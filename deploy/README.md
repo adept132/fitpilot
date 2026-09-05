@@ -50,11 +50,14 @@ API и `/opt/eurith/releases:/srv/eurith/releases:ro` для nginx. На хос�
 install -d -o 1000 -g 1000 -m 0750 /opt/eurith/releases
 ```
 
-В `.env` API задаются `DATABASE_URL`, `RELEASE_STORAGE_ROOT=/var/lib/eurith/releases`,
-`RELEASE_PUBLISHER_TOKEN`, `RELEASE_OPERATOR_TOKEN` и `GITHUB_WEBHOOK_SECRET`.
-Значения генерируют вне репозитория, например `openssl rand -hex 32`, и передают
-GitHub production environment только через секреты. Токен publisher доступен CI,
-operator — только ручной аварийной процедуре; webhook secret — только GitHub и API.
+В `/etc/eurith/release-cleanup.env` задаются `DATABASE_URL`,
+`RELEASE_STORAGE_ROOT=/var/lib/eurith/releases`, `RELEASE_PUBLISHER_TOKEN`,
+`RELEASE_OPERATOR_TOKEN` и `GITHUB_WEBHOOK_SECRET`. Значения генерируют вне
+репозитория, например `openssl rand -hex 32`, и передают GitHub production
+environment только через секреты. Токен publisher доступен CI, operator — только
+ручной аварийной процедуре; webhook secret — только GitHub и API. Файл окружения
+принадлежит `root:eurith` и имеет режим `0640`; не копируйте его в checkout,
+image, логи или systemd unit.
 
 Подключите `deploy/nginx/releases.conf` к HTTPS virtual host. До reload проверьте
 конфигурацию, затем примените её:
@@ -69,20 +72,40 @@ buffering; к Uvicorn/container port извне доступа быть не д�
 
 ### Ежедневная очистка и контроль места
 
-Сначала запускайте только dry-run и сохраняйте JSON-lines журнал; `--apply` —
-единственный режим удаления. Пример systemd timer или cron (UTC):
+Timer запускает только dry-run. Создайте `/etc/systemd/system/eurith-release-cleanup.service`:
 
-```cron
-10 2 * * * cd /opt/eurith/backend && /opt/eurith/venv/bin/python -m scripts.cleanup_app_releases >> /var/log/eurith/release-cleanup.log 2>&1
-25 2 * * * cd /opt/eurith/backend && /opt/eurith/venv/bin/python -m scripts.cleanup_app_releases --apply >> /var/log/eurith/release-cleanup.log 2>&1
+```ini
+[Service]
+Type=oneshot
+User=eurith
+Group=eurith
+WorkingDirectory=/opt/eurith/backend
+EnvironmentFile=/etc/eurith/release-cleanup.env
+ExecStart=/opt/eurith/venv/bin/python -m scripts.cleanup_app_releases
 ```
 
-Перед apply оператор читает dry-run; оставляйте alert при свободном месте volume
+и `/etc/systemd/system/eurith-release-cleanup.timer`:
+
+```ini
+[Timer]
+OnCalendar=*-*-* 02:10:00 UTC
+Persistent=true
+[Install]
+WantedBy=timers.target
+```
+
+После `systemctl daemon-reload && systemctl enable --now eurith-release-cleanup.timer`
+оператор читает JSON-lines из `journalctl -u eurith-release-cleanup.service` и лишь
+затем запускает явный apply с тем же защищённым EnvironmentFile. Автоматический
+`--apply` в timer/cron запрещён. Оставляйте alert при свободном месте volume
 ниже 20% и расследуйте любой unexpected candidate. Скрипт не следует symlink,
 не удаляет свежие staging parts, shared SHA, published/latest или mandatory APK.
 Старый withdrawn APK удаляется только после retention, его DB row остаётся с
-`artifact_deleted_at` для аудита. Cleanup и direct publication используют один
-transaction advisory lock, поэтому финализация APK не соревнуется с orphan scan.
+`artifact_deleted_at` сначала фиксируется как deletion intent для аудита, затем
+файл удаляется; следующий запуск устраняет файл, оставшийся после сбоя между
+этими фазами. Cleanup и direct publication используют один session advisory
+lock на закреплённом PostgreSQL connection, поэтому финализация APK не
+соревнуется с orphan scan.
 
 ### Backup, restore и rollback
 

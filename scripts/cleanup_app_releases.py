@@ -17,17 +17,21 @@ from pathlib import Path
 import stat
 from typing import Any, Iterable
 
-from sqlalchemy import select, text
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from api.services.release_artifact_lock import (
+    RELEASE_ARTIFACT_LOCK_KEY,
+    hold_release_artifact_lock,
+)
 from api.services.models import AppRelease
 
 
 STAGING_RETENTION = timedelta(days=1)
-ORPHAN_RETENTION = timedelta(days=7)
+ORPHAN_RETENTION = timedelta(hours=24)
 WITHDRAWN_RETENTION = timedelta(days=30)
 _DIGEST_LENGTH = 64
 _APK_SUFFIX = ".apk"
-_CLEANUP_LOCK_KEY = -613_777_772_007_134_079
 
 
 class CleanupSafetyError(RuntimeError):
@@ -46,14 +50,7 @@ class CleanupCandidate:
 
 def cleanup_advisory_key() -> int:
     """Stable global lock shared by cleanup and direct-APK finalization."""
-    return _CLEANUP_LOCK_KEY
-
-
-async def acquire_release_cleanup_lock(session: Any) -> None:
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(:key)"),
-        {"key": cleanup_advisory_key()},
-    )
+    return RELEASE_ARTIFACT_LOCK_KEY
 
 
 def _now(value: datetime | None) -> datetime:
@@ -61,6 +58,12 @@ def _now(value: datetime | None) -> datetime:
     if current.tzinfo is None or current.utcoffset() is None:
         raise ValueError("cleanup time must be timezone-aware")
     return current.astimezone(UTC)
+
+
+def _reject_filesystem_anchor(path: Path) -> None:
+    anchor = path.anchor
+    if anchor and Path(anchor) == path:
+        raise CleanupSafetyError("release storage root must not be a filesystem anchor")
 
 
 def _is_symlink(path: Path) -> bool:
@@ -107,8 +110,17 @@ def _safe_unlink(root: Path, candidate: CleanupCandidate) -> None:
     for component in relative.parts[:-1]:
         current = current / component
         _require_directory(current)
-    _regular_file(candidate.path)
-    candidate.path.unlink()
+    if _regular_file(candidate.path) is not None:
+        candidate.path.unlink()
+
+
+def apply_cleanup_candidates(root: Path, candidates: Iterable[CleanupCandidate]) -> None:
+    """Perform only the filesystem half after deletion intents are committed."""
+    storage_root = Path(root).absolute()
+    _reject_filesystem_anchor(storage_root)
+    _require_directory(storage_root)
+    for candidate in candidates:
+        _safe_unlink(storage_root, candidate)
 
 
 def _artifact_key_is_valid(key: str) -> bool:
@@ -189,16 +201,16 @@ async def cleanup_release_storage(
     apply: bool = False,
     now: datetime | None = None,
 ) -> list[CleanupCandidate]:
-    """Report candidates, and delete them only when explicitly requested.
+    """Plan a cleanup without mutating the database or filesystem.
 
-    The caller owns the database transaction.  In apply mode the deletion and
-    ``artifact_deleted_at`` update therefore commit or roll back together with
-    surrounding registry work.
+    ``apply`` remains accepted for command compatibility; the durable apply
+    protocol is :func:`cleanup_release_volume`, which commits deletion intents
+    before unlinking any artifact.
     """
     timestamp = _now(now)
     storage_root = Path(root).absolute()
+    _reject_filesystem_anchor(storage_root)
     _require_directory(storage_root)
-    await acquire_release_cleanup_lock(session)
     releases = (await session.execute(select(AppRelease))).scalars().all()
 
     staging = _staging_candidates(storage_root, timestamp - STAGING_RETENTION)
@@ -209,7 +221,24 @@ async def cleanup_release_storage(
 
     for storage_key, path in apk_files:
         old_for_orphan, size = _older_than(path, orphan_cutoff)
+        intents = [
+            release
+            for release in releases
+            if getattr(release, "artifact_storage_key", None) == storage_key
+            and getattr(release, "artifact_deleted_at", None) is not None
+        ]
         references = _active_references(releases, storage_key)
+        if intents:
+            # A committed intent means a previous process may have died after
+            # its transaction committed but before unlink.  Active references
+            # win fail-closed if historical data is inconsistent.
+            if not references:
+                artifacts.append(
+                    CleanupCandidate(
+                        "delete", storage_key, "reconcile-deletion-intent", size, path
+                    )
+                )
+            continue
         if not references:
             if old_for_orphan:
                 artifacts.append(
@@ -238,22 +267,51 @@ async def cleanup_release_storage(
                 separators=(",", ":"),
             )
         )
-    if apply:
-        for candidate in candidates:
-            _safe_unlink(storage_root, candidate)
-            if candidate.release is not None:
-                candidate.release.artifact_deleted_at = timestamp
-                await session.flush()
     return candidates
 
 
+async def mark_cleanup_deletions(
+    session: Any, candidates: Iterable[CleanupCandidate], *, now: datetime
+) -> None:
+    """Persist withdrawn-artifact deletion intents before the unlink phase."""
+    changed = False
+    for candidate in candidates:
+        if candidate.release is not None and candidate.release.artifact_deleted_at is None:
+            candidate.release.artifact_deleted_at = now
+            changed = True
+    if changed:
+        await session.flush()
+
+
+async def cleanup_release_volume(
+    engine: AsyncEngine,
+    root: Path,
+    *,
+    apply: bool = False,
+    now: datetime | None = None,
+) -> list[CleanupCandidate]:
+    """Run the full lock → intent commit → unlink protocol.
+
+    The session advisory lock stays on one explicitly owned connection across
+    both phases.  A crash after the marker commit is converged by the next run.
+    """
+    timestamp = _now(now)
+    async with hold_release_artifact_lock(engine) as connection:
+        async with AsyncSession(bind=connection, expire_on_commit=False) as session:
+            async with session.begin():
+                candidates = await cleanup_release_storage(session, root, now=timestamp)
+                if apply:
+                    await mark_cleanup_deletions(session, candidates, now=timestamp)
+        if apply:
+            apply_cleanup_candidates(root, candidates)
+        return candidates
+
+
 async def _run(args: argparse.Namespace) -> int:
-    from app.database import SessionLocal
+    from app.database import engine
 
     root = Path(os.environ.get("RELEASE_STORAGE_ROOT", "/var/lib/eurith/releases"))
-    async with SessionLocal() as session:
-        async with session.begin():
-            await cleanup_release_storage(session, root, apply=args.apply)
+    await cleanup_release_volume(engine, root, apply=args.apply)
     return 0
 
 

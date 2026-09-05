@@ -19,5 +19,5 @@ docs
 scripts/.cache
 api/data/embedder_full
 *.apk
-.release-storage/
-releases/
+/.release-storage/
+/releases/

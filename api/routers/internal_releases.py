@@ -38,7 +38,7 @@ from api.services.release_storage import (
     StagedArtifact,
     StoredArtifact,
 )
-from scripts.cleanup_app_releases import acquire_release_cleanup_lock
+from api.services.release_artifact_lock import hold_release_artifact_lock
 from api.routers.releases import release_storage_root
 
 
@@ -313,19 +313,22 @@ async def publish_direct_apk(
         except ArtifactValidationError as error:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(error))
         try:
-            async with db.begin():
-                # A cleanup run holds this same transaction advisory lock, so it
-                # cannot classify a just-finalized APK as an orphan before its
-                # registry row commits.
-                await acquire_release_cleanup_lock(db)
-                stored = StoredArtifact(
-                    storage_key=f"android/sha256/{staged.sha256}.apk",
-                    sha256=staged.sha256,
-                    size_bytes=staged.size_bytes,
-                )
-                result = await publish_direct_release(db, command, stored)
-                if result.created:
-                    storage.finalize(staged)
+            # This owns one physical PostgreSQL connection while the registry
+            # transaction commits and the artifact is finalized.  Cleanup uses
+            # the same session-level lock through its marker/unlink phases.
+            if db.bind is None:
+                raise RuntimeError("release database session is not engine-bound")
+            async with hold_release_artifact_lock(db.bind) as connection:
+                async with AsyncSession(bind=connection, expire_on_commit=False) as locked_db:
+                    async with locked_db.begin():
+                        stored = StoredArtifact(
+                            storage_key=f"android/sha256/{staged.sha256}.apk",
+                            sha256=staged.sha256,
+                            size_bytes=staged.size_bytes,
+                        )
+                        result = await publish_direct_release(locked_db, command, stored)
+                        if result.created:
+                            storage.finalize(staged)
         except ArtifactValidationError as error:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(error))
         except ReleaseRegistryError as error:

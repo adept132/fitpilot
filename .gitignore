@@ -39,8 +39,8 @@ scripts/.cache/
 api/data/embedder_full/
 
 # Локальный persistent volume Центра обновлений; никогда не хранится в Git.
-.release-storage/
-releases/
+/.release-storage/
+/releases/
 
 # Сгенерированные ingest_exercise_images.py страницы ручного ревью картинок.
 scripts/review.html

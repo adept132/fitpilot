@@ -9,7 +9,12 @@ from uuid import uuid4
 
 import pytest
 
-from scripts.cleanup_app_releases import CleanupSafetyError, cleanup_release_storage
+from scripts.cleanup_app_releases import (
+    CleanupSafetyError,
+    apply_cleanup_candidates,
+    cleanup_release_storage,
+    mark_cleanup_deletions,
+)
 
 
 NOW = datetime(2026, 9, 5, tzinfo=UTC)
@@ -100,7 +105,7 @@ async def test_cleanup_dry_run_reports_eligible_files_without_mutating_disk_or_r
     assert path.read_bytes() == b"APK"
     assert row.artifact_deleted_at is None
     assert session.flushes == 0
-    assert len(session.advisory_locks) == 1
+    assert session.advisory_locks == []
     assert capsys.readouterr().out == (
         '{"action":"delete","storage_key":"android/sha256/' + digest("a")
         + '.apk","reason":"withdrawn-artifact","size_bytes":3}\n'
@@ -126,6 +131,7 @@ async def test_cleanup_apply_deletes_old_staging_and_orphan_files_but_not_fresh_
     session = CleanupSession([])
 
     candidates = await cleanup_release_storage(session, tmp_path, apply=True, now=NOW)
+    apply_cleanup_candidates(tmp_path, candidates)
 
     assert {(item.storage_key, item.reason) for item in candidates} == {
         (".staging/old.apk.part", "stale-staging"),
@@ -168,7 +174,9 @@ async def test_cleanup_apply_marks_only_the_deleted_old_withdrawn_release(
     row = release(key)
     session = CleanupSession([row])
 
-    await cleanup_release_storage(session, tmp_path, apply=True, now=NOW)
+    candidates = await cleanup_release_storage(session, tmp_path, apply=True, now=NOW)
+    await mark_cleanup_deletions(session, candidates, now=NOW)
+    apply_cleanup_candidates(tmp_path, candidates)
 
     assert not path.exists()
     assert row.artifact_deleted_at == NOW
@@ -193,3 +201,65 @@ async def test_cleanup_rejects_symlinked_staging_without_touching_target(
         await cleanup_release_storage(CleanupSession([]), tmp_path, apply=True, now=NOW)
 
     assert protected.read_bytes() == b"keep"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_commits_deletion_intent_before_the_filesystem_phase(
+    tmp_path: Path,
+) -> None:
+    """Catches a crash window where an unmarked registry row loses its APK."""
+    key, path = artifact(tmp_path, "1")
+    row = release(key)
+    session = CleanupSession([row])
+
+    candidates = await cleanup_release_storage(session, tmp_path, apply=True, now=NOW)
+
+    assert path.exists(), "planning and DB marking must not unlink an artifact"
+    await mark_cleanup_deletions(session, candidates, now=NOW)
+    assert row.artifact_deleted_at == NOW
+    assert session.flushes == 1
+    apply_cleanup_candidates(tmp_path, candidates)
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_reconciles_a_committed_deletion_intent_without_waiting_for_retention(
+    tmp_path: Path,
+) -> None:
+    """Catches a stranded file after a process dies between DB commit and unlink."""
+    key, path = artifact(tmp_path, "2")
+    row = release(key, deleted_at=NOW)
+    session = CleanupSession([row])
+    fresh = NOW - timedelta(minutes=1)
+    os.utime(path, (fresh.timestamp(), fresh.timestamp()))
+
+    candidates = await cleanup_release_storage(session, tmp_path, now=NOW)
+
+    assert [(item.storage_key, item.reason) for item in candidates] == [
+        (key, "reconcile-deletion-intent")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_orphan_retention_is_exactly_24_hours_at_the_cutoff(tmp_path: Path) -> None:
+    """Catches an orphan policy that retains stale APKs longer than one day."""
+    key, path = artifact(tmp_path, "3")
+    exactly_24h = NOW - timedelta(hours=24)
+    os.utime(path, (exactly_24h.timestamp(), exactly_24h.timestamp()))
+
+    at_boundary = await cleanup_release_storage(CleanupSession([]), tmp_path, now=NOW)
+    assert at_boundary == []
+
+    one_second_older = NOW - timedelta(hours=24, seconds=1)
+    os.utime(path, (one_second_older.timestamp(), one_second_older.timestamp()))
+    after_boundary = await cleanup_release_storage(CleanupSession([]), tmp_path, now=NOW)
+    assert [(item.storage_key, item.reason) for item in after_boundary] == [
+        (key, "orphan-artifact")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_rejects_filesystem_root_anchor_before_scanning() -> None:
+    """Catches a misconfigured storage root that could sweep an entire filesystem."""
+    with pytest.raises(CleanupSafetyError, match="anchor"):
+        await cleanup_release_storage(CleanupSession([]), Path("/"), now=NOW)
