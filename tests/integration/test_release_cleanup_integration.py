@@ -16,7 +16,7 @@ from sqlalchemy import delete, text
 
 from app.database import SessionLocal, engine
 from api.routers import internal_releases
-from api.services.models import AppRelease
+from api.services.models import AppRelease, AppReleaseLane
 from api.services.release_registry import set_expected_commit
 from api.services.release_storage import ReleaseStorage
 from scripts import cleanup_app_releases
@@ -31,12 +31,31 @@ async def disposable_cleanup_database() -> list[str]:
     if not url or parsed.hostname not in {"localhost", "127.0.0.1", "::1"} or not parsed.path.lstrip("/").startswith("fitpilot_task7_"):
         pytest.fail("TEST_DATABASE_URL must name a local fitpilot_task7_* disposable database")
     commits: list[str] = []
+    async with SessionLocal() as session:
+        existing_lane = await session.get(
+            AppReleaseLane, {"platform": "android", "channel": "production-direct"}
+        )
+        lane_snapshot = (
+            (existing_lane.expected_source_commit, existing_lane.expected_ci_run_id)
+            if existing_lane is not None
+            else None
+        )
     try:
         yield commits
     finally:
         if commits:
             async with SessionLocal() as session:
                 await session.execute(delete(AppRelease).where(AppRelease.source_commit.in_(commits)))
+                lane = await session.get(
+                    AppReleaseLane, {"platform": "android", "channel": "production-direct"}
+                )
+                if lane_snapshot is None and lane is not None:
+                    await session.delete(lane)
+                elif lane_snapshot is not None:
+                    if lane is None:
+                        session.add(AppReleaseLane(platform="android", channel="production-direct", expected_source_commit=lane_snapshot[0], expected_ci_run_id=lane_snapshot[1]))
+                    else:
+                        lane.expected_source_commit, lane.expected_ci_run_id = lane_snapshot
                 await session.commit()
 
 
@@ -111,12 +130,19 @@ async def test_cleanup_blocks_real_direct_apk_route(tmp_path, monkeypatch, dispo
             publisher_acquired.set(); yield connection
     monkeypatch.setattr(cleanup_app_releases, "cleanup_release_storage", pause); monkeypatch.setattr(internal_releases, "hold_release_artifact_lock", observe)
     monkeypatch.setattr(internal_releases, "_storage", lambda: ReleaseStorage(root))
-    cleaner = asyncio.create_task(cleanup_app_releases.cleanup_release_volume(engine, root, now=NOW)); await cleaner_entered.wait()
+    cleaner = asyncio.create_task(cleanup_app_releases.cleanup_release_volume(engine, root, now=NOW)); await asyncio.wait_for(cleaner_entered.wait(), timeout=5)
     async def publish():
         payload = b"PK\x03\x04route-publication"
         async with SessionLocal() as setup:
             async with setup.begin(): await set_expected_commit(setup, "android", "production-direct", source, f"route-{marker}")
         async with SessionLocal() as request_db:
             return await internal_releases.publish_direct_apk(channel="production-direct", source_commit=source, ci_run_id=f"route-{marker}", version_code=2, version_name="1.0.1", release_notes_ru="Исправление", release_notes_en="Fix", artifact=UploadFile(file=BytesIO(payload), filename="route.apk"), idempotency_key=f"route-{marker}", artifact_sha256=hashlib.sha256(payload).hexdigest(), db=request_db)
-    publisher = asyncio.create_task(publish()); await publisher_waiting.wait(); await asyncio.sleep(.1); assert not publisher_acquired.is_set() and not publisher.done()
-    release_cleaner.set(); await cleaner; response = await publisher; assert publisher_acquired.is_set() and getattr(response, "status_code", 201) == 201
+    publisher = asyncio.create_task(publish())
+    try:
+        await asyncio.wait_for(publisher_waiting.wait(), timeout=5); await asyncio.sleep(.1); assert not publisher_acquired.is_set() and not publisher.done()
+        release_cleaner.set(); await asyncio.wait_for(cleaner, timeout=5); response = await asyncio.wait_for(publisher, timeout=5); assert publisher_acquired.is_set() and getattr(response, "status_code", 201) == 201
+    finally:
+        release_cleaner.set()
+        for task in (cleaner, publisher):
+            if not task.done(): task.cancel()
+        await asyncio.gather(cleaner, publisher, return_exceptions=True)

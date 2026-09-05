@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -21,6 +22,13 @@ from fastapi import Depends
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+# The cleanup module mutates its fixture DB. Validate it before this conftest
+# can assign DATABASE_URL or import api.main/app.database.
+if any("test_release_cleanup_integration" in argument for argument in sys.argv):
+    from tests.integration.cleanup_test_guard import require_disposable_cleanup_database
+
+    require_disposable_cleanup_database()
 
 # TEST_DATABASE_URL имеет приоритет; иначе используем обычный DATABASE_URL.
 if os.getenv("TEST_DATABASE_URL"):

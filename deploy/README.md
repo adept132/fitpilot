@@ -46,18 +46,29 @@ owner: uid 1000, gid 1000 (пользователь API)
 Пример Docker mounts: `/opt/eurith/releases:/var/lib/eurith/releases:rw` для
 API и `/opt/eurith/releases:/srv/eurith/releases:ro` для nginx. На хосте:
 
+Use a dedicated shared group; do not assume container uid `1000` is the host
+`eurith` account. For example, create `eurith-releases`, map the API runtime
+to its numeric gid (`group_add` / `--group-add`), add the host `eurith` cleanup
+user to the same group, and grant nginx group traversal/read:
+
 ```bash
-install -d -o 1000 -g 1000 -m 0750 /opt/eurith/releases
+groupadd --system eurith-releases
+usermod -aG eurith-releases eurith
+install -d -o root -g eurith-releases -m 0750 /opt/eurith/releases
 ```
 
-В `/etc/eurith/release-cleanup.env` задаются `DATABASE_URL`,
-`RELEASE_STORAGE_ROOT=/opt/eurith/releases`, `RELEASE_PUBLISHER_TOKEN`,
-`RELEASE_OPERATOR_TOKEN` и `GITHUB_WEBHOOK_SECRET`. Значения генерируют вне
-репозитория, например `openssl rand -hex 32`, и передают GitHub production
-environment только через секреты. Токен publisher доступен CI, operator — только
-ручной аварийной процедуре; webhook secret — только GitHub и API. Файл окружения
-принадлежит `root:eurith` и имеет режим `0640`; не копируйте его в checkout,
-image, логи или systemd unit.
+The API container runs with its mapped supplementary group and needs group
+write on directories it creates (`.staging`, `android`, `sha256`: `2770`);
+nginx mounts read-only and needs only group traverse/read (`0750` directories,
+`0640` APKs). Preserve the setgid bit on newly created directories so host
+cleanup and API writes keep the shared group.
+
+`/etc/eurith/release-cleanup.env` содержит только `DATABASE_URL` и
+`RELEASE_STORAGE_ROOT=/opt/eurith/releases`. API secrets (`RELEASE_PUBLISHER_TOKEN`,
+`RELEASE_OPERATOR_TOKEN`, `GITHUB_WEBHOOK_SECRET`) остаются в отдельном API
+EnvironmentFile; их нельзя давать cleanup service. Оба файла принадлежат
+`root:eurith` и имеют режим `0640`; не копируйте их в checkout, image, логи или
+systemd unit.
 
 Подключите `deploy/nginx/releases.conf` к HTTPS virtual host. До reload проверьте
 конфигурацию, затем примените её:
