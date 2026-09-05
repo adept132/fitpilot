@@ -40,28 +40,52 @@ APK не является частью Docker image: он хранится в п
 host:  /opt/eurith/releases
 api:   /var/lib/eurith/releases:rw
 nginx: /srv/eurith/releases:ro
-owner: uid 1000, gid 1000 (пользователь API)
 ```
 
 Пример Docker mounts: `/opt/eurith/releases:/var/lib/eurith/releases:rw` для
 API и `/opt/eurith/releases:/srv/eurith/releases:ro` для nginx. На хосте:
 
-Use a dedicated shared group; do not assume container uid `1000` is the host
-`eurith` account. For example, create `eurith-releases`, map the API runtime
-to its numeric gid (`group_add` / `--group-add`), add the host `eurith` cleanup
-user to the same group, and grant nginx group traversal/read:
+Use a dedicated shared group. Never assume that an image UID/GID equals a host
+account with the same number. Resolve the API UID from the built image and the
+shared GID from the host, then create the volume with those actual numeric IDs:
 
 ```bash
 groupadd --system eurith-releases
+export RELEASE_SHARED_GID="$(getent group eurith-releases | cut -d: -f3)"
+API_UID="$(docker compose run --rm --no-deps --entrypoint id api -u)"
+install -d -o "$API_UID" -g "$RELEASE_SHARED_GID" -m 2770 /opt/eurith/releases
+install -d -o "$API_UID" -g "$RELEASE_SHARED_GID" -m 2770 /opt/eurith/releases/.staging
+install -d -o "$API_UID" -g "$RELEASE_SHARED_GID" -m 2770 /opt/eurith/releases/android/sha256
 usermod -aG eurith-releases eurith
-install -d -o root -g eurith-releases -m 0750 /opt/eurith/releases
+usermod -aG eurith-releases www-data
 ```
 
-The API container runs with its mapped supplementary group and needs group
-write on directories it creates (`.staging`, `android`, `sha256`: `2770`);
-nginx mounts read-only and needs only group traverse/read (`0750` directories,
-`0640` APKs). Preserve the setgid bit on newly created directories so host
-cleanup and API writes keep the shared group.
+Use the resolved GID in Compose for every process that touches the volume:
+
+```yaml
+services:
+  api:
+    group_add:
+      - "${RELEASE_SHARED_GID:?set RELEASE_SHARED_GID from getent}"
+    volumes:
+      - /opt/eurith/releases:/var/lib/eurith/releases:rw
+  nginx:
+    group_add:
+      - "${RELEASE_SHARED_GID:?set RELEASE_SHARED_GID from getent}"
+    volumes:
+      - /opt/eurith/releases:/srv/eurith/releases:ro
+```
+
+For host nginx, add its actual service user (`www-data` above; often `nginx` on
+RPM-based systems) to `eurith-releases` and expose the release tree read-only
+inside its service mount namespace (for example with systemd
+`BindReadOnlyPaths=/opt/eurith/releases:/srv/eurith/releases`). Restart nginx and verify with
+`sudo -u www-data test -r /opt/eurith/releases/android/sha256/<digest>.apk`.
+Directories are `2770`: group members can traverse/write and setgid preserves
+the shared GID. Staging files stay `0600` while validation is in progress;
+after atomic finalization the API sets the final APK to `0640`, so nginx can
+read it but cannot change it. The API runtime identity owns writes; the host
+cleanup service runs as `eurith` with `SupplementaryGroups=eurith-releases`.
 
 `/etc/eurith/release-cleanup.env` содержит только `DATABASE_URL` и
 `RELEASE_STORAGE_ROOT=/opt/eurith/releases`. API secrets (`RELEASE_PUBLISHER_TOKEN`,
@@ -91,6 +115,8 @@ Timer запускает только dry-run. Создайте `/etc/systemd/sy
 Type=oneshot
 User=eurith
 Group=eurith
+SupplementaryGroups=eurith-releases
+UMask=0007
 WorkingDirectory=/opt/eurith/backend
 EnvironmentFile=/etc/eurith/release-cleanup.env
 ExecStart=/opt/eurith/venv/bin/python -m scripts.cleanup_app_releases

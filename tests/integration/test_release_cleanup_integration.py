@@ -5,10 +5,10 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
-import hashlib, os
+import hashlib, json, os
 from pathlib import Path
 from urllib.parse import urlparse
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest, pytest_asyncio
 from fastapi import UploadFile
@@ -22,41 +22,45 @@ from api.services.release_storage import ReleaseStorage
 from scripts import cleanup_app_releases
 
 NOW = datetime(2026, 9, 5, tzinfo=UTC)
+pytestmark = pytest.mark.skipif(
+    not cleanup_app_releases._SUPPORTS_SECURE_UNLINK,
+    reason="cleanup mutation integration requires Linux descriptor-relative unlink",
+)
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def disposable_cleanup_database() -> list[str]:
+async def disposable_cleanup_database() -> list[UUID]:
     url = os.environ.get("TEST_DATABASE_URL")
     parsed = urlparse((url or "").replace("postgresql+asyncpg", "postgresql", 1))
     if not url or parsed.hostname not in {"localhost", "127.0.0.1", "::1"} or not parsed.path.lstrip("/").startswith("fitpilot_task7_"):
         pytest.fail("TEST_DATABASE_URL must name a local fitpilot_task7_* disposable database")
-    commits: list[str] = []
+    release_ids: list[UUID] = []
     async with SessionLocal() as session:
         existing_lane = await session.get(
             AppReleaseLane, {"platform": "android", "channel": "production-direct"}
         )
-        lane_snapshot = (
-            (existing_lane.expected_source_commit, existing_lane.expected_ci_run_id)
-            if existing_lane is not None
-            else None
-        )
+        lane_snapshot = None if existing_lane is None else {
+            column.name: getattr(existing_lane, column.name)
+            for column in AppReleaseLane.__table__.columns
+        }
     try:
-        yield commits
+        yield release_ids
     finally:
-        if commits:
-            async with SessionLocal() as session:
-                await session.execute(delete(AppRelease).where(AppRelease.source_commit.in_(commits)))
-                lane = await session.get(
-                    AppReleaseLane, {"platform": "android", "channel": "production-direct"}
-                )
-                if lane_snapshot is None and lane is not None:
-                    await session.delete(lane)
-                elif lane_snapshot is not None:
-                    if lane is None:
-                        session.add(AppReleaseLane(platform="android", channel="production-direct", expected_source_commit=lane_snapshot[0], expected_ci_run_id=lane_snapshot[1]))
-                    else:
-                        lane.expected_source_commit, lane.expected_ci_run_id = lane_snapshot
-                await session.commit()
+        async with SessionLocal() as session:
+            if release_ids:
+                await session.execute(delete(AppRelease).where(AppRelease.id.in_(release_ids)))
+            lane = await session.get(
+                AppReleaseLane, {"platform": "android", "channel": "production-direct"}
+            )
+            if lane_snapshot is None and lane is not None:
+                await session.delete(lane)
+            elif lane_snapshot is not None:
+                if lane is None:
+                    session.add(AppReleaseLane(**lane_snapshot))
+                else:
+                    for field, value in lane_snapshot.items():
+                        setattr(lane, field, value)
+            await session.commit()
 
 
 def identity() -> tuple[str, str]:
@@ -75,9 +79,10 @@ def withdrawn(key: str, digest: str, size: int, source: str, marker: str) -> App
     return AppRelease(id=uuid4(), platform="android", channel="production-direct", delivery_method="direct_apk", version_code=1, version_name="1.0.0", runtime_version=None, fingerprint=None, release_notes={"ru":"Исправление","en":"Fix"}, status="withdrawn", is_mandatory=False, min_supported_version_code=None, artifact_storage_key=key, artifact_sha256=digest, artifact_size_bytes=size, source_commit=source, ci_run_id=f"cleanup-{marker}", idempotency_key=f"cleanup-{marker}", eas_build_id=None, eas_update_group_id=None, withdrawn_at=NOW-timedelta(days=31), withdrawal_reason="fixture")
 
 
-async def add_withdrawn(db, root: Path, commits: list[str]) -> tuple[AppRelease, Path]:
-    source, marker = identity(); commits.append(source); key, digest, path = artifact(root, marker)
-    row = withdrawn(key, digest, path.stat().st_size, source, marker); db.add(row); await db.commit(); return row, path
+async def add_withdrawn(db, root: Path, release_ids: list[UUID]) -> tuple[AppRelease, Path]:
+    source, marker = identity(); key, digest, path = artifact(root, marker)
+    row = withdrawn(key, digest, path.stat().st_size, source, marker); release_ids.append(row.id)
+    db.add(row); await db.commit(); return row, path
 
 
 @pytest.mark.asyncio
@@ -119,7 +124,7 @@ async def test_cleanup_commit_failure_rolls_back_marker_without_unlink(db, tmp_p
 
 @pytest.mark.asyncio
 async def test_cleanup_blocks_real_direct_apk_route(tmp_path, monkeypatch, disposable_cleanup_database):
-    source, marker = identity(); disposable_cleanup_database.append(source); root = tmp_path / "release-volume"; artifact(root, marker)
+    source, marker = identity(); root = tmp_path / "release-volume"; artifact(root, marker)
     cleaner_entered, release_cleaner, publisher_waiting, publisher_acquired = (asyncio.Event() for _ in range(4)); plan = cleanup_app_releases.cleanup_release_storage; route_lock = internal_releases.hold_release_artifact_lock
     async def pause(*args, **kwargs):
         result = await plan(*args, **kwargs); cleaner_entered.set(); await release_cleaner.wait(); return result
@@ -136,7 +141,10 @@ async def test_cleanup_blocks_real_direct_apk_route(tmp_path, monkeypatch, dispo
         async with SessionLocal() as setup:
             async with setup.begin(): await set_expected_commit(setup, "android", "production-direct", source, f"route-{marker}")
         async with SessionLocal() as request_db:
-            return await internal_releases.publish_direct_apk(channel="production-direct", source_commit=source, ci_run_id=f"route-{marker}", version_code=2, version_name="1.0.1", release_notes_ru="Исправление", release_notes_en="Fix", artifact=UploadFile(file=BytesIO(payload), filename="route.apk"), idempotency_key=f"route-{marker}", artifact_sha256=hashlib.sha256(payload).hexdigest(), db=request_db)
+            response = await internal_releases.publish_direct_apk(channel="production-direct", source_commit=source, ci_run_id=f"route-{marker}", version_code=2, version_name="1.0.1", release_notes_ru="Исправление", release_notes_en="Fix", artifact=UploadFile(file=BytesIO(payload), filename="route.apk"), idempotency_key=f"route-{marker}", artifact_sha256=hashlib.sha256(payload).hexdigest(), db=request_db)
+            payload_json = json.loads(response.body)
+            disposable_cleanup_database.append(UUID(payload_json["id"]))
+            return response
     publisher = asyncio.create_task(publish())
     try:
         await asyncio.wait_for(publisher_waiting.wait(), timeout=5); await asyncio.sleep(.1); assert not publisher_acquired.is_set() and not publisher.done()

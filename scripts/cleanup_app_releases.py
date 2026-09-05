@@ -32,6 +32,13 @@ ORPHAN_RETENTION = timedelta(hours=24)
 WITHDRAWN_RETENTION = timedelta(days=30)
 _DIGEST_LENGTH = 64
 _APK_SUFFIX = ".apk"
+_SUPPORTS_SECURE_UNLINK = (
+    hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and os.open in os.supports_dir_fd
+    and os.stat in os.supports_dir_fd
+    and os.unlink in os.supports_dir_fd
+)
 
 
 class CleanupSafetyError(RuntimeError):
@@ -105,13 +112,43 @@ def _safe_unlink(root: Path, candidate: CleanupCandidate) -> None:
         relative = candidate.path.relative_to(root)
     except ValueError as error:
         raise CleanupSafetyError("cleanup path escapes storage root") from error
-    current = root
-    _require_directory(current)
-    for component in relative.parts[:-1]:
-        current = current / component
-        _require_directory(current)
-    if _regular_file(candidate.path) is not None:
-        candidate.path.unlink()
+    if not _SUPPORTS_SECURE_UNLINK:
+        raise CleanupSafetyError(
+            "cleanup apply requires descriptor-relative unlink support"
+        )
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise CleanupSafetyError("cleanup path is unsafe")
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        directory_descriptor = os.open(root, flags)
+    except OSError as error:
+        raise CleanupSafetyError("release storage root is unsafe") from error
+    try:
+        for component in relative.parts[:-1]:
+            try:
+                child_descriptor = os.open(
+                    component, flags, dir_fd=directory_descriptor
+                )
+            except OSError as error:
+                raise CleanupSafetyError("release artifact directory is unsafe") from error
+            os.close(directory_descriptor)
+            directory_descriptor = child_descriptor
+
+        filename = relative.parts[-1]
+        try:
+            metadata = os.stat(
+                filename, dir_fd=directory_descriptor, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise CleanupSafetyError("release artifact is unsafe") from error
+        if not stat.S_ISREG(metadata.st_mode):
+            raise CleanupSafetyError("release artifact is unsafe")
+        os.unlink(filename, dir_fd=directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
 
 
 def apply_cleanup_candidates(root: Path, candidates: Iterable[CleanupCandidate]) -> None:

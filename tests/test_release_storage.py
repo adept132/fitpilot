@@ -5,6 +5,8 @@ from io import BytesIO
 import hashlib
 from pathlib import Path
 from threading import Event
+import os
+import stat
 
 import pytest
 from fastapi import UploadFile
@@ -39,6 +41,25 @@ async def test_stage_hashes_and_atomically_finalizes_apk(tmp_path: Path) -> None
     assert stored.storage_key == f"android/sha256/{expected}.apk"
     assert (tmp_path / stored.storage_key).read_bytes() == payload
     assert not staged.path.exists()
+
+
+@pytest.mark.asyncio
+async def test_finalize_publishes_group_readable_apk_without_relaxing_staging_file(
+    tmp_path: Path,
+) -> None:
+    """Catches final APKs retaining private 0600 staging permissions."""
+    if os.name != "posix":
+        pytest.skip("POSIX permission bits are a Linux deployment contract")
+    payload = apk(b"permissions")
+    digest = hashlib.sha256(payload).hexdigest()
+    storage = ReleaseStorage(tmp_path, max_bytes=1024)
+
+    staged = await storage.stage(upload_file(payload), digest)
+    assert stat.S_IMODE(staged.path.stat().st_mode) == 0o600
+
+    stored = storage.finalize(staged)
+
+    assert stat.S_IMODE((tmp_path / stored.storage_key).stat().st_mode) == 0o640
 
 
 @pytest.mark.asyncio

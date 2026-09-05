@@ -15,6 +15,7 @@ from scripts.cleanup_app_releases import (
     cleanup_release_storage,
     mark_cleanup_deletions,
 )
+from scripts import cleanup_app_releases
 
 
 NOW = datetime(2026, 9, 5, tzinfo=UTC)
@@ -113,6 +114,10 @@ async def test_cleanup_dry_run_reports_eligible_files_without_mutating_disk_or_r
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    not cleanup_app_releases._SUPPORTS_SECURE_UNLINK,
+    reason="cleanup mutation requires Linux descriptor-relative unlink",
+)
 async def test_cleanup_apply_deletes_old_staging_and_orphan_files_but_not_fresh_files(
     tmp_path: Path,
 ) -> None:
@@ -166,6 +171,10 @@ async def test_cleanup_retains_shared_published_and_mandatory_artifacts(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    not cleanup_app_releases._SUPPORTS_SECURE_UNLINK,
+    reason="cleanup mutation requires Linux descriptor-relative unlink",
+)
 async def test_cleanup_apply_marks_only_the_deleted_old_withdrawn_release(
     tmp_path: Path,
 ) -> None:
@@ -204,6 +213,10 @@ async def test_cleanup_rejects_symlinked_staging_without_touching_target(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    not cleanup_app_releases._SUPPORTS_SECURE_UNLINK,
+    reason="cleanup mutation requires Linux descriptor-relative unlink",
+)
 async def test_cleanup_commits_deletion_intent_before_the_filesystem_phase(
     tmp_path: Path,
 ) -> None:
@@ -263,3 +276,57 @@ async def test_cleanup_rejects_filesystem_root_anchor_before_scanning() -> None:
     """Catches a misconfigured storage root that could sweep an entire filesystem."""
     with pytest.raises(CleanupSafetyError, match="anchor"):
         await cleanup_release_storage(CleanupSession([]), Path("/"), now=NOW)
+
+
+def test_cleanup_apply_fails_closed_without_descriptor_relative_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches an apply fallback that reintroduces path-based TOCTOU deletion."""
+    key, path = artifact(tmp_path, "4")
+    candidate = cleanup_app_releases.CleanupCandidate(
+        "delete", key, "orphan-artifact", path.stat().st_size, path
+    )
+    monkeypatch.setattr(cleanup_app_releases, "_SUPPORTS_SECURE_UNLINK", False)
+
+    with pytest.raises(CleanupSafetyError, match="descriptor-relative"):
+        apply_cleanup_candidates(tmp_path, [candidate])
+
+    assert path.exists()
+
+
+def test_cleanup_apply_is_immune_to_parent_directory_symlink_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches validating a path and later unlinking through a swapped parent."""
+    if not cleanup_app_releases._SUPPORTS_SECURE_UNLINK:
+        pytest.skip("secure dir_fd unlink is a Linux production contract")
+    key, path = artifact(tmp_path, "5")
+    candidate = cleanup_app_releases.CleanupCandidate(
+        "delete", key, "orphan-artifact", path.stat().st_size, path
+    )
+    outside = tmp_path.parent / f"outside-{uuid4().hex}"
+    outside.mkdir()
+    protected = outside / path.name
+    protected.write_bytes(b"keep")
+    original_parent = path.parent
+    held_parent = original_parent.with_name("sha256-held")
+    native_unlink = cleanup_app_releases.os.unlink
+    swapped = False
+
+    def swap_then_unlink(name, *, dir_fd=None):
+        nonlocal swapped
+        assert name == path.name
+        assert isinstance(dir_fd, int)
+        if not swapped:
+            original_parent.rename(held_parent)
+            original_parent.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return native_unlink(name, dir_fd=dir_fd)
+
+    monkeypatch.setattr(cleanup_app_releases.os, "unlink", swap_then_unlink)
+
+    apply_cleanup_candidates(tmp_path, [candidate])
+
+    assert swapped
+    assert not (held_parent / path.name).exists()
+    assert protected.read_bytes() == b"keep"

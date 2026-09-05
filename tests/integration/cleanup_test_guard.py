@@ -4,10 +4,12 @@ from __future__ import annotations
 import os
 from urllib.parse import urlparse
 
+from tests.integration.database_test_guard import require_disposable_integration_database
+
 
 def require_disposable_cleanup_database(env: dict[str, str] | None = None) -> None:
     source = os.environ if env is None else env
-    url = source.get("TEST_DATABASE_URL", "")
+    url = require_disposable_integration_database(source)
     parsed = urlparse(url.replace("postgresql+asyncpg", "postgresql", 1))
     if (
         not url

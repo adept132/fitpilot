@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import os
-import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -23,16 +22,13 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# The cleanup module mutates its fixture DB. Validate it before this conftest
-# can assign DATABASE_URL or import api.main/app.database.
-if any("test_release_cleanup_integration" in argument for argument in sys.argv):
-    from tests.integration.cleanup_test_guard import require_disposable_cleanup_database
+# Validate every integration invocation before importing api.main/app.database.
+# There is deliberately no DATABASE_URL fallback and no argv/filename branch.
+from tests.integration.database_test_guard import (  # noqa: E402
+    require_disposable_integration_database,
+)
 
-    require_disposable_cleanup_database()
-
-# TEST_DATABASE_URL имеет приоритет; иначе используем обычный DATABASE_URL.
-if os.getenv("TEST_DATABASE_URL"):
-    os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
+os.environ["DATABASE_URL"] = require_disposable_integration_database()
 
 from api.main import app  # noqa: E402
 from api.services.app_user_service import (  # noqa: E402

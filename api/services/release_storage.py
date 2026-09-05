@@ -127,6 +127,7 @@ class _WindowsDirectoryGuard:
 class ReleaseStorage:
     _CHUNK_BYTES = 1024 * 1024
     _APK_MAGIC = b"PK\x03\x04"
+    _PUBLISHED_MODE = 0o640
 
     def __init__(self, root: Path, max_bytes: int = 250 * 1024 * 1024) -> None:
         if max_bytes <= 0:
@@ -184,7 +185,6 @@ class ReleaseStorage:
         if staged.size_bytes <= 0:
             raise ArtifactValidationError("staged artifact size must be positive")
         self._verify_staged_contents(source, staged)
-
         storage_key = f"android/sha256/{staged.sha256}.apk"
         target = self.root / storage_key
         self._create_safe_directory(target.parent)
@@ -196,6 +196,7 @@ class ReleaseStorage:
                 self._validate_existing_target(target)
                 if not self._files_are_identical(source, target):
                     raise ArtifactValidationError("storage integrity collision")
+                self._set_file_mode(target.parent, target.name, self._PUBLISHED_MODE)
                 self.discard(staged)
                 return StoredArtifact(storage_key, staged.sha256, staged.size_bytes)
             except OSError as error:
@@ -205,6 +206,9 @@ class ReleaseStorage:
                     ) from error
                 raise
             else:
+                # Publication itself is atomic.  Only after the complete inode
+                # is reachable at its final name do we grant nginx group read.
+                self._set_file_mode(target.parent, target.name, self._PUBLISHED_MODE)
                 self._fsync_parent(target.parent)
                 self.discard(staged)
                 return StoredArtifact(storage_key, staged.sha256, staged.size_bytes)
@@ -328,6 +332,28 @@ class ReleaseStorage:
             return os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         except OSError as error:
             raise ArtifactValidationError("storage path escapes configured root") from error
+
+    def _set_file_mode(self, directory: Path, filename: str, mode: int) -> None:
+        """Change a regular file through an opened directory, never a symlink."""
+        if os.name != "posix":
+            return
+        directory_descriptor = self._open_directory(directory)
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                filename,
+                os.O_RDONLY | os.O_NOFOLLOW,
+                dir_fd=directory_descriptor,
+            )
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ArtifactValidationError("release artifact is not a regular file")
+            os.fchmod(descriptor, mode)
+        except OSError as error:
+            raise ArtifactValidationError("release artifact permissions could not be set") from error
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            os.close(directory_descriptor)
 
     def _discard_temp_if_safe(self, temp: Path) -> None:
         try:
