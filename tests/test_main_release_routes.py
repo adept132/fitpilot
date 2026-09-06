@@ -55,12 +55,188 @@ def _release(**overrides):
         "artifact_storage_key": "android/sha256/" + "a" * 64 + ".apk",
         "artifact_sha256": "a" * 64,
         "artifact_size_bytes": 12,
+        "eas_update_id": None,
         "eas_update_group_id": None,
+        "eas_build_id": "build-123",
+        "ci_run_id": "ci-run-123",
+        "idempotency_key": "direct:lookup-123",
         "source_commit": "b" * 40,
         "published_at": "2026-09-02T10:00:00Z",
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_idempotency_lookup_requires_exact_publisher_token(monkeypatch):
+    monkeypatch.setenv("RELEASE_PUBLISHER_TOKEN", "publisher-only-token")
+    monkeypatch.setenv("RELEASE_OPERATOR_TOKEN", "operator-only-token")
+    client = TestClient(app)
+
+    missing = client.get(
+        "/internal/app-releases/by-idempotency",
+        params={"key": "direct:lookup-123"},
+    )
+    operator = client.get(
+        "/internal/app-releases/by-idempotency",
+        params={"key": "direct:lookup-123"},
+        headers={"Authorization": "Bearer operator-only-token"},
+    )
+
+    assert missing.status_code == 401
+    assert operator.status_code == 401
+
+
+def test_idempotency_lookup_returns_exact_automation_tuple_without_storage_leaks(monkeypatch):
+    routes = import_module("api.routers.internal_releases")
+    release = _release(status="withdrawn", channel="production-play")
+    monkeypatch.setenv("RELEASE_PUBLISHER_TOKEN", "publisher-only-token")
+
+    async def selected_release(_db, key):
+        assert key == "direct:lookup-123"
+        return release
+
+    monkeypatch.setattr(routes, "_release_by_idempotency", selected_release)
+    response = TestClient(app).get(
+        "/internal/app-releases/by-idempotency",
+        params={"key": "direct:lookup-123"},
+        headers={"Authorization": "Bearer publisher-only-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "release": {
+            "id": str(release.id),
+            "platform": "android",
+            "channel": "production-play",
+            "delivery_method": "direct_apk",
+            "source_commit": "b" * 40,
+            "ci_run_id": "ci-run-123",
+            "idempotency_key": "direct:lookup-123",
+            "fingerprint": "fingerprint",
+            "runtime_version": "1.0.1",
+            "version_code": 2,
+            "version_name": "1.0.1",
+            "eas_build_id": "build-123",
+            "eas_update_id": None,
+            "eas_update_group_id": None,
+            "status": "withdrawn",
+            "is_mandatory": False,
+            "min_supported_version_code": None,
+            "artifact_sha256": "a" * 64,
+            "artifact_size_bytes": 12,
+        }
+    }
+    serialized = response.text
+    assert "artifact_storage_key" not in serialized
+    assert "android/sha256" not in serialized
+    assert "download_url" not in serialized
+    assert "release_notes" not in serialized
+
+
+def test_idempotency_lookup_returns_stable_not_found(monkeypatch):
+    routes = import_module("api.routers.internal_releases")
+    monkeypatch.setenv("RELEASE_PUBLISHER_TOKEN", "publisher-only-token")
+
+    async def missing_release(_db, _key):
+        return None
+
+    monkeypatch.setattr(routes, "_release_by_idempotency", missing_release)
+    response = TestClient(app).get(
+        "/internal/app-releases/by-idempotency",
+        params={"key": "direct:missing"},
+        headers={"Authorization": "Bearer publisher-only-token"},
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "release not found"}
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["", " leading", "trailing ", "with/slash", r"with\\backslash", "line\nbreak", "é", "a" * 129],
+)
+def test_idempotency_lookup_rejects_unsafe_or_ambiguous_keys(monkeypatch, key):
+    monkeypatch.setenv("RELEASE_PUBLISHER_TOKEN", "publisher-only-token")
+    response = TestClient(app).get(
+        "/internal/app-releases/by-idempotency",
+        params={"key": key},
+        headers={"Authorization": "Bearer publisher-only-token"},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("endpoint", ["direct", "eas"])
+def test_publish_endpoints_apply_the_same_safe_idempotency_key_contract(monkeypatch, endpoint):
+    monkeypatch.setenv("RELEASE_PUBLISHER_TOKEN", "publisher-only-token")
+    client = TestClient(app)
+    headers = {
+        "Authorization": "Bearer publisher-only-token",
+        "Idempotency-Key": "unsafe/key",
+    }
+    common = {
+        "channel": "production-direct",
+        "source_commit": "b" * 40,
+        "ci_run_id": "ci-run-123",
+        "version_code": 2,
+        "version_name": "1.0.1",
+        "runtime_version": "1.0.1",
+        "fingerprint": "fingerprint",
+    }
+    if endpoint == "direct":
+        headers["X-Artifact-SHA256"] = "a" * 64
+        response = client.post(
+            "/internal/app-releases/android/direct-apk",
+            headers=headers,
+            data={
+                **common,
+                "release_notes_ru": "Исправления",
+                "release_notes_en": "Fixes",
+            },
+            files={"artifact": ("release.apk", b"PK\x03\x04payload")},
+        )
+    else:
+        response = client.post(
+            "/internal/app-releases/android/eas-update",
+            headers=headers,
+            json={
+                **common,
+                "release_notes": {"ru": "Исправления", "en": "Fixes"},
+                "eas_update_id": "update-123",
+                "eas_update_group_id": "group-123",
+            },
+        )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("eas_update_id", [None, "", "   "])
+def test_eas_publish_requires_a_nonblank_exact_update_id(monkeypatch, eas_update_id):
+    monkeypatch.setenv("RELEASE_PUBLISHER_TOKEN", "publisher-only-token")
+    body = {
+        "channel": "production-direct",
+        "source_commit": "b" * 40,
+        "ci_run_id": "ci-run-123",
+        "version_code": 2,
+        "version_name": "1.0.1",
+        "runtime_version": "1.0.1",
+        "fingerprint": "fingerprint",
+        "release_notes": {"ru": "Исправления", "en": "Fixes"},
+        "eas_update_group_id": "group-123",
+    }
+    if eas_update_id is not None:
+        body["eas_update_id"] = eas_update_id
+
+    response = TestClient(app).post(
+        "/internal/app-releases/android/eas-update",
+        headers={
+            "Authorization": "Bearer publisher-only-token",
+            "Idempotency-Key": "eas:missing-update-id",
+        },
+        json=body,
+    )
+
+    assert response.status_code == 422
 
 
 def _router_module():

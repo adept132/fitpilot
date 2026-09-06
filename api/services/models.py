@@ -70,6 +70,7 @@ class AppRelease(Base):
     ci_run_id: Mapped[str] = mapped_column(String(128), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     eas_build_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    eas_update_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     eas_update_group_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     published_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -87,6 +88,7 @@ class AppRelease(Base):
 
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_app_releases_idempotency_key"),
+        UniqueConstraint("eas_update_id", name="uq_app_releases_eas_update_id"),
         UniqueConstraint("eas_update_group_id", name="uq_app_releases_eas_update_group_id"),
         CheckConstraint("platform = 'android'", name="ck_app_releases_platform"),
         CheckConstraint(
@@ -135,6 +137,10 @@ class AppRelease(Base):
             "delivery_method = 'direct_apk' OR "
             "(artifact_sha256 IS NULL AND artifact_size_bytes IS NULL)",
             name="ck_app_releases_non_apk_artifact_fields",
+        ),
+        CheckConstraint(
+            "delivery_method = 'eas_update' OR eas_update_id IS NULL",
+            name="ck_app_releases_eas_update_id_delivery",
         ),
         CheckConstraint(
             "status IN ('published', 'withdrawn')",

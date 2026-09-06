@@ -158,6 +158,7 @@ def _matches_existing_direct(release: AppRelease, command: Any, stored: Any) -> 
         and release.source_commit == _command_value(command, "source_commit")
         and release.ci_run_id == _command_value(command, "ci_run_id")
         and release.eas_build_id == _command_value(command, "eas_build_id")
+        and release.eas_update_id is None
         and release.eas_update_group_id is None
         and release.artifact_storage_key == _stored_value(stored, "storage_key")
         and release.artifact_sha256 == _stored_value(stored, "sha256")
@@ -180,6 +181,7 @@ def _matches_existing_eas(release: AppRelease, command: Any) -> bool:
         and release.source_commit == _command_value(command, "source_commit")
         and release.ci_run_id == _command_value(command, "ci_run_id")
         and release.eas_build_id == _command_value(command, "eas_build_id")
+        and release.eas_update_id == _command_value(command, "eas_update_id")
         and release.eas_update_group_id == _command_value(command, "eas_update_group_id")
     )
 
@@ -190,6 +192,7 @@ async def _persist_new_release(
     command: Any,
     matches_existing: Any,
     *,
+    eas_update_id: str | None = None,
     eas_update_group_id: str | None = None,
 ) -> PublishResult:
     """Flush under a savepoint and turn cross-lane unique races into policy results."""
@@ -208,6 +211,14 @@ async def _persist_new_release(
             raise IdempotencyConflictError(
                 "idempotency key belongs to a different release"
             ) from error
+        if eas_update_id is not None:
+            matching_update = (
+                await session.execute(
+                    select(AppRelease).where(AppRelease.eas_update_id == eas_update_id)
+                )
+            ).scalar_one_or_none()
+            if matching_update is not None:
+                raise ReleaseConflictError("EAS update ID is already published") from error
         if eas_update_group_id is not None:
             matching_group = (
                 await session.execute(
@@ -388,6 +399,7 @@ async def publish_direct_release(
             ci_run_id=ci_run_id,
             idempotency_key=idempotency_key,
             eas_build_id=_command_value(command, "eas_build_id"),
+            eas_update_id=None,
             eas_update_group_id=None,
         )
         return await _persist_new_release(
@@ -407,9 +419,12 @@ async def publish_eas_release(session: AsyncSession, command: Any) -> PublishRes
     ci_run_id = _command_value(command, "ci_run_id")
     idempotency_key = _command_value(command, "idempotency_key")
     runtime_version = _command_value(command, "runtime_version")
+    update_id = _command_value(command, "eas_update_id")
     update_group = _command_value(command, "eas_update_group_id")
-    if not runtime_version or not update_group:
-        raise ReleaseConflictError("EAS releases require runtime_version and eas_update_group_id")
+    if not runtime_version or not update_id or not update_group:
+        raise ReleaseConflictError(
+            "EAS releases require runtime_version, eas_update_id and eas_update_group_id"
+        )
 
     async with _transaction(session):
         await _lock_lane(session, platform, channel)
@@ -434,6 +449,13 @@ async def publish_eas_release(session: AsyncSession, command: Any) -> PublishRes
         ).scalar_one_or_none()
         if matching_group is not None:
             raise ReleaseConflictError("EAS update group is already published")
+        matching_update = (
+            await session.execute(
+                select(AppRelease).where(AppRelease.eas_update_id == update_id)
+            )
+        ).scalar_one_or_none()
+        if matching_update is not None:
+            raise ReleaseConflictError("EAS update ID is already published")
 
         release = AppRelease(
             platform=platform,
@@ -454,6 +476,7 @@ async def publish_eas_release(session: AsyncSession, command: Any) -> PublishRes
             ci_run_id=ci_run_id,
             idempotency_key=idempotency_key,
             eas_build_id=_command_value(command, "eas_build_id"),
+            eas_update_id=update_id,
             eas_update_group_id=update_group,
         )
         return await _persist_new_release(
@@ -461,6 +484,7 @@ async def publish_eas_release(session: AsyncSession, command: Any) -> PublishRes
             release,
             command,
             _matches_existing_eas,
+            eas_update_id=update_id,
             eas_update_group_id=update_group,
         )
 

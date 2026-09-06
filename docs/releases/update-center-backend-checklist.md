@@ -39,17 +39,17 @@ this Firebase fixture even when the row abbreviates the environment to
 
 | Area | Sanitized command | Result |
 | --- | --- | --- |
-| Focused config/auth/storage/registry/cleanup/public API | `FIREBASE_CREDENTIALS=<external-test-fixture-json> python -m pytest tests/test_required_config.py tests/test_release_auth.py tests/test_release_migration.py tests/test_release_storage.py tests/test_release_registry.py tests/test_release_cleanup.py tests/test_main_release_routes.py -q` with synthetic required settings | PASS — 110 passed, 8 skipped, 15 warnings; includes retry binding takeover/revocation, `min_supported_version_code` below/equal/above/null, explicit mandatory, withdrawn escalation, and public direct/EAS response contracts |
+| Focused config/auth/storage/registry/cleanup/public API | `FIREBASE_CREDENTIALS=<external-test-fixture-json> python -m pytest tests/test_required_config.py tests/test_release_auth.py tests/test_release_migration.py tests/test_release_storage.py tests/test_release_registry.py tests/test_release_cleanup.py tests/test_main_release_routes.py -q` with synthetic required settings | PASS — 130 passed, 8 skipped, 15 warnings; includes retry binding takeover/revocation, exact idempotency preflight auth/validation/no-leak contracts, nonblank exact EAS update-ID validation/storage/uniqueness, `min_supported_version_code` below/equal/above/null, explicit mandatory, withdrawn escalation, and public direct/EAS response contracts |
 | Test database guards | `FIREBASE_CREDENTIALS=<external-test-fixture-json> python -m pytest tests/test_release_cleanup_guard.py tests/test_integration_database_guard.py -q` with synthetic required settings | PASS — 14 passed |
-| Full non-integration suite | `FIREBASE_CREDENTIALS=<external-test-fixture-json> python -m pytest tests --ignore=tests/integration -q` with synthetic required settings | PASS — 1,952 passed, 8 skipped, 15 warnings |
-| Current-like schema upgrade | `pg_dump --schema-only --no-owner --no-privileges <source-db> -f <temp-schema>; psql <task8-db> -f <temp-schema>; DATABASE_URL=<task8-url> alembic stamp 20260822_02; alembic upgrade head; alembic current` | PASS — restored schema upgraded through `20260830_01`, `20260830_02`, `20260902_01`; current is `20260902_01 (head)` |
-| Release PostgreSQL integration | `FIREBASE_CREDENTIALS=<external-test-fixture-json> TEST_DATABASE_URL=<task-url> python -m pytest tests/integration/test_app_releases_api.py tests/integration/test_release_cleanup_integration.py -q` with synthetic required settings | PASS WITH PLATFORM SKIPS — 11 passed, 4 skipped; includes both deterministic commit orders for a real PostgreSQL advisory-lock race between retry binding and old-run publication, same-SHA takeover/revocation, direct publication thresholds, and EAS mandatory behavior |
-| Release migration boundary | `DATABASE_URL=<task8-url> alembic downgrade 20260830_02; alembic upgrade head; alembic current` | PASS — returned to `20260902_01 (head)` |
+| Full non-integration suite | `FIREBASE_CREDENTIALS=<external-test-fixture-json> python -m pytest tests --ignore=tests/integration -q` with synthetic required settings | PASS — 1,972 passed, 8 skipped, 15 warnings |
+| Current-like schema upgrade | `pg_dump --schema-only --no-owner --no-privileges <source-db> -f <temp-schema>; psql <task8-db> -f <temp-schema>; DATABASE_URL=<task8-url> alembic stamp 20260822_02; alembic upgrade head; alembic current` | PASS — restored schema upgraded through `20260830_01`, `20260830_02`, `20260902_01`, `20260906_01`; current is `20260906_01 (head)` |
+| Release PostgreSQL integration | `FIREBASE_CREDENTIALS=<external-test-fixture-json> TEST_DATABASE_URL=<task-url> python -m pytest tests/integration/test_app_releases_api.py tests/integration/test_release_cleanup_integration.py -q` with synthetic required settings | PASS WITH PLATFORM SKIPS — 12 passed, 4 skipped; includes exact case-sensitive idempotency lookup of withdrawn/non-latest/cross-lane rows, both deterministic commit orders for a real PostgreSQL advisory-lock race between retry binding and old-run publication, same-SHA takeover/revocation, direct publication thresholds, and EAS mandatory behavior |
+| Release migration boundary | `DATABASE_URL=<task8-url> alembic downgrade 20260902_01; alembic upgrade head; alembic current` | PASS — exact EAS update-ID expand/contract returned to `20260906_01 (head)` |
 | Protected publish/public API smoke | `FIREBASE_CREDENTIALS=<external-test-fixture-json> TEST_DATABASE_URL=<task8-url> python -m pytest tests/integration/test_app_releases_api.py::test_publish_latest_download_withdraw_cycle -q` with synthetic required settings | PASS — 1 passed; checks webhook target and CI binding, synthetic APK publication, latest, `X-Accel-Redirect`, local stored bytes and SHA-256, withdrawal, download `410`, and no update after withdrawal |
 | Explicit-Russian legacy regressions | `FIREBASE_CREDENTIALS=<external-test-fixture-json> TEST_DATABASE_URL=<task8-url> python -m pytest <two-goal-primary-cases> <two-microcycle-conflict-cases> -q` with synthetic required settings after adding `Accept-Language: ru` | PASS — 4 passed |
 | Full PostgreSQL integration suite | `FIREBASE_CREDENTIALS=<external-test-fixture-json> TEST_DATABASE_URL=<task8-url> python -m pytest tests/integration -q --maxfail=1` with synthetic required settings after current-like upgrade | INCOMPLETE — reached 29% with no failure after the four localization fixes, then made no progress for more than 90 seconds at the transition to `test_offline_idempotency.py::test_custom_exercise_idempotent`; manually interrupted |
 | Compilation | `python -m compileall -q api app scripts` | PASS |
-| Alembic graph | `DATABASE_URL=<synthetic-url> python -m alembic heads` | PASS — one head, `20260902_01` |
+| Alembic graph | `DATABASE_URL=<synthetic-url> python -m alembic heads` | PASS — one head, `20260906_01` |
 | Patch whitespace | `git diff --check` | PASS |
 
 The eight focused/non-integration skips are Windows/POSIX permission, symlink,
@@ -110,6 +110,28 @@ observed.
 
 Release publication and production deployment remain prohibited until every
 applicable gate above has explicit evidence and operator approval.
+
+## Release automation idempotency preflight
+
+Before starting EAS or another native build, release automation must call
+`GET /internal/app-releases/by-idempotency?key=<deterministic-key>` with the
+publisher bearer token. The operator token and public requests are not valid
+for this endpoint. Keys are 1–128 ASCII characters and match
+`[A-Za-z0-9][A-Za-z0-9._:-]*`; the publication endpoints enforce the same
+contract. A `404` means no release owns that exact, case-sensitive key and the
+build may proceed. Any other non-`200` response is a hard failure, not a reason
+to rebuild.
+
+On `200`, automation must compare every returned field with its persisted
+release manifest: identity, lane and delivery method; source commit and CI run;
+idempotency key; fingerprint and runtime; version code and name; exact EAS
+build/update/update-group identifiers; publication/mandatory/minimum-version state;
+and direct-APK digest/size where applicable. Only an exact match may be reused.
+Any mismatch is a hard conflict requiring operator review. Withdrawn and older
+non-latest releases are deliberately returned so retries can never republish a
+key that already belongs to historical state. The response never contains the
+artifact storage key, filesystem path, download URL, release notes, token, or
+secret.
 
 ## CI retry-binding delta — 2026-09-06
 

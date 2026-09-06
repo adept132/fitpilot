@@ -67,6 +67,7 @@ def test_release_metadata_has_the_immutable_publish_record_contract():
         "ci_run_id",
         "idempotency_key",
         "eas_build_id",
+        "eas_update_id",
         "eas_update_group_id",
         "published_at",
         "withdrawn_at",
@@ -105,6 +106,9 @@ def test_release_metadata_has_the_immutable_publish_record_contract():
     assert columns.idempotency_key.type.length == 128
     assert isinstance(columns.eas_build_id.type, String)
     assert columns.eas_build_id.type.length == 128
+    assert isinstance(columns.eas_update_id.type, String)
+    assert columns.eas_update_id.type.length == 128
+    assert columns.eas_update_id.nullable is True
     assert isinstance(columns.eas_update_group_id.type, String)
     assert columns.eas_update_group_id.type.length == 128
     assert isinstance(columns.withdrawal_reason.type, String)
@@ -132,6 +136,7 @@ def test_release_metadata_has_unique_delivery_and_latest_indexes():
     index_names = {item.name for item in AppRelease.__table__.indexes}
 
     assert "uq_app_releases_eas_update_group_id" in constraint_names
+    assert "uq_app_releases_eas_update_id" in constraint_names
     assert "uq_app_releases_direct_version" in index_names
     assert "ix_app_releases_latest_published" in index_names
 
@@ -189,6 +194,9 @@ def test_release_domain_checks_match_the_persisted_contract():
             "(delivery_method = 'eas_update' AND eas_update_group_id IS NOT NULL "
             "AND runtime_version IS NOT NULL AND artifact_storage_key IS NULL) OR "
             "(delivery_method = 'google_play' AND artifact_storage_key IS NULL)"
+        ),
+        "ck_app_releases_eas_update_id_delivery": (
+            "delivery_method = 'eas_update' OR eas_update_id IS NULL"
         ),
         "ck_app_releases_non_apk_artifact_fields": (
             "delivery_method = 'direct_apk' OR "
@@ -286,3 +294,21 @@ def test_release_migration_offline_sql_creates_and_removes_only_release_schema(m
         "DROP TABLE app_releases;",
         "DROP TABLE app_release_lanes;",
     ]
+
+
+def test_eas_update_id_migration_is_additive_and_reversible(monkeypatch, capsys):
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://test:test@localhost:5432/test")
+    root = Path(__file__).resolve().parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "migrations"))
+
+    command.upgrade(config, "20260902_01:20260906_01", sql=True)
+    upgrade_sql = capsys.readouterr().out
+    assert "ADD COLUMN eas_update_id VARCHAR(128)" in upgrade_sql
+    assert "uq_app_releases_eas_update_id" in upgrade_sql
+    assert "ck_app_releases_eas_update_id_delivery" in upgrade_sql
+
+    command.downgrade(config, "20260906_01:20260902_01", sql=True)
+    downgrade_sql = capsys.readouterr().out
+    assert "DROP CONSTRAINT uq_app_releases_eas_update_id" in downgrade_sql
+    assert "DROP COLUMN eas_update_id" in downgrade_sql

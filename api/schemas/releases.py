@@ -64,6 +64,7 @@ class ReleaseRecord(BaseModel):
     artifact_storage_key: str | None = None
     artifact_sha256: ArtifactSha256 | None = None
     artifact_size_bytes: ArtifactSize | None = None
+    eas_update_id: str | None = None
     eas_update_group_id: str | None = None
     source_commit: SourceCommit
     published_at: datetime

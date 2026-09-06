@@ -183,6 +183,7 @@ def command(**overrides: object) -> SimpleNamespace:
         "ci_run_id": "run-2",
         "idempotency_key": "direct-2",
         "eas_build_id": None,
+        "eas_update_id": "update-1",
         "eas_update_group_id": None,
         "is_mandatory": True,
     }
@@ -232,6 +233,7 @@ def direct_row(value: SimpleNamespace, artifact: SimpleNamespace) -> AppRelease:
         ci_run_id=value.ci_run_id,
         idempotency_key=value.idempotency_key,
         eas_build_id=value.eas_build_id,
+        eas_update_id=None,
         eas_update_group_id=None,
         published_at=datetime(2026, 9, 2, tzinfo=UTC),
     )
@@ -258,6 +260,7 @@ def eas_row(value: SimpleNamespace) -> AppRelease:
         ci_run_id=value.ci_run_id,
         idempotency_key=value.idempotency_key,
         eas_build_id=value.eas_build_id,
+        eas_update_id=value.eas_update_id,
         eas_update_group_id=value.eas_update_group_id,
         published_at=datetime(2026, 9, 2, tzinfo=UTC),
     )
@@ -425,6 +428,82 @@ async def test_eas_idempotency_key_rejects_a_different_runtime() -> None:
             runtime_version="runtime-other",
             eas_update_group_id="group-1",
             idempotency_key="ota-same",
+        ))
+
+
+async def test_eas_publish_requires_and_persists_exact_update_id() -> None:
+    session = RegistrySession()
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "run-2")
+
+    with pytest.raises(ReleaseConflictError, match="eas_update_id"):
+        await publish_eas_release(session, command(
+            version_code=1,
+            version_name="1.0.0",
+            runtime_version="runtime-1",
+            eas_update_id=None,
+            eas_update_group_id="group-1",
+            idempotency_key="ota-missing-update-id",
+        ))
+
+    published = await publish_eas_release(session, command(
+        version_code=1,
+        version_name="1.0.0",
+        runtime_version="runtime-1",
+        eas_update_id="update-exact-1",
+        eas_update_group_id="group-1",
+        idempotency_key="ota-exact-update-id",
+    ))
+
+    assert published.release.eas_update_id == "update-exact-1"
+
+
+async def test_eas_idempotency_rejects_a_different_exact_update_id() -> None:
+    session = RegistrySession()
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "run-2")
+    original = command(
+        version_code=1,
+        version_name="1.0.0",
+        runtime_version="runtime-1",
+        eas_update_id="update-original",
+        eas_update_group_id="group-1",
+        idempotency_key="ota-same-exact-id",
+    )
+    await publish_eas_release(session, original)
+
+    with pytest.raises(IdempotencyConflictError):
+        await publish_eas_release(session, command(
+            version_code=1,
+            version_name="1.0.0",
+            runtime_version="runtime-1",
+            eas_update_id="update-different",
+            eas_update_group_id="group-1",
+            idempotency_key="ota-same-exact-id",
+        ))
+
+
+async def test_cross_lane_eas_update_id_unique_race_is_a_registry_conflict() -> None:
+    session = RacingRegistrySession()
+    await set_expected_commit(session, "android", "production-direct", "a" * 40, "run-2")
+    await set_expected_commit(session, "android", "production-play", "a" * 40, "run-2")
+    remote = eas_row(command(
+        version_code=1,
+        version_name="1.0.0",
+        runtime_version="runtime-1",
+        eas_update_id="shared-update",
+        eas_update_group_id="remote-group",
+        idempotency_key="remote-update-id",
+    ))
+    session.arm_unique_race(remote)
+
+    with pytest.raises(ReleaseConflictError, match="update ID is already published"):
+        await publish_eas_release(session, command(
+            channel="production-play",
+            version_code=1,
+            version_name="1.0.0",
+            runtime_version="runtime-1",
+            eas_update_id="shared-update",
+            eas_update_group_id="candidate-group",
+            idempotency_key="candidate-update-id",
         ))
 
 

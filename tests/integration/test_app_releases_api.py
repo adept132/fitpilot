@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -119,6 +120,127 @@ def release_headers() -> dict[str, str]:
 
 
 @pytest.mark.asyncio
+async def test_idempotency_lookup_finds_exact_withdrawn_nonlatest_and_cross_lane_rows(
+    client, db, release_headers
+):
+    withdrawn = AppRelease(
+        platform="android",
+        channel="production-direct",
+        delivery_method="direct_apk",
+        version_code=7,
+        version_name="1.0.7",
+        runtime_version="1.0.7",
+        fingerprint="fingerprint-direct-7",
+        release_notes={"ru": "Старая версия", "en": "Old release"},
+        status="withdrawn",
+        withdrawn_at=datetime.now(UTC),
+        withdrawal_reason="superseded test fixture",
+        is_mandatory=False,
+        min_supported_version_code=6,
+        artifact_storage_key="android/sha256/" + "7" * 64 + ".apk",
+        artifact_sha256="7" * 64,
+        artifact_size_bytes=700,
+        source_commit="7" * 40,
+        ci_run_id="ci-direct-7",
+        idempotency_key="direct:exact-withdrawn-7",
+        eas_build_id="build-direct-7",
+        eas_update_group_id=None,
+    )
+    newer = AppRelease(
+        platform="android",
+        channel="production-direct",
+        delivery_method="direct_apk",
+        version_code=8,
+        version_name="1.0.8",
+        runtime_version="1.0.8",
+        fingerprint="fingerprint-direct-8",
+        release_notes={"ru": "Новая версия", "en": "New release"},
+        status="published",
+        is_mandatory=False,
+        min_supported_version_code=None,
+        artifact_storage_key="android/sha256/" + "8" * 64 + ".apk",
+        artifact_sha256="8" * 64,
+        artifact_size_bytes=800,
+        source_commit="8" * 40,
+        ci_run_id="ci-direct-8",
+        idempotency_key="direct:newer-8",
+        eas_build_id="build-direct-8",
+        eas_update_group_id=None,
+    )
+    play = AppRelease(
+        platform="android",
+        channel="production-play",
+        delivery_method="eas_update",
+        version_code=9,
+        version_name="1.0.9",
+        runtime_version="1.0.9",
+        fingerprint="fingerprint-play-9",
+        release_notes={"ru": "OTA версия", "en": "OTA release"},
+        status="published",
+        is_mandatory=True,
+        min_supported_version_code=8,
+        artifact_storage_key=None,
+        artifact_sha256=None,
+        artifact_size_bytes=None,
+        source_commit="9" * 40,
+        ci_run_id="ci-play-9",
+        idempotency_key="eas:cross-lane-9",
+        eas_build_id="build-play-9",
+        eas_update_id="update-play-9",
+        eas_update_group_id="update-group-play-9",
+    )
+    db.add_all([withdrawn, newer, play])
+    await db.commit()
+
+    old_response = await client.get(
+        "/internal/app-releases/by-idempotency",
+        params={"key": "direct:exact-withdrawn-7"},
+        headers=release_headers,
+    )
+    play_response = await client.get(
+        "/internal/app-releases/by-idempotency",
+        params={"key": "eas:cross-lane-9"},
+        headers=release_headers,
+    )
+    case_mismatch = await client.get(
+        "/internal/app-releases/by-idempotency",
+        params={"key": "DIRECT:exact-withdrawn-7"},
+        headers=release_headers,
+    )
+
+    assert old_response.status_code == 200
+    assert old_response.json()["release"] == {
+        "id": str(withdrawn.id),
+        "platform": "android",
+        "channel": "production-direct",
+        "delivery_method": "direct_apk",
+        "source_commit": "7" * 40,
+        "ci_run_id": "ci-direct-7",
+        "idempotency_key": "direct:exact-withdrawn-7",
+        "fingerprint": "fingerprint-direct-7",
+        "runtime_version": "1.0.7",
+        "version_code": 7,
+        "version_name": "1.0.7",
+        "eas_build_id": "build-direct-7",
+        "eas_update_id": None,
+        "eas_update_group_id": None,
+        "status": "withdrawn",
+        "is_mandatory": False,
+        "min_supported_version_code": 6,
+        "artifact_sha256": "7" * 64,
+        "artifact_size_bytes": 700,
+    }
+    assert play_response.status_code == 200
+    assert play_response.json()["release"]["channel"] == "production-play"
+    assert play_response.json()["release"]["eas_update_id"] == "update-play-9"
+    assert play_response.json()["release"]["eas_update_group_id"] == "update-group-play-9"
+    assert play_response.json()["release"]["artifact_sha256"] is None
+    assert "artifact_storage_key" not in old_response.text
+    assert "release_notes" not in old_response.text
+    assert case_mismatch.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_publish_latest_download_withdraw_cycle(client, release_headers, tmp_path):
     source_commit = _commit("publish-cycle")
     delivery_id = "delivery-publish-cycle"
@@ -204,6 +326,7 @@ async def test_publish_latest_download_withdraw_cycle(client, release_headers, t
             "fingerprint": "fingerprint-1",
             "runtime_version": "1.0.0",
             "eas_build_id": None,
+            "eas_update_id": None,
             "eas_update_group_id": None,
         },
     }
@@ -465,6 +588,8 @@ async def test_eas_ledger_mandatory_and_concurrent_publish(client, release_heade
         )
     ).status_code == 409
 
+    exact_update_id = str(uuid4())
+    update_group_id = str(uuid4())
     eas = await client.post(
         "/internal/app-releases/android/eas-update",
         headers={**release_headers, "Idempotency-Key": "eas:one"},
@@ -476,13 +601,33 @@ async def test_eas_ledger_mandatory_and_concurrent_publish(client, release_heade
             "version_name": "1.0.0",
             "runtime_version": "1.0.0",
             "fingerprint": "fingerprint-1",
-            "eas_update_group_id": str(uuid4()),
+            "eas_update_id": exact_update_id,
+            "eas_update_group_id": update_group_id,
             "release_notes": {"ru": "Исправления", "en": "Fixes"},
             "min_supported_version_code": 104,
         },
     )
     assert eas.status_code == 201
+    assert eas.json()["release"]["eas_update_id"] == exact_update_id
     eas_id = eas.json()["release"]["id"]
+    duplicate_exact_update = await client.post(
+        "/internal/app-releases/android/eas-update",
+        headers={**release_headers, "Idempotency-Key": "eas:duplicate-update-id"},
+        json={
+            "channel": "production-direct",
+            "source_commit": source_commit,
+            "ci_run_id": "another-run",
+            "version_code": 104,
+            "version_name": "1.0.0",
+            "runtime_version": "1.0.0",
+            "fingerprint": "fingerprint-1",
+            "eas_update_id": exact_update_id,
+            "eas_update_group_id": str(uuid4()),
+            "release_notes": {"ru": "Исправления", "en": "Fixes"},
+            "min_supported_version_code": 104,
+        },
+    )
+    assert duplicate_exact_update.status_code == 409
     eas_latest = await client.get(
         "/app-releases/android/latest",
         params={
@@ -566,6 +711,7 @@ async def test_retry_binding_revokes_old_run_and_accepts_new_run(client, release
             "version_name": "1.0.0",
             "runtime_version": "1.0.0",
             "fingerprint": "retry-binding-fingerprint",
+            "eas_update_id": f"update-{group_id}",
             "eas_update_group_id": group_id,
             "release_notes": {"ru": "Исправления", "en": "Fixes"},
         }
