@@ -118,17 +118,24 @@ Before starting EAS or another native build, release automation must call
 publisher bearer token. The operator token and public requests are not valid
 for this endpoint. Keys are 1–128 ASCII characters and match
 `[A-Za-z0-9][A-Za-z0-9._:-]*`; the publication endpoints enforce the same
-contract. A `404` means no release owns that exact, case-sensitive key and the
-build may proceed. Any other non-`200` response is a hard failure, not a reason
-to rebuild.
+contract. A `404` means no release owns that exact, case-sensitive key and new
+work may proceed using the current CI run ID. Any other non-`200` response is a
+hard failure, not a reason to rebuild.
 
-On `200`, automation must compare every returned field with its persisted
-release manifest: identity, lane and delivery method; source commit and CI run;
+On `200`, automation must compare every immutable returned field other than the
+stored original CI run ID with its persisted release manifest: identity, lane
+and delivery method; source commit;
 idempotency key; fingerprint and runtime; version code and name; exact EAS
-build/update/update-group identifiers; publication/mandatory/minimum-version state;
-exact bilingual `release_notes`; and direct-APK digest/size where applicable.
-Only an exact match may be reused.
-Any mismatch is a hard conflict requiring operator review. Withdrawn and older
+build/update/update-group identifiers; publication/mandatory/minimum-version
+state; exact bilingual `release_notes`; and direct-APK digest/size where
+applicable. The stored original `ci_run_id` must be strictly validated and kept
+as audit data, but it is deliberately excluded from equality comparison with
+the current retry run. A new CI run may reuse the record only when every other
+immutable manifest/idempotency field matches exactly. This reuse must return
+the persisted result without calling EAS, issuing a publication `POST`, or
+performing any other mutation.
+Any compared-field mismatch is a hard conflict requiring operator review.
+Withdrawn and older
 non-latest releases are deliberately returned so retries can never republish a
 key that already belongs to historical state. The response never contains the
 artifact storage key, filesystem path, download URL, token, or secret. Release
