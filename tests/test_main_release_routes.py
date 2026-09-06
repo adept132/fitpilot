@@ -124,13 +124,14 @@ def test_idempotency_lookup_returns_exact_automation_tuple_without_storage_leaks
             "min_supported_version_code": None,
             "artifact_sha256": "a" * 64,
             "artifact_size_bytes": 12,
+            "release_notes": {"ru": "Исправления", "en": "Fixes"},
         }
     }
     serialized = response.text
     assert "artifact_storage_key" not in serialized
     assert "android/sha256" not in serialized
     assert "download_url" not in serialized
-    assert "release_notes" not in serialized
+    assert "Old release" not in serialized
 
 
 def test_idempotency_lookup_returns_stable_not_found(monkeypatch):

@@ -126,12 +126,14 @@ On `200`, automation must compare every returned field with its persisted
 release manifest: identity, lane and delivery method; source commit and CI run;
 idempotency key; fingerprint and runtime; version code and name; exact EAS
 build/update/update-group identifiers; publication/mandatory/minimum-version state;
-and direct-APK digest/size where applicable. Only an exact match may be reused.
+exact bilingual `release_notes`; and direct-APK digest/size where applicable.
+Only an exact match may be reused.
 Any mismatch is a hard conflict requiring operator review. Withdrawn and older
 non-latest releases are deliberately returned so retries can never republish a
 key that already belongs to historical state. The response never contains the
-artifact storage key, filesystem path, download URL, release notes, token, or
-secret.
+artifact storage key, filesystem path, download URL, token, or secret. Release
+notes are returned as the strict persisted `{ru, en}` object so a retry can
+detect a changed publication tuple before starting a build.
 
 ## CI retry-binding delta — 2026-09-06
 

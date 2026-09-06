@@ -229,14 +229,19 @@ async def test_idempotency_lookup_finds_exact_withdrawn_nonlatest_and_cross_lane
         "min_supported_version_code": 6,
         "artifact_sha256": "7" * 64,
         "artifact_size_bytes": 700,
+        "release_notes": {"ru": "Старая версия", "en": "Old release"},
     }
     assert play_response.status_code == 200
     assert play_response.json()["release"]["channel"] == "production-play"
     assert play_response.json()["release"]["eas_update_id"] == "update-play-9"
     assert play_response.json()["release"]["eas_update_group_id"] == "update-group-play-9"
     assert play_response.json()["release"]["artifact_sha256"] is None
+    assert play_response.json()["release"]["release_notes"] == {
+        "ru": "OTA версия",
+        "en": "OTA release",
+    }
+    assert old_response.json()["release"]["release_notes"] != newer.release_notes
     assert "artifact_storage_key" not in old_response.text
-    assert "release_notes" not in old_response.text
     assert case_mismatch.status_code == 404
 
 

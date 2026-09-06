@@ -144,6 +144,7 @@ class _IdempotencyRelease(BaseModel):
     min_supported_version_code: int | None = Field(default=None, gt=0)
     artifact_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     artifact_size_bytes: int | None = Field(default=None, gt=0)
+    release_notes: ReleaseNotes
 
 
 class _IdempotencyLookupResponse(BaseModel):
