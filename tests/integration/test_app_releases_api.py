@@ -583,3 +583,123 @@ async def test_retry_binding_revokes_old_run_and_accepts_new_run(client, release
 
     assert old_publish.status_code == 409
     assert new_publish.status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_bind_and_old_publish_share_lane_lock_in_both_commit_orders(
+    db, monkeypatch
+):
+    """Prove retry takeover and old publication are one serializable decision."""
+
+    source_commit = _commit("bind-publish-lock-race")
+    original_lock = release_registry._lock_lane
+    watched_session = None
+    lock_attempted = asyncio.Event()
+
+    async def instrumented_lock(session, platform: str, channel: str):
+        if session is watched_session:
+            lock_attempted.set()
+        await original_lock(session, platform, channel)
+
+    monkeypatch.setattr(release_registry, "_lock_lane", instrumented_lock)
+
+    def command(channel: str, ci_run_id: str, suffix: str) -> dict:
+        return {
+            "platform": "android",
+            "channel": channel,
+            "source_commit": source_commit,
+            "ci_run_id": ci_run_id,
+            "version_code": 1,
+            "version_name": "1.0.0",
+            "runtime_version": None,
+            "fingerprint": f"race-{suffix}",
+            "release_notes": {"ru": "Исправления", "en": "Fixes"},
+            "min_supported_version_code": None,
+            "eas_build_id": None,
+            "idempotency_key": f"race-{suffix}",
+        }
+
+    stored = {
+        "storage_key": "android/sha256/" + "7" * 64 + ".apk",
+        "sha256": "7" * 64,
+        "size_bytes": 128,
+    }
+
+    # Linearization 1: retry binding commits first. The old run waits on the
+    # real PostgreSQL advisory lock, then observes the replacement and fails.
+    bind_first_channel = "production-direct"
+    await release_registry.set_expected_commit(
+        db, "android", bind_first_channel, source_commit, "old-run"
+    )
+    await db.commit()
+    async with SessionLocal() as binder, SessionLocal() as old_publisher:
+        watched_session = old_publisher
+        lock_attempted = asyncio.Event()
+        async with binder.begin():
+            await release_registry.bind_expected_ci_run(
+                binder, "android", bind_first_channel, source_commit, "new-run"
+            )
+            old_publish = asyncio.create_task(
+                release_registry.publish_direct_release(
+                    old_publisher,
+                    command(bind_first_channel, "old-run", "bind-first"),
+                    stored,
+                )
+            )
+            await asyncio.wait_for(lock_attempted.wait(), timeout=2)
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(old_publish), timeout=0.1)
+        with pytest.raises(release_registry.StaleReleaseError):
+            await asyncio.wait_for(old_publish, timeout=2)
+
+    # Linearization 2: old publication commits first. The retry waits on the
+    # same lock, then replaces the binding after the release is durable.
+    publish_first_channel = "production-play"
+    await release_registry.set_expected_commit(
+        db, "android", publish_first_channel, source_commit, "old-run"
+    )
+    await db.commit()
+    async with SessionLocal() as old_publisher, SessionLocal() as binder:
+        watched_session = binder
+        lock_attempted = asyncio.Event()
+        async with old_publisher.begin():
+            published = await release_registry.publish_direct_release(
+                old_publisher,
+                command(publish_first_channel, "old-run", "publish-first"),
+                stored,
+            )
+            retry_bind = asyncio.create_task(
+                release_registry.bind_expected_ci_run(
+                    binder, "android", publish_first_channel, source_commit, "new-run"
+                )
+            )
+            await asyncio.wait_for(lock_attempted.wait(), timeout=2)
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(retry_bind), timeout=0.1)
+        rebound = await asyncio.wait_for(retry_bind, timeout=2)
+
+    assert published.created is True
+    assert rebound.expected_ci_run_id == "new-run"
+    async with SessionLocal() as verification:
+        lanes = (
+            await verification.execute(
+                select(AppReleaseLane).where(
+                    AppReleaseLane.channel.in_([bind_first_channel, publish_first_channel])
+                )
+            )
+        ).scalars().all()
+        releases = (
+            await verification.execute(
+                select(AppRelease).where(
+                    AppRelease.channel.in_([bind_first_channel, publish_first_channel])
+                )
+            )
+        ).scalars().all()
+
+    assert {lane.channel: lane.expected_ci_run_id for lane in lanes} == {
+        bind_first_channel: "new-run",
+        publish_first_channel: "new-run",
+    }
+    assert [(release.channel, release.ci_run_id) for release in releases] == [
+        (publish_first_channel, "old-run")
+    ]

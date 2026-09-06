@@ -43,7 +43,7 @@ this Firebase fixture even when the row abbreviates the environment to
 | Test database guards | `FIREBASE_CREDENTIALS=<external-test-fixture-json> python -m pytest tests/test_release_cleanup_guard.py tests/test_integration_database_guard.py -q` with synthetic required settings | PASS — 14 passed |
 | Full non-integration suite | `FIREBASE_CREDENTIALS=<external-test-fixture-json> python -m pytest tests --ignore=tests/integration -q` with synthetic required settings | PASS — 1,952 passed, 8 skipped, 15 warnings |
 | Current-like schema upgrade | `pg_dump --schema-only --no-owner --no-privileges <source-db> -f <temp-schema>; psql <task8-db> -f <temp-schema>; DATABASE_URL=<task8-url> alembic stamp 20260822_02; alembic upgrade head; alembic current` | PASS — restored schema upgraded through `20260830_01`, `20260830_02`, `20260902_01`; current is `20260902_01 (head)` |
-| Release PostgreSQL integration | `FIREBASE_CREDENTIALS=<external-test-fixture-json> TEST_DATABASE_URL=<task-url> python -m pytest tests/integration/test_app_releases_api.py tests/integration/test_release_cleanup_integration.py -q` with synthetic required settings | PASS WITH PLATFORM SKIPS — 10 passed, 4 skipped; includes same-SHA CI retry takeover, old-run publish rejection, newest-run publish success, direct publication thresholds, and EAS mandatory behavior |
+| Release PostgreSQL integration | `FIREBASE_CREDENTIALS=<external-test-fixture-json> TEST_DATABASE_URL=<task-url> python -m pytest tests/integration/test_app_releases_api.py tests/integration/test_release_cleanup_integration.py -q` with synthetic required settings | PASS WITH PLATFORM SKIPS — 11 passed, 4 skipped; includes both deterministic commit orders for a real PostgreSQL advisory-lock race between retry binding and old-run publication, same-SHA takeover/revocation, direct publication thresholds, and EAS mandatory behavior |
 | Release migration boundary | `DATABASE_URL=<task8-url> alembic downgrade 20260830_02; alembic upgrade head; alembic current` | PASS — returned to `20260902_01 (head)` |
 | Protected publish/public API smoke | `FIREBASE_CREDENTIALS=<external-test-fixture-json> TEST_DATABASE_URL=<task8-url> python -m pytest tests/integration/test_app_releases_api.py::test_publish_latest_download_withdraw_cycle -q` with synthetic required settings | PASS — 1 passed; checks webhook target and CI binding, synthetic APK publication, latest, `X-Accel-Redirect`, local stored bytes and SHA-256, withdrawal, download `410`, and no update after withdrawal |
 | Explicit-Russian legacy regressions | `FIREBASE_CREDENTIALS=<external-test-fixture-json> TEST_DATABASE_URL=<task8-url> python -m pytest <two-goal-primary-cases> <two-microcycle-conflict-cases> -q` with synthetic required settings after adding `Accept-Language: ru` | PASS — 4 passed |
@@ -120,9 +120,13 @@ applicable gate above has explicit evidence and operator approval.
   `tests/integration/test_app_releases_api.py::test_retry_binding_revokes_old_run_and_accepts_new_run`
   passed against a unique local `fitpilot_task9_*` database with synthetic
   Firebase and release credentials. The source database was not changed.
-- The complete release API integration file passed: **10 passed**, with only
+- The complete release API integration file passed: **11 passed**, with only
   the pre-existing Pydantic/FastAPI deprecation warnings and Windows pytest
   temporary-directory cleanup warning.
+- The PostgreSQL concurrency regression instruments the real lane-lock call and
+  uses bounded waits to prove both linearizations: bind-first rejects the
+  blocked old publish without creating a row; publish-first commits the old
+  release before the blocked retry takes over, leaving the new run bound.
 - The endpoint remains protected by `RELEASE_PUBLISHER_TOKEN`; stale SHA binds
   remain `409`. Same-SHA retries are latest-attempt-wins under the same lane
   advisory lock used by publication.
