@@ -525,7 +525,15 @@ class WorkoutSupersetService:
                     "recommended_rir": exercise.recommended_rir,
                     "recommended_rep_min": exercise.recommended_rep_min,
                     "recommended_rep_max": exercise.recommended_rep_max,
-                    "target_sets": exercise.target_sets
+                    "target_sets": exercise.target_sets,
+                    "fatigue_tier": (
+                        getattr(exercise.exercise, "fatigue_tier", None)
+                        if exercise.exercise else None
+                    ),
+                    "equipment_needed": (
+                        list(getattr(exercise.exercise, "equipment_needed", None) or [])
+                        if exercise.exercise else []
+                    ),
                 }
             )
 

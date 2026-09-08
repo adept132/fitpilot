@@ -85,6 +85,8 @@ class SupersetFlowExerciseItem(BaseModel):
     recommended_rep_min: Optional[int] = None
     recommended_rep_max: Optional[int] = None
     target_sets:Optional[int] = None
+    fatigue_tier: Optional[int] = None
+    equipment_needed: list[str] = Field(default_factory=list)
 
 
 class SupersetFlowResponse(BaseModel):
