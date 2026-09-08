@@ -246,7 +246,7 @@ async def test_push_ticket_receipt_and_invalid_device(client, db, test_user, mon
     monkeypatch.setattr(push_service, "_expo_request", lambda _url, payload: (
         sent_payloads.append(payload) or {"data": {"status": "ok", "id": "ticket-1"}}
     ))
-    assert await push_service.send_pending(db) == 1
+    assert await push_service.send_pending(db, app_user_id=test_user.id) == 1
     await db.commit()
     assert sent_payloads[0]["title"] == "Приближается срок цели"
     assert sent_payloads[0]["data"] == {
@@ -310,7 +310,7 @@ async def test_register_device_persists_and_uses_reported_channel_ids(client, db
     monkeypatch.setattr(push_service, "_expo_request", lambda _url, payload: (
         sent_payloads.append(payload) or {"data": {"status": "ok", "id": "ticket-2"}}
     ))
-    assert await push_service.send_pending(db) == 1
+    assert await push_service.send_pending(db, app_user_id=test_user.id) == 1
     await db.commit()
     assert sent_payloads[0]["channelId"] == "eurith-actions-v2"
     assert sent_payloads[0]["priority"] == "high"

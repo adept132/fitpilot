@@ -6,9 +6,35 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_current_firebase_claims, get_db
-from api.i18n import resolve_language
 from api.errors import LocalizedHTTPException
+from api.i18n import resolve_language
 from api.services.models import AppUser, AppUserProfile
+
+
+async def _ensure_app_user_profile(
+        db: AsyncSession,
+        app_user: AppUser,
+) -> None:
+    """Keep every authenticated AppUser backed by a domain profile.
+
+    Locking the parent row serializes simultaneous first requests for an old
+    account that is missing its profile. This avoids relying on a caught
+    IntegrityError, which would roll back the rest of the request transaction.
+    """
+    await db.execute(
+        select(AppUser.id)
+        .where(AppUser.id == app_user.id)
+        .with_for_update()
+    )
+    profile = (
+        await db.execute(
+            select(AppUserProfile).where(
+                AppUserProfile.app_user_id == app_user.id
+            )
+        )
+    ).scalar_one_or_none()
+    if profile is None:
+        db.add(AppUserProfile(app_user_id=app_user.id))
 
 
 async def get_or_create_app_user(
@@ -58,6 +84,10 @@ async def get_or_create_app_user(
             last_seen_at=datetime.now(timezone.utc),
         )
         db.add(app_user)
+        # AppUser and its required domain profile must become visible in one
+        # transaction. Otherwise the first Google-authenticated requests can
+        # observe app_users without app_user_profiles and receive a 404.
+        app_user.profile = AppUserProfile()
         try:
             await db.commit()
         except IntegrityError:
@@ -70,9 +100,11 @@ async def get_or_create_app_user(
             ).scalars().first()
             if app_user is None:
                 raise
+            # Fall through: an older server or pre-existing row may have won
+            # the AppUser race without creating the corresponding profile.
+        else:
+            await db.refresh(app_user)
             return app_user
-        await db.refresh(app_user)
-        return app_user
 
     # 2. Сценарий: СУЩЕСТВУЮЩИЙ ПОЛЬЗОВАТЕЛЬ
 
@@ -89,6 +121,9 @@ async def get_or_create_app_user(
 
     # Обновляем время последней активности
     app_user.last_seen_at = datetime.now(timezone.utc)
+
+    # Repair accounts created before the profile invariant was introduced.
+    await _ensure_app_user_profile(db, app_user)
 
     await db.commit()
     await db.refresh(app_user)

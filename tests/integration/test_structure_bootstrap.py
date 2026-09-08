@@ -189,7 +189,22 @@ async def test_bootstrap_recreates_microcycles_after_all_deleted(test_user):
     assert active_micro is not None
 
 
-async def test_bootstrap_without_an_active_split_does_nothing(test_user):
+async def test_bootstrap_does_nothing_when_there_is_nothing_to_pick(
+    test_user, monkeypatch,
+):
+    """Каталог пуст (сид не проигран) — подобрать сплит не из чего.
+
+    Раньше этот тест закреплял «нет активного сплита — ничего не делаем».
+    Критерий §10.1 это отменил: теперь сплит подбирается автоматически, и
+    единственный оставшийся случай бездействия — пустой каталог.
+    """
+    import api.services.structure.bootstrap as bootstrap_module
+
+    async def _no_candidates(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(bootstrap_module, "rank_splits", _no_candidates)
+
     async with SessionLocal() as db:
         result = await ensure_structure(db, test_user.id)
         await db.commit()
@@ -283,3 +298,62 @@ async def test_endpoint_runs_bootstrap(client, auth_headers, test_user):
     assert r.status_code == 200, r.text
     assert r.json()["activated"] is True
     assert await _counts(test_user.id) == (5, 5)
+
+
+async def test_block_is_created_for_a_user_who_never_picked_a_split(test_user):
+    """Критерий §10.1: блок существует сразу после онбординга, «не открыв ни
+    одного экрана настройки». До правки ensure_structure выходила рано без
+    активного сплита, и блок появлялся только после ручного выбора."""
+    async with SessionLocal() as db:
+        await ensure_system_splits(db)
+        await db.commit()
+
+    async with SessionLocal() as db:
+        assert await ensure_active_block(db, test_user.id, date.today()) is None
+
+    async with SessionLocal() as db:
+        result = await ensure_structure(db, test_user.id)
+        await db.commit()
+
+    assert result["activated"] is True
+
+    async with SessionLocal() as db:
+        active_split = (await db.execute(
+            select(UserSplit).where(
+                UserSplit.app_user_id == test_user.id, UserSplit.is_active.is_(True),
+            )
+        )).scalars().first()
+        assert active_split is not None, "сплит должен быть подобран автоматически"
+
+        block = await ensure_active_block(db, test_user.id, date.today())
+        assert block is not None
+
+
+async def test_autoselect_does_not_replace_a_split_whose_blueprint_is_broken(test_user):
+    """Активный сплит есть, но слотов у него нет (блюпринт пуст). Подбирать
+    замену нельзя — это молча подменило бы выбор человека."""
+    async with SessionLocal() as db:
+        await ensure_system_splits(db)
+        empty = SplitBlueprint(name="Пустой", length_days=7, is_system=False,
+                               author_id=test_user.id)
+        db.add(empty)
+        await db.flush()
+        db.add(UserSplit(app_user_id=test_user.id, blueprint_id=empty.id,
+                         is_active=True, current_day=1))
+        await db.commit()
+        broken_id = empty.id
+
+    async with SessionLocal() as db:
+        result = await ensure_structure(db, test_user.id)
+        await db.commit()
+
+    assert result["activated"] is False
+    assert await _counts(test_user.id) == (0, 0)
+
+    async with SessionLocal() as db:
+        active = (await db.execute(
+            select(UserSplit).where(
+                UserSplit.app_user_id == test_user.id, UserSplit.is_active.is_(True),
+            )
+        )).scalars().all()
+    assert len(active) == 1 and active[0].blueprint_id == broken_id

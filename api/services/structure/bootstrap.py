@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +29,7 @@ from api.services.models import (
 )
 from api.services.structure import mesocycle_presets as meso_presets
 from api.services.structure import microcycle_profiles as micro_profiles
+from api.services.structure.repository import rank_splits
 
 
 async def _active_split_slots(
@@ -62,6 +65,57 @@ async def _experience_level(session: AsyncSession, app_user_id: int) -> str:
     return (getattr(profile, "experience_level", None) or "beginner").strip().lower()
 
 
+async def _has_active_user_split(session: AsyncSession, app_user_id: int) -> bool:
+    """Есть ли у пользователя активный сплит — безотносительно его слотов.
+
+    Нужна, чтобы отличить «сплита нет вовсе» (подбираем) от «сплит есть, но
+    блюпринт пуст или удалён» (не трогаем: подбор подменил бы выбор
+    человека). `_active_split_slots` оба случая схлопывает в None.
+    """
+    return (await session.execute(
+        select(UserSplit.id).where(
+            UserSplit.app_user_id == app_user_id,
+            UserSplit.is_active.is_(True),
+        ).limit(1)
+    )).scalars().first() is not None
+
+
+async def _autoselect_split(
+    session: AsyncSession, app_user_id: int
+) -> list[micro_profiles.SlotView] | None:
+    """Подобрать и активировать сплит пользователю, у которого его нет.
+
+    Критерий готовности §10.1 требует, чтобы блок существовал сразу после
+    онбординга, «не открыв ни одного экрана настройки». Без активного сплита
+    длину микроцикла взять неоткуда, структура не заводится, а вместе с ней
+    мертвы фазы, разгрузки, окна план/факт и автопилот цели.
+
+    Отступление от решения 8 спеки («автоподбор предлагает, а не назначает»)
+    осознанное и узкое: активация происходит ТОЛЬКО когда активного сплита
+    нет вовсе — перебивать нечего, а альтернатива это неработающий движок.
+    Сменить сплит человек может в любой момент через селектор на экране
+    тренировки или виджет «Расписание»; опции «без сплита» в интерфейсе нет
+    (PATCH /workout-center/split требует существующий блюпринт, иначе 404),
+    поэтому осознанного отказа, который тут можно было бы молча откатить, не
+    существует — в отличие от «Без мезоцикла», из-за которого признак
+    активации переделывали в Задаче 8.
+    """
+    candidates = await rank_splits(session, app_user_id, limit=1)
+    if not candidates:
+        return None
+
+    session.add(UserSplit(
+        app_user_id=app_user_id,
+        blueprint_id=uuid.UUID(candidates[0].id),
+        is_active=True,
+        current_day=1,
+    ))
+    # flush, а не commit: коммит — забота вызывающей стороны (см. докстринг
+    # ensure_structure). Без flush следующий SELECT не увидит новую строку.
+    await session.flush()
+    return await _active_split_slots(session, app_user_id)
+
+
 async def _has_any_mesocycle(session: AsyncSession, app_user_id: int) -> bool:
     """Есть ли у пользователя хоть одна ЛИЧНАЯ копия мезоцикла (активная или нет)."""
     return (await session.execute(
@@ -93,8 +147,19 @@ async def ensure_structure(session: AsyncSession, app_user_id: int) -> dict:
     """
     slots = await _active_split_slots(session, app_user_id)
     if slots is None:
-        # Длину микроцикла неоткуда взять — заводить структуру нельзя.
-        return {"mesocycles_created": 0, "microcycles_created": 0, "activated": False}
+        if await _has_active_user_split(session, app_user_id):
+            # Активный сплит ЕСТЬ, но слотов у него не нашлось (блюпринт
+            # удалён или пуст). Подбирать замену нельзя: это молча подменило
+            # бы выбор человека. Длину микроцикла взять неоткуда — выходим.
+            return {
+                "mesocycles_created": 0, "microcycles_created": 0, "activated": False,
+            }
+        slots = await _autoselect_split(session, app_user_id)
+        if slots is None:
+            # Каталог пуст (сид не проигран) — заводить структуру не из чего.
+            return {
+                "mesocycles_created": 0, "microcycles_created": 0, "activated": False,
+            }
 
     # Задача 8, правка Critical: признак «пора заводить структуру» — не
     # «нет АКТИВНОГО мезоцикла/микроцикла», а «нет НИ ОДНОЙ записи вовсе»,
@@ -279,14 +344,19 @@ def _slots_from_mapping(days_mapping: dict) -> list[micro_profiles.SlotView]:
 
 async def rebuild_profile_microcycles(
     session: AsyncSession, app_user_id: int, slots: list[micro_profiles.SlotView]
-) -> int:
-    """Пересобрать неправленые микроциклы под новые слоты. Возвращает их число."""
+) -> dict:
+    """Пересобрать неправленые микроциклы под новые слоты.
+
+    Возвращает {"rebuilt": число пересобранных, "deactivated_microcycle":
+    id снятого с активности микроцикла несовпадающей длины, либо None}.
+    """
     by_name = {p.name: p for p in micro_profiles.MICROCYCLE_PROFILES}
     rows = (await session.execute(
         select(AppUserMicrocycle).where(AppUserMicrocycle.app_user_id == app_user_id)
     )).scalars().all()
 
     rebuilt = 0
+    rebuilt_ids: set[int] = set()
     for row in rows:
         profile = by_name.get(row.name)
         if profile is None:
@@ -298,12 +368,32 @@ async def rebuild_profile_microcycles(
         row.days_mapping = micro_profiles.build_days_mapping(profile.code, slots)
         row.length_days = len(slots)
         rebuilt += 1
-    return rebuilt
+        rebuilt_ids.add(row.id)
+
+    # Финальное ревью P1-03, правка 1, §10.5: активный микроцикл длины M при
+    # активном сплите длины N != M — недостижимая пара (та же гарантия, что и
+    # 409 в PATCH /workout-center/context/microcycle, см. её докстринг).
+    # scheduling_engine.py считает день сплита и день микроцикла двумя
+    # независимыми счётчиками — расхождение длин молча уводит раскладку
+    # диапазонов повторов относительно дней. Микроциклы выше НЕ пересобраны
+    # намеренно (правлены руками или чужие, не из пресетов) — переписывать их
+    # раскладку насильно нельзя, поэтому единственный безопасный выход —
+    # снять с активного флаг is_active. Раскладку он не теряет и остаётся в
+    # списке, пользователь выберет подходящую в селекторе сам.
+    deactivated_microcycle = None
+    target_length = len(slots)
+    for row in rows:
+        if row.is_active and row.id not in rebuilt_ids and row.length_days != target_length:
+            row.is_active = False
+            deactivated_microcycle = row.id
+            break
+
+    return {"rebuilt": rebuilt, "deactivated_microcycle": deactivated_microcycle}
 
 
-async def rebuild_for_active_split(session: AsyncSession, app_user_id: int) -> int:
+async def rebuild_for_active_split(session: AsyncSession, app_user_id: int) -> dict:
     """Перестроить микроциклы под текущий активный сплит."""
     slots = await _active_split_slots(session, app_user_id)
     if slots is None:
-        return 0
+        return {"rebuilt": 0, "deactivated_microcycle": None}
     return await rebuild_profile_microcycles(session, app_user_id, slots)

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, status, HTTPException, Request
+from fastapi import APIRouter, Depends, Request, status
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,9 +19,18 @@ router = APIRouter(prefix="/mesocycles", tags=["Mesocycles"])
 
 
 @router.get("/")
-async def get_mesocycles(request: Request, db: AsyncSession = Depends(get_db)):
-    """Получить список всех доступных шаблонов мезоциклов."""
-    result = await db.execute(select(Mesocycle))
+async def get_mesocycles(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: AppUser = Depends(get_current_app_user),
+):
+    """Получить системные и принадлежащие текущему пользователю мезоциклы."""
+    result = await db.execute(
+        select(Mesocycle).where(
+            (Mesocycle.author_id.is_(None))
+            | (Mesocycle.author_id == current_user.id)
+        )
+    )
     language = getattr(
         request.state,
         "language",

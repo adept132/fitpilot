@@ -2,7 +2,7 @@ import json
 import uuid
 from datetime import timedelta, datetime, time
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete, or_
 from sqlalchemy.orm import selectinload
@@ -16,15 +16,14 @@ from api.i18n import tr
 # Импортируй свои зависимости (пути могут немного отличаться в зависимости от твоего проекта)
 from api.services.models import (
     AppUser, SplitBlueprint, DayBlueprint, SplitDaySlot, UserSplit, DayMuscleTarget, UserCalendarDay, AppUserMesocycle,
-    AppUserMicrocycle, AppUserProfile
+    AppUserMicrocycle
 )
 from api.schemas.splits import SplitBlueprintOut, DayBlueprintOut, ActivateSplitRequest, CreateCustomSplitRequest, \
     UpdateCustomSplitRequest, CreateCustomDayRequest, UpdateCustomDayRequest, SchedulePreviewRequest, \
     SchedulePreviewResponse, ScheduleLaunchRequest, SplitSuggestionOut
-from api.services.muscle_keys import to_system_key
 from api.services.periodization.service import close_block_for_split_change
 from api.services.scheduling_engine import SchedulingEngine
-from api.services.structure.suggest import DayView, SplitView, suggest_splits
+from api.services.structure.repository import rank_splits
 from api.services.structure.split_catalog import localized_split_name
 from app.database import get_session
 
@@ -91,73 +90,27 @@ async def suggest_split(
         if not isinstance(parsed_requirement, dict):
             raise LocalizedHTTPException(400, "split.requirement_must_be_object")
 
-    profile = (await session.execute(
-        select(AppUserProfile).where(AppUserProfile.app_user_id == current_user.id)
-    )).scalars().first()
-
-    # Частота не задана — тройка, самая безопасная для неизвестного уровня (§7).
-    frequency = training_frequency or getattr(profile, "training_frequency", None) or 3
-    # Семь тренировок в неделю без единого дня отдыха каталог не покрывает
-    # намеренно (§5.1). Спека §7 требует показать шестидневных кандидатов, а
-    # не пустой список — поэтому зажимаем, а не отсекаем.
-    frequency = max(2, min(int(frequency), 6))
-
-    focus_muscles: list[str] = []
-    if profile is not None and profile.volume_budget:
-        focus_muscles = list(
-            (profile.volume_budget.get("meta") or {}).get("focus_muscles") or []
-        )
-
-    blueprints = (await session.execute(
-        select(SplitBlueprint)
-        .where(SplitBlueprint.is_system.is_(True))
-        .options(
-            selectinload(SplitBlueprint.slots)
-            .selectinload(SplitDaySlot.day)
-            .selectinload(DayBlueprint.muscle_targets)
-        )
-    )).scalars().unique().all()
-
-    views = [
-        SplitView(
-            id=str(bp.id),
-            name=localized_split_name(
-                bp.name,
-                bp.is_system,
-                getattr(request.state, "language", "en"),
-            ),
-            length_days=bp.length_days,
-            days=tuple(
-                DayView(
-                    template_type=slot.day.template_type.value,
-                    muscles=frozenset(
-                        key for key in (
-                            to_system_key(target.muscle_group_id)
-                            for target in slot.day.muscle_targets
-                        ) if key
-                    ),
-                )
-                for slot in sorted(bp.slots, key=lambda s: s.day_order)
-            ),
-        )
-        for bp in blueprints
-    ]
+    candidates = await rank_splits(
+        session,
+        current_user.id,
+        training_frequency=training_frequency,
+        requirement=parsed_requirement,
+    )
 
     return [
         SplitSuggestionOut(
             blueprint_id=candidate.id,
-            name=candidate.name,
+            name=localized_split_name(
+                candidate.name,
+                True,
+                getattr(request.state, "language", "en"),
+            ),
             length_days=candidate.length_days,
             training_days=candidate.training_days,
             sessions_per_week=candidate.sessions_per_week,
             reason=candidate.reason,
         )
-        for candidate in suggest_splits(
-            views,
-            training_frequency=frequency,
-            focus_muscles=focus_muscles,
-            requirement=parsed_requirement,
-        )
+        for candidate in candidates
     ]
 
 
@@ -222,14 +175,14 @@ async def activate_split(
     # их же профиль, и rebuild_for_active_split их пропустит.
     from api.services.structure.bootstrap import rebuild_for_active_split
 
-    rebuilt = await rebuild_for_active_split(session, current_user.id)
+    rebuild_result = await rebuild_for_active_split(session, current_user.id)
 
     await session.commit()
 
     return {
         "status": "success",
         "message": tr(getattr(current_user, "_request_language", "en"), "split.activated", name=blueprint.name),
-        "microcycles_rebuilt": rebuilt,
+        "microcycles_rebuilt": rebuild_result["rebuilt"],
     }
 
 @router.post("/custom")
