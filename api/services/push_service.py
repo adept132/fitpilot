@@ -169,17 +169,29 @@ def _fail_or_retry(delivery: PushDelivery, message: str, transient: bool = True)
         delivery.status = "failed"
 
 
-async def send_pending(db: AsyncSession, limit: int = 100) -> int:
+async def send_pending(
+    db: AsyncSession,
+    limit: int = 100,
+    *,
+    app_user_id: int | None = None,
+) -> int:
     now = datetime.now(timezone.utc)
-    rows = (await db.execute(
+    statement = (
         select(PushDelivery, PushDevice, AppNotification)
         .join(PushDevice, PushDevice.id == PushDelivery.device_id)
         .join(AppNotification, AppNotification.id == PushDelivery.notification_id)
         .where(PushDelivery.status == "pending", PushDelivery.next_attempt_at <= now,
                PushDevice.push_enabled.is_(True), PushDevice.disabled_at.is_(None),
                AppNotification.read_at.is_(None))
-        .order_by(PushDelivery.id).limit(limit).with_for_update(skip_locked=True)
-    )).all()
+    )
+    if app_user_id is not None:
+        statement = statement.where(PushDevice.app_user_id == app_user_id)
+    statement = (
+        statement.order_by(PushDelivery.id)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    rows = (await db.execute(statement)).all()
     sent = 0
     for delivery, device, notification in rows:
         content = safe_push_content(notification.event_type)

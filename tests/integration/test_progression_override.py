@@ -1,10 +1,10 @@
 """Ручной выбор схемы через настройки профиля.
 
 Пути и структура сверены по реальному коду, а не угаданы черновиком брифа:
-- профиля (AppUserProfile) у только что созданного test_user ещё нет —
-  PATCH /profile/settings 404-ит без него (см. api/routers/profile.py), а
-  автосоздания профиля при регистрации нет нигде в app_user_service.py —
-  поэтому фикстура with_profile создаёт строку профиля явно;
+- профиля (AppUserProfile) у только что созданного test_user ещё нет: тестовый
+  client подменяет get_current_app_user и тем самым намеренно обходит
+  production-bootstrap из app_user_service.py. Поэтому фикстура with_profile
+  создаёт строку профиля явно;
 - настройки читаются через GET /profile (роута /profile/me не существует);
 - создание тренировки — POST /workouts/start (а не POST /workouts, живёт в
   api/routers/workout_center.py — см. тот же вывод в docstring
@@ -28,7 +28,7 @@ from api.services.models import AppUser, AppUserProfile
 
 @pytest_asyncio.fixture
 async def with_profile(db: AsyncSession, test_user: AppUser):
-    """Строка профиля для test_user — без неё PATCH /profile/settings 404-ит.
+    """Строка профиля для test_user при обходе production auth-bootstrap.
 
     Отдельного teardown не нужно: app_user_profiles.app_user_id имеет
     ON DELETE CASCADE на app_users, а teardown фикстуры test_user уже сносит
