@@ -3,10 +3,22 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB
 
 from api.services.models import AppRelease, AppReleaseLane
+
+
+def test_migration_graph_has_exactly_one_head():
+    """Catches an integration merge that leaves deployable migrations branched."""
+    root = Path(__file__).resolve().parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "migrations"))
+
+    heads = ScriptDirectory.from_config(config).get_heads()
+
+    assert len(heads) == 1, f"expected one migration head, found {heads}"
 
 
 def test_release_tables_have_required_constraints():

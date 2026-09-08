@@ -17,7 +17,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from api.services.models import AppUser, AppUserProfile
 
 revision: str = "20260908_01"
-down_revision: Union[str, Sequence[str], None] = "20260822_02"
+down_revision: Union[str, Sequence[str], None] = "20260906_01"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
