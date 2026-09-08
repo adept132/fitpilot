@@ -246,6 +246,84 @@ async def test_idempotency_lookup_finds_exact_withdrawn_nonlatest_and_cross_lane
 
 
 @pytest.mark.asyncio
+async def test_direct_version_ceiling_includes_withdrawn_history_and_excludes_other_lanes(
+    client, db, release_headers
+):
+    def direct_release(
+        *, version_code: int, status: str = "published", channel: str = "production-direct"
+    ) -> AppRelease:
+        marker = f"{version_code:02d}"
+        withdrawn_at = datetime.now(UTC) if status == "withdrawn" else None
+        return AppRelease(
+            platform="android",
+            channel=channel,
+            delivery_method="direct_apk",
+            version_code=version_code,
+            version_name=f"1.0.{version_code}",
+            runtime_version=f"1.0.{version_code}",
+            fingerprint=f"fingerprint-{marker}",
+            release_notes={"ru": "Версия", "en": "Release"},
+            status=status,
+            withdrawn_at=withdrawn_at,
+            withdrawal_reason="withdrawn fixture" if withdrawn_at else None,
+            is_mandatory=False,
+            min_supported_version_code=None,
+            artifact_storage_key="android/sha256/" + marker[0] * 64 + ".apk",
+            artifact_sha256=marker[0] * 64,
+            artifact_size_bytes=version_code,
+            source_commit=marker[0] * 40,
+            ci_run_id=f"ci-{marker}",
+            idempotency_key=f"direct:ceiling-{channel}-{marker}",
+            eas_build_id=f"build-{marker}",
+            eas_update_group_id=None,
+        )
+
+    db.add_all(
+        [
+            direct_release(version_code=7),
+            direct_release(version_code=9, status="withdrawn"),
+            direct_release(version_code=11, channel="production-play"),
+            AppRelease(
+                platform="android",
+                channel="production-direct",
+                delivery_method="eas_update",
+                version_code=15,
+                version_name="1.0.15",
+                runtime_version="1.0.15",
+                fingerprint="fingerprint-eas-15",
+                release_notes={"ru": "OTA", "en": "OTA"},
+                status="published",
+                is_mandatory=False,
+                min_supported_version_code=None,
+                artifact_storage_key=None,
+                artifact_sha256=None,
+                artifact_size_bytes=None,
+                source_commit="f" * 40,
+                ci_run_id="ci-eas-15",
+                idempotency_key="eas:ceiling-15",
+                eas_build_id=None,
+                eas_update_id="update-ceiling-15",
+                eas_update_group_id="group-ceiling-15",
+            ),
+        ]
+    )
+    await db.commit()
+
+    response = await client.get(
+        "/internal/app-releases/android/direct-apk/version-ceiling",
+        headers=release_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "platform": "android",
+        "channel": "production-direct",
+        "delivery_method": "direct_apk",
+        "maximum": {"version_code": 9, "version_name": "1.0.9"},
+    }
+
+
+@pytest.mark.asyncio
 async def test_publish_latest_download_withdraw_cycle(client, release_headers, tmp_path):
     source_commit = _commit("publish-cycle")
     delivery_id = "delivery-publish-cycle"

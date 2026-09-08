@@ -153,6 +153,24 @@ class _IdempotencyLookupResponse(BaseModel):
     release: _IdempotencyRelease
 
 
+class _DirectVersionMaximum(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version_code: int = Field(gt=0)
+    version_name: str = Field(
+        pattern=r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
+    )
+
+
+class _DirectVersionCeiling(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    platform: Literal["android"]
+    channel: Literal["production-direct"]
+    delivery_method: Literal["direct_apk"]
+    maximum: _DirectVersionMaximum | None
+
+
 def _record(release: AppRelease) -> dict:
     return ReleaseRecord.model_validate(release).model_dump(mode="json")
 
@@ -193,6 +211,22 @@ async def _release_by_idempotency(db: AsyncSession, key: str) -> AppRelease | No
     return (
         await db.execute(select(AppRelease).where(AppRelease.idempotency_key == key))
     ).scalar_one_or_none()
+
+
+async def _maximum_direct_release(db: AsyncSession) -> AppRelease | None:
+    return (
+        await db.execute(
+            select(AppRelease)
+            .where(
+                and_(
+                    AppRelease.platform == "android",
+                    AppRelease.channel == "production-direct",
+                    AppRelease.delivery_method == "direct_apk",
+                )
+            )
+            .order_by(AppRelease.version_code.desc())
+        )
+    ).scalars().first()
 
 
 @webhook_router.post("/webhooks/github/mobile-push")
@@ -302,6 +336,31 @@ async def get_release_by_idempotency(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "release not found")
     return _IdempotencyLookupResponse(
         release=_IdempotencyRelease.model_validate(release)
+    )
+
+
+@router.get(
+    "/android/direct-apk/version-ceiling",
+    response_model=_DirectVersionCeiling,
+    dependencies=[Depends(require_release_publisher)],
+    include_in_schema=False,
+)
+async def get_direct_version_ceiling(
+    db: AsyncSession = Depends(get_db),
+) -> _DirectVersionCeiling:
+    maximum = await _maximum_direct_release(db)
+    return _DirectVersionCeiling(
+        platform="android",
+        channel="production-direct",
+        delivery_method="direct_apk",
+        maximum=(
+            _DirectVersionMaximum(
+                version_code=maximum.version_code,
+                version_name=maximum.version_name,
+            )
+            if maximum is not None
+            else None
+        ),
     )
 
 

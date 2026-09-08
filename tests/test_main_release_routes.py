@@ -152,6 +152,64 @@ def test_idempotency_lookup_returns_stable_not_found(monkeypatch):
     assert response.json() == {"detail": "release not found"}
 
 
+def test_direct_version_ceiling_requires_exact_publisher_token(monkeypatch):
+    monkeypatch.setenv("RELEASE_PUBLISHER_TOKEN", "publisher-only-token")
+    monkeypatch.setenv("RELEASE_OPERATOR_TOKEN", "operator-only-token")
+    client = TestClient(app)
+
+    missing = client.get(
+        "/internal/app-releases/android/direct-apk/version-ceiling"
+    )
+    operator = client.get(
+        "/internal/app-releases/android/direct-apk/version-ceiling",
+        headers={"Authorization": "Bearer operator-only-token"},
+    )
+
+    assert missing.status_code == 401
+    assert operator.status_code == 401
+
+
+@pytest.mark.parametrize(
+    ("selected", "expected_maximum"),
+    [
+        (None, None),
+        (
+            SimpleNamespace(version_code=17, version_name="2.4.1"),
+            {"version_code": 17, "version_name": "2.4.1"},
+        ),
+    ],
+)
+def test_direct_version_ceiling_has_unambiguous_strict_shape(
+    monkeypatch, selected, expected_maximum
+):
+    routes = import_module("api.routers.internal_releases")
+    monkeypatch.setenv("RELEASE_PUBLISHER_TOKEN", "publisher-only-token")
+
+    async def maximum_direct(_db):
+        return selected
+
+    monkeypatch.setattr(routes, "_maximum_direct_release", maximum_direct)
+    response = TestClient(app).get(
+        "/internal/app-releases/android/direct-apk/version-ceiling",
+        headers={"Authorization": "Bearer publisher-only-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "platform": "android",
+        "channel": "production-direct",
+        "delivery_method": "direct_apk",
+        "maximum": expected_maximum,
+    }
+
+
+def test_direct_version_ceiling_is_not_exposed_in_public_openapi():
+    assert (
+        "/internal/app-releases/android/direct-apk/version-ceiling"
+        not in app.openapi()["paths"]
+    )
+
+
 @pytest.mark.parametrize(
     "key",
     ["", " leading", "trailing ", "with/slash", r"with\\backslash", "line\nbreak", "é", "a" * 129],
