@@ -210,6 +210,31 @@ def test_direct_version_ceiling_is_not_exposed_in_public_openapi():
     )
 
 
+@pytest.mark.asyncio
+async def test_direct_version_ceiling_query_limits_history_scan_to_one_row():
+    routes = import_module("api.routers.internal_releases")
+
+    class _Result:
+        def scalars(self):
+            return self
+
+        def first(self):
+            return None
+
+    class _CapturingDB:
+        statement = None
+
+        async def execute(self, statement):
+            self.statement = statement
+            return _Result()
+
+    db = _CapturingDB()
+
+    assert await routes._maximum_direct_release(db) is None
+    assert db.statement._limit_clause is not None
+    assert db.statement._limit_clause.value == 1
+
+
 @pytest.mark.parametrize(
     "key",
     ["", " leading", "trailing ", "with/slash", r"with\\backslash", "line\nbreak", "é", "a" * 129],

@@ -225,6 +225,7 @@ async def _maximum_direct_release(db: AsyncSession) -> AppRelease | None:
                 )
             )
             .order_by(AppRelease.version_code.desc())
+            .limit(1)
         )
     ).scalars().first()
 
