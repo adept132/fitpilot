@@ -120,7 +120,9 @@ async def test_bootstrap_renaming_active_microcycle_does_not_duplicate(test_user
     """Повторное ревью, Находка 1: PUT /microcycles/{id} разрешает переименовать
     личную копию, пока она не активна. Раньше ensure_structure искала
     существующие микроциклы по имени и заводила шестую копию, не найдя старое
-    имя пресета. Ранний выход по паре активных мезо/микро закрывает это."""
+    имя пресета. Ранний выход по факту наличия хотя бы одной записи каждого
+    типа (had_mesocycles/had_microcycles, не привязанный к активности)
+    закрывает это."""
     await _activate_split(test_user.id)
 
     async with SessionLocal() as db:
@@ -215,6 +217,13 @@ async def test_bootstrap_reraises_integrity_error_unrelated_to_the_race(
         async def _boom(*args, **kwargs):
             raise IntegrityError("simulated", {}, Exception("not the race"))
 
+        # Патчим именно db.flush (метод инстанса), а не что-то на уровне
+        # класса/engine: неявный autoflush AsyncSession перед execute() идёт
+        # через отдельный синхронный путь SQLAlchemy и этот патч не заметит —
+        # сработать обязан явный `await session.flush()` внутри цикла
+        # создания мезоциклов (см. его докстринг в bootstrap.py, "Не про
+        # получение id"). При смене версии SQLAlchemy стоит перепроверить,
+        # что autoflush по-прежнему не заходит через db.flush.
         monkeypatch.setattr(db, "flush", _boom)
 
         with pytest.raises(IntegrityError):

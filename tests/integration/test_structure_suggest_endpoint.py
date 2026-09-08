@@ -35,13 +35,27 @@ async def test_two_days_a_week_returns_fewer_than_three(client, auth_headers):
 
 
 async def test_requirement_narrows_the_result(client, auth_headers):
-    requirement = json.dumps({"any_of": ["legs", "lower", "full_body"], "min": 2})
+    without_requirement = await client.get(
+        "/splits/suggest?training_frequency=4", headers=auth_headers,
+    )
+    assert without_requirement.status_code == 200, without_requirement.text
+    baseline = without_requirement.json()
+
+    # Требование, отсекающее хотя бы одного кандидата на той же частоте:
+    # min=99 не наберёт ни один сплит на четырёх днях, значит фильтр по
+    # requirement реально что-то делает, а не является no-op.
+    requirement = json.dumps({"any_of": ["legs", "lower", "full_body"], "min": 99})
     r = await client.get(
         f"/splits/suggest?training_frequency=4&requirement={requirement}",
         headers=auth_headers,
     )
     assert r.status_code == 200, r.text
-    assert r.json(), "требование не должно отсекать всё подряд"
+    narrowed = r.json()
+
+    assert len(narrowed) < len(baseline), (
+        "requirement должен отсекать хотя бы одного кандидата на той же частоте",
+        baseline, narrowed,
+    )
 
 
 async def test_seven_days_a_week_falls_back_to_six(client, auth_headers):

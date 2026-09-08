@@ -55,6 +55,43 @@ async def test_switching_split_rebuilds_untouched_microcycles(
         "/splits/active", json={"blueprint_id": eight}, headers=auth_headers,
     )
     assert r.status_code == 200, r.text
+    # Именно это поле отличает «пересобрал» от «молча ничего не сделал».
+    assert r.json()["microcycles_rebuilt"] == len(before)
+
+    after = await _micros(test_user.id)
+    assert all(m.length_days == 8 for m in after.values()), {
+        name: m.length_days for name, m in after.items()
+    }
+    assert all(len(m.days_mapping) == 8 for m in after.values())
+
+
+async def test_patch_workout_center_split_also_rebuilds_microcycles(
+    client, auth_headers, test_user,
+):
+    """Финальное ревью P1-03, Critical 1: реальная смена сплита в приложении
+    идёт через PATCH /workout-center/split, а не POST /splits/active —
+    мобильный селектор на экране тренировки бьёт именно сюда. До фикса этот
+    обработчик менял blueprint_id и НЕ пересобирал микроциклы: тест упал бы
+    (length_days осталось 7) на версии до правки."""
+    seven = await _blueprint_id(SEVEN_DAY)
+    eight = await _blueprint_id(EIGHT_DAY)
+
+    r = await client.post(
+        "/splits/active", json={"blueprint_id": seven}, headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+
+    async with SessionLocal() as db:
+        await ensure_structure(db, test_user.id)
+        await db.commit()
+
+    before = await _micros(test_user.id)
+    assert all(m.length_days == 7 for m in before.values())
+
+    r = await client.patch(
+        "/workout-center/split", json={"split_id": eight}, headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
 
     after = await _micros(test_user.id)
     assert all(m.length_days == 8 for m in after.values()), {
