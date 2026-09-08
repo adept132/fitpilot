@@ -200,14 +200,14 @@ async def activate_split(
     # их же профиль, и rebuild_for_active_split их пропустит.
     from api.services.structure.bootstrap import rebuild_for_active_split
 
-    rebuilt = await rebuild_for_active_split(session, current_user.id)
+    rebuild_result = await rebuild_for_active_split(session, current_user.id)
 
     await session.commit()
 
     return {
         "status": "success",
         "message": f"Split '{blueprint.name}' activated.",
-        "microcycles_rebuilt": rebuilt,
+        "microcycles_rebuilt": rebuild_result["rebuilt"],
     }
 
 @router.post("/custom")

@@ -182,8 +182,16 @@ async def build_context(
 
     # --- 2. ЗАГРУЗКА МЕЗОЦИКЛОВ (ПЕРИОДИЗАЦИИ) ---
 
-    # А. Получаем все доступные стратегии (шаблоны)
-    mesos_stmt = select(Mesocycle).order_by(Mesocycle.id.asc())
+    # А. Получаем все доступные стратегии (шаблоны): системные (author_id IS
+    # NULL) и собственные. Правка финального ревью P1-03: без фильтра каждый
+    # пользователь видел мезоциклы всех остальных (author_id == чужой id).
+    mesos_stmt = (
+        select(Mesocycle)
+        .where(
+            (Mesocycle.author_id.is_(None)) | (Mesocycle.author_id == app_user.id)
+        )
+        .order_by(Mesocycle.id.asc())
+    )
     mesos_result = await session.execute(mesos_stmt)
     available_mesocycles_db = mesos_result.scalars().all()
 
@@ -876,6 +884,21 @@ async def update_workout_center_mesocycle(
         session: AsyncSession = Depends(get_db),
         app_user: AppUser = Depends(get_current_app_user)
 ):
+    # 0. Правка финального ревью P1-03: без проверки владения можно было
+    # активировать чужой шаблон мезоцикла по id. 404, а не 403 — тот же
+    # приём, что и у PATCH /workout-center/context/microcycle: не палим
+    # чужой записью факт её существования. Проверяем ДО деактивации своих
+    # записей — тот же порядок, что и у микроцикла (см. ниже).
+    if payload.mesocycle_id is not None:
+        owned = (await session.execute(
+            select(Mesocycle.id).where(
+                Mesocycle.id == payload.mesocycle_id,
+                (Mesocycle.author_id.is_(None)) | (Mesocycle.author_id == app_user.id),
+            )
+        )).scalars().first()
+        if owned is None:
+            raise HTTPException(404, "Мезоцикл не найден")
+
     # 1. Деактивируем все предыдущие стратегии
     await session.execute(
         update(AppUserMesocycle)

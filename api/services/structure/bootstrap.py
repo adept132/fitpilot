@@ -279,14 +279,19 @@ def _slots_from_mapping(days_mapping: dict) -> list[micro_profiles.SlotView]:
 
 async def rebuild_profile_microcycles(
     session: AsyncSession, app_user_id: int, slots: list[micro_profiles.SlotView]
-) -> int:
-    """Пересобрать неправленые микроциклы под новые слоты. Возвращает их число."""
+) -> dict:
+    """Пересобрать неправленые микроциклы под новые слоты.
+
+    Возвращает {"rebuilt": число пересобранных, "deactivated_microcycle":
+    id снятого с активности микроцикла несовпадающей длины, либо None}.
+    """
     by_name = {p.name: p for p in micro_profiles.MICROCYCLE_PROFILES}
     rows = (await session.execute(
         select(AppUserMicrocycle).where(AppUserMicrocycle.app_user_id == app_user_id)
     )).scalars().all()
 
     rebuilt = 0
+    rebuilt_ids: set[int] = set()
     for row in rows:
         profile = by_name.get(row.name)
         if profile is None:
@@ -298,12 +303,32 @@ async def rebuild_profile_microcycles(
         row.days_mapping = micro_profiles.build_days_mapping(profile.code, slots)
         row.length_days = len(slots)
         rebuilt += 1
-    return rebuilt
+        rebuilt_ids.add(row.id)
+
+    # Финальное ревью P1-03, правка 1, §10.5: активный микроцикл длины M при
+    # активном сплите длины N != M — недостижимая пара (та же гарантия, что и
+    # 409 в PATCH /workout-center/context/microcycle, см. её докстринг).
+    # scheduling_engine.py считает день сплита и день микроцикла двумя
+    # независимыми счётчиками — расхождение длин молча уводит раскладку
+    # диапазонов повторов относительно дней. Микроциклы выше НЕ пересобраны
+    # намеренно (правлены руками или чужие, не из пресетов) — переписывать их
+    # раскладку насильно нельзя, поэтому единственный безопасный выход —
+    # снять с активного флаг is_active. Раскладку он не теряет и остаётся в
+    # списке, пользователь выберет подходящую в селекторе сам.
+    deactivated_microcycle = None
+    target_length = len(slots)
+    for row in rows:
+        if row.is_active and row.id not in rebuilt_ids and row.length_days != target_length:
+            row.is_active = False
+            deactivated_microcycle = row.id
+            break
+
+    return {"rebuilt": rebuilt, "deactivated_microcycle": deactivated_microcycle}
 
 
-async def rebuild_for_active_split(session: AsyncSession, app_user_id: int) -> int:
+async def rebuild_for_active_split(session: AsyncSession, app_user_id: int) -> dict:
     """Перестроить микроциклы под текущий активный сплит."""
     slots = await _active_split_slots(session, app_user_id)
     if slots is None:
-        return 0
+        return {"rebuilt": 0, "deactivated_microcycle": None}
     return await rebuild_profile_microcycles(session, app_user_id, slots)

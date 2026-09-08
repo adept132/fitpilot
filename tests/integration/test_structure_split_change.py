@@ -131,3 +131,53 @@ async def test_hand_edited_microcycle_is_left_alone(client, auth_headers, test_u
     after = await _micros(test_user.id)
     assert after["Равномерный"].length_days == 7
     assert after["Тяжёлый–лёгкий"].length_days == 8
+
+
+async def test_hand_edited_active_microcycle_is_deactivated_on_split_change(
+    client, auth_headers, test_user,
+):
+    """Финальное ревью P1-03, правка 1: активный правленый микроцикл должен
+    остаться недостижимой парой «сплит длины N, активный микроцикл длины
+    M != N» — §10.5. rebuild_profile_microcycles пропускает правленые
+    раскладки (§5.6), но раньше никто не проверял, не была ли пропущенная
+    строка ещё и активной. До правки это утверждение падает: is_active
+    остаётся True при length_days=7 у активного сплита длины 8."""
+    seven = await _blueprint_id(SEVEN_DAY)
+    eight = await _blueprint_id(EIGHT_DAY)
+
+    await client.post(
+        "/splits/active", json={"blueprint_id": seven}, headers=auth_headers,
+    )
+    async with SessionLocal() as db:
+        await ensure_structure(db, test_user.id)
+        await db.commit()
+
+    # "Равномерный" — дефолт для новичка (see ensure_structure), значит уже
+    # активен. Портим его раскладку так, как это сделал бы человек руками —
+    # тот же приём, что и в test_hand_edited_microcycle_is_left_alone.
+    async with SessionLocal() as db:
+        row = (await db.execute(
+            select(AppUserMicrocycle).where(
+                AppUserMicrocycle.app_user_id == test_user.id,
+                AppUserMicrocycle.name == "Равномерный",
+            )
+        )).scalars().first()
+        assert row.is_active is True
+        edited = dict(row.days_mapping)
+        edited["1"] = {"type": "hard", "tag": edited["1"]["tag"]}
+        row.days_mapping = edited
+        await db.commit()
+
+    r = await client.post(
+        "/splits/active", json={"blueprint_id": eight}, headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+
+    after = await _micros(test_user.id)
+    edited_row = after["Равномерный"]
+    # Раскладка правленого не тронута.
+    assert edited_row.length_days == 7
+    assert edited_row.days_mapping["1"]["type"] == "hard"
+    # Но он больше не активен — недостижимая пара §10.5 не должна была
+    # пережить смену сплита.
+    assert edited_row.is_active is False

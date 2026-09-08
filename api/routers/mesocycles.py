@@ -15,9 +15,21 @@ router = APIRouter(prefix="/mesocycles", tags=["Mesocycles"])
 
 
 @router.get("/")
-async def get_mesocycles(db: AsyncSession = Depends(get_db)):
-    """Получить список всех доступных шаблонов мезоциклов."""
-    result = await db.execute(select(Mesocycle))
+async def get_mesocycles(
+    db: AsyncSession = Depends(get_db),
+    current_user: AppUser = Depends(get_current_app_user),
+):
+    """Получить список доступных шаблонов мезоциклов: системные и свои.
+
+    Правка финального ревью P1-03: раньше эндпоинт был вовсе без авторизации
+    и без фильтра — отдавал мезоциклы всех пользователей подряд. Сравни с
+    соседними get_mesocycle/delete_mesocycle в этом же файле — они уже
+    фильтруют по author_id == current_user.id.
+    """
+    stmt = select(Mesocycle).where(
+        (Mesocycle.author_id.is_(None)) | (Mesocycle.author_id == current_user.id)
+    )
+    result = await db.execute(stmt)
     return result.scalars().all()
 
 
