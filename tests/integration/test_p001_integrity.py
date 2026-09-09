@@ -36,7 +36,22 @@ ABSURD_BUT_SCHEMA_VALID_WEIGHT = 700
 
 async def _get_catalog_exercise(db) -> Exercise:
     exercise = (await db.execute(select(Exercise).limit(1))).scalar_one_or_none()
-    assert exercise is not None, "в справочнике должно быть хотя бы одно упражнение"
+    if exercise is None:
+        # This file must not depend on another test having seeded the catalog
+        # earlier in collection order. A minimal system exercise is sufficient
+        # for every anomaly/statistics scenario below.
+        exercise = Exercise(
+            name=f"Тестовое системное {uuid.uuid4().hex[:8]}",
+            category="base",
+            main_muscle_group="Грудь",
+            secondary_muscle_groups=[],
+            equipment_needed=[],
+            difficulty="beginner",
+            source="default",
+        )
+        db.add(exercise)
+        await db.commit()
+        await db.refresh(exercise)
     return exercise
 
 

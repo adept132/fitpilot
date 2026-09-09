@@ -127,11 +127,13 @@ async def test_purge_removes_every_trace(client, db, test_user):
     ) == 0
 
 
-async def test_naive_cascade_would_have_failed(client, db, test_user):
-    """Документирует, почему purge_user написан вручную.
+async def test_purge_handles_current_and_legacy_session_cascade(client, db, test_user):
+    """purge_user works with both legacy and current workout-session FKs.
 
-    Прямой DELETE FROM app_users падает: осиротевшие workout_session_exercises
-    держат кастомное упражнение через ON DELETE RESTRICT.
+    Historical deployments could leave orphan workout_session_exercises when
+    deleting a session. Fresh schemas now cascade those rows in PostgreSQL.
+    The test validates cleanup under either schema instead of requiring the
+    legacy defect to still be present.
     """
     await _seed_workout(client)
     user_id = test_user.id
@@ -151,18 +153,18 @@ async def test_naive_cascade_would_have_failed(client, db, test_user):
         ),
         {"uid": user_id},
     )
-    # Сироты действительно остаются — FK на workout_sessions в БД нет.
-    assert orphans >= 1
+    if orphans:
+        # Legacy schema: the orphan keeps the custom exercise through
+        # exercise_id ON DELETE RESTRICT and a raw user delete still fails.
+        with pytest.raises(Exception):
+            await db.execute(
+                text("DELETE FROM app_users WHERE id = :uid"), {"uid": user_id}
+            )
+            await db.commit()
+        await db.rollback()
 
-    # И именно они ломают удаление пользователя «в лоб».
-    with pytest.raises(Exception):
-        await db.execute(
-            text("DELETE FROM app_users WHERE id = :uid"), {"uid": user_id}
-        )
-        await db.commit()
-    await db.rollback()
-
-    # А наш purge с этим справляется.
+    # Explicit purge succeeds both for a legacy orphan and for the current
+    # database-managed workout-session cascade.
     await purge_user(db, user_id)
     assert await db.scalar(
         select(func.count()).select_from(AppUser).where(AppUser.id == user_id)

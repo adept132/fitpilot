@@ -250,7 +250,10 @@ async def test_launch_uses_block_snapshot_when_periodization_is_set(db, test_use
     фаза бралась бы из живого шаблона мезоцикла, а block_id не проставлялся
     бы вовсе."""
     await _seed(db, test_user.id)
-    block = await ensure_active_block(db, test_user.id, TODAY)
+    # launch_and_unroll_plan intentionally evaluates rollover against the real
+    # current day.  Anchor this scenario there so it keeps testing the current
+    # block instead of silently rolling a once-future fixed fixture forward.
+    block = await ensure_active_block(db, test_user.id, date.today())
     assert block.split_blueprint_id is not None
 
     await SchedulingEngine.launch_and_unroll_plan(

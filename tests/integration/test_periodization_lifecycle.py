@@ -245,7 +245,7 @@ async def test_split_change_closes_active_block_and_starts_next_at_new_split_dat
     (пользователь планирует запуск наперёд), а не с сегодня."""
     block = await _seed(db, test_user.id, date(2026, 8, 1))
     blueprint = await _seed_split_blueprint(db, test_user.id)
-    future_start = date(2026, 8, 20)
+    future_start = date.today() + timedelta(days=14)
 
     response = await client.post(
         "/splits/launch",

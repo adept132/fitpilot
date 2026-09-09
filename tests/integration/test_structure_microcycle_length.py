@@ -61,7 +61,7 @@ async def test_mismatched_length_is_rejected(client, auth_headers, test_user):
     r = await client.patch(
         "/workout-center/context/microcycle",
         json={"microcycle_id": micro_id},
-        headers=auth_headers,
+        headers={**auth_headers, "Accept-Language": "ru"},
     )
     assert r.status_code == 409, r.text
     assert "сплит" in r.json()["detail"].lower()

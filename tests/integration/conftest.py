@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest_asyncio
-from fastapi import Depends
+from fastapi import Depends, Request
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +34,7 @@ from api.main import app  # noqa: E402
 from api.services.app_user_service import (  # noqa: E402
     get_current_app_user,
     get_current_app_user_allow_pending,
+    set_request_language,
 )
 from api.services.models import (  # noqa: E402
     AppUser,
@@ -154,12 +155,17 @@ async def client(test_user: AppUser):
     """
 
     async def _current_user_allow_pending(
+        request: Request,
         db: AsyncSession = Depends(get_db),
     ) -> AppUser:
         # Именно из СЕССИИ ЗАПРОСА: эндпоинты /account мутируют пользователя и
         # коммитят через тот же db. Отсоединённый объект молча не сохранился бы.
         fresh = await db.get(AppUser, test_user.id)
-        return fresh if fresh is not None else test_user
+        app_user = fresh if fresh is not None else test_user
+        # Match the production dependency contract: localized routes consume
+        # both request.state.language and the user-side convenience value.
+        await set_request_language(request, db, app_user)
+        return app_user
 
     async def _current_user(
         app_user: AppUser = Depends(_current_user_allow_pending),

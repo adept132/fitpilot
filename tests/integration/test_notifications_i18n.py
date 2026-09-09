@@ -110,6 +110,10 @@ async def test_push_renders_semantic_notification_in_profile_language(
     )
 
     assert await push_service.send_pending(db) == 1
+    # send_pending locks delivery rows until the caller finishes its unit of
+    # work. End that transaction before test_user teardown deletes the same
+    # user's rows; otherwise fixture teardown waits on its own open lock.
+    await db.commit()
     assert sent_payloads[0]["title"] == "Goal deadline approaching"
     assert sent_payloads[0]["data"] == {
         "notificationId": notification.id,
