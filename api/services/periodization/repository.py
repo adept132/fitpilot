@@ -9,10 +9,10 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from api.services.models import (
     AppUserMesocycle,
@@ -58,12 +58,47 @@ async def _current_chronic_level(
 async def get_active_block(
     session: AsyncSession, app_user_id: int
 ) -> Optional[TrainingBlock]:
+    """Return only a block whose complete source chain belongs to the user.
+
+    ``phases`` is a persisted snapshot, so filtering the currently active
+    ``AppUserMesocycle`` is not enough: a legacy cross-user relation may have
+    created a block before that relation was deactivated.  Validate both the
+    direct template reference and the optional relation reference.  A block
+    without either reference is a legitimate generic/legacy block.
+    """
+    direct_meso = aliased(Mesocycle)
+    relation = aliased(AppUserMesocycle)
+    relation_meso = aliased(Mesocycle)
     return (
         await session.execute(
             select(TrainingBlock)
+            .outerjoin(direct_meso, direct_meso.id == TrainingBlock.mesocycle_id)
+            .outerjoin(relation, relation.id == TrainingBlock.user_mesocycle_id)
+            .outerjoin(relation_meso, relation_meso.id == relation.mesocycle_id)
             .where(
                 TrainingBlock.app_user_id == app_user_id,
                 TrainingBlock.status == "active",
+                or_(
+                    TrainingBlock.mesocycle_id.is_(None),
+                    and_(
+                        direct_meso.id.is_not(None),
+                        or_(
+                            direct_meso.author_id.is_(None),
+                            direct_meso.author_id == app_user_id,
+                        ),
+                    ),
+                ),
+                or_(
+                    TrainingBlock.user_mesocycle_id.is_(None),
+                    and_(
+                        relation.id.is_not(None),
+                        relation.app_user_id == app_user_id,
+                        or_(
+                            relation_meso.author_id.is_(None),
+                            relation_meso.author_id == app_user_id,
+                        ),
+                    ),
+                ),
             )
             .order_by(TrainingBlock.block_index.desc())
         )
@@ -87,7 +122,13 @@ async def _snapshot_phases_from_template(
     strategy = (
         await session.execute(
             select(Mesocycle)
-            .where(Mesocycle.id == user_meso.mesocycle_id)
+            .where(
+                Mesocycle.id == user_meso.mesocycle_id,
+                or_(
+                    Mesocycle.author_id.is_(None),
+                    Mesocycle.author_id == user_meso.app_user_id,
+                ),
+            )
             .options(selectinload(Mesocycle.phases))
         )
     ).scalar_one_or_none()
@@ -216,9 +257,15 @@ async def close_and_advance(
     # ОДНОМУ блоку, в котором их применили.
     user_meso = (
         await session.execute(
-            select(AppUserMesocycle).where(
+            select(AppUserMesocycle)
+            .join(Mesocycle, Mesocycle.id == AppUserMesocycle.mesocycle_id)
+            .where(
                 AppUserMesocycle.app_user_id == app_user_id,
                 AppUserMesocycle.is_active.is_(True),
+                or_(
+                    Mesocycle.author_id.is_(None),
+                    Mesocycle.author_id == app_user_id,
+                ),
             )
         )
     ).scalars().first()
@@ -439,9 +486,15 @@ async def ensure_active_block(
 
     user_meso = (
         await session.execute(
-            select(AppUserMesocycle).where(
+            select(AppUserMesocycle)
+            .join(Mesocycle, Mesocycle.id == AppUserMesocycle.mesocycle_id)
+            .where(
                 AppUserMesocycle.app_user_id == app_user_id,
                 AppUserMesocycle.is_active.is_(True),
+                or_(
+                    Mesocycle.author_id.is_(None),
+                    Mesocycle.author_id == app_user_id,
+                ),
             )
         )
     ).scalars().first()

@@ -34,6 +34,7 @@ from api.services.models import (
     UserGoal,
 )
 from api.services.periodization import params as periodization_params
+from api.services.periodization.repository import get_active_block
 
 _HORIZON_TAIL_DAYS = 120  # запас за дедлайном, чтобы увидеть «не успеваем»
 
@@ -149,12 +150,8 @@ async def evaluate(
     # simulate.project_sessions): длина микроцикла активного блока. Нет
     # активного блока — нет ритма, simulate.run() ниже просто не достраивает
     # (microcycle_length=None), горизонт остаётся materialized как раньше.
-    microcycle_length = (await session.execute(
-        select(TrainingBlock.microcycle_length).where(
-            TrainingBlock.app_user_id == app_user_id,
-            TrainingBlock.status == "active",
-        )
-    )).scalar_one_or_none()
+    active_block = await get_active_block(session, app_user_id)
+    microcycle_length = active_block.microcycle_length if active_block else None
     lift_sessions, success_rate = await repository.lift_stats(
         session, app_user_id, goal.exercise_id
     )
@@ -400,12 +397,7 @@ async def build_context(
     if state is None:
         return {**empty, "unavailable_reason": UNAVAILABLE_NO_HISTORY}
 
-    block = (await session.execute(
-        select(TrainingBlock).where(
-            TrainingBlock.app_user_id == app_user_id,
-            TrainingBlock.status == "active",
-        )
-    )).scalar_one_or_none()
+    block = await get_active_block(session, app_user_id)
     if block is None:
         return {**empty, "unavailable_reason": UNAVAILABLE_NO_BLOCK}
 
@@ -579,12 +571,7 @@ async def refresh_goal_proposals(
     if state is None:
         return None
 
-    block = (await session.execute(
-        select(TrainingBlock).where(
-            TrainingBlock.app_user_id == app_user_id,
-            TrainingBlock.status == "active",
-        )
-    )).scalar_one_or_none()
+    block = await get_active_block(session, app_user_id)
     if block is None:
         return None  # автопилоту нечего править: блока нет
 
