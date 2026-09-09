@@ -1,7 +1,10 @@
 """Bootstrap структуры: копии пресетов, активация, заведение блока (P1-03 ч.1, §5.5)."""
+import asyncio
+
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
 
 from api.seed_splits import ensure_system_splits
 from api.services.models import (
@@ -357,3 +360,106 @@ async def test_autoselect_does_not_replace_a_split_whose_blueprint_is_broken(tes
             )
         )).scalars().all()
     assert len(active) == 1 and active[0].blueprint_id == broken_id
+
+
+async def test_autoselect_repairs_existing_microcycles_before_early_return(test_user):
+    """Existing presets still need transition repair after a new autoselection."""
+    await _activate_split(test_user.id, "Верх / низ на восьмидневке")
+    async with SessionLocal() as db:
+        await ensure_structure(db, test_user.id)
+        await db.commit()
+
+    async with SessionLocal() as db:
+        before = (await db.execute(
+            select(AppUserMicrocycle).where(
+                AppUserMicrocycle.app_user_id == test_user.id
+            )
+        )).scalars().all()
+        assert before and all(row.length_days == 8 for row in before)
+        await db.execute(
+            update(UserSplit)
+            .where(UserSplit.app_user_id == test_user.id)
+            .values(is_active=False)
+        )
+        await db.commit()
+
+    async with SessionLocal() as db:
+        result = await ensure_structure(db, test_user.id)
+        await db.commit()
+
+    assert result == {
+        "mesocycles_created": 0, "microcycles_created": 0, "activated": True,
+    }
+    async with SessionLocal() as db:
+        active = (await db.execute(
+            select(UserSplit)
+            .where(UserSplit.app_user_id == test_user.id, UserSplit.is_active.is_(True))
+            .options(selectinload(UserSplit.blueprint))
+        )).scalars().one()
+        after = (await db.execute(
+            select(AppUserMicrocycle).where(
+                AppUserMicrocycle.app_user_id == test_user.id
+            )
+        )).scalars().all()
+    assert active.blueprint.length_days == 7
+    assert all(row.length_days == 7 for row in after)
+
+
+async def test_concurrent_autoselect_creates_only_one_active_split(
+    test_user, monkeypatch,
+):
+    """Serialize the no-split check so two bootstrap requests cannot both insert."""
+    import api.services.structure.bootstrap as bootstrap_module
+
+    # Seed an existing structure, then remove only the active split.  With no
+    # unique preset inserts left to accidentally serialize the requests, the
+    # old implementation deterministically created two active UserSplit rows.
+    await _activate_split(test_user.id)
+    async with SessionLocal() as db:
+        await ensure_structure(db, test_user.id)
+        await db.execute(
+            update(UserSplit)
+            .where(UserSplit.app_user_id == test_user.id)
+            .values(is_active=False)
+        )
+        await db.commit()
+
+    original_rank = bootstrap_module.rank_splits
+    both_ranked = asyncio.Event()
+    rank_calls = 0
+
+    async def synchronized_rank(*args, **kwargs):
+        nonlocal rank_calls
+        rank_calls += 1
+        if rank_calls == 2:
+            both_ranked.set()
+        else:
+            try:
+                await asyncio.wait_for(both_ranked.wait(), timeout=0.25)
+            except TimeoutError:
+                # With the AppUser row lock the second request cannot reach
+                # ranking until the first commits, so one call is expected.
+                pass
+        return await original_rank(*args, **kwargs)
+
+    monkeypatch.setattr(bootstrap_module, "rank_splits", synchronized_rank)
+
+    async def bootstrap_once():
+        async with SessionLocal() as db:
+            result = await ensure_structure(db, test_user.id)
+            await db.commit()
+            return result
+
+    await asyncio.wait_for(
+        asyncio.gather(bootstrap_once(), bootstrap_once()), timeout=5,
+    )
+
+    async with SessionLocal() as db:
+        active = (await db.execute(
+            select(UserSplit).where(
+                UserSplit.app_user_id == test_user.id,
+                UserSplit.is_active.is_(True),
+            )
+        )).scalars().all()
+    assert len(active) == 1
+    assert rank_calls == 1

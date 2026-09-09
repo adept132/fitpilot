@@ -18,7 +18,7 @@ def test_migration_graph_has_exactly_one_head():
 
     heads = ScriptDirectory.from_config(config).get_heads()
 
-    assert len(heads) == 1, f"expected one migration head, found {heads}"
+    assert heads == ["20260909_01"], f"expected linear cleanup head, found {heads}"
 
 
 def test_release_tables_have_required_constraints():

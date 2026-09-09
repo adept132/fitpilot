@@ -1,4 +1,6 @@
 """Смена сплита пересобирает неправленые микроциклы (P1-03 ч.1, §5.6)."""
+from datetime import date, timedelta
+
 import pytest
 from sqlalchemy import select
 
@@ -181,3 +183,79 @@ async def test_hand_edited_active_microcycle_is_deactivated_on_split_change(
     # Но он больше не активен — недостижимая пара §10.5 не должна была
     # пережить смену сплита.
     assert edited_row.is_active is False
+
+
+async def test_launch_split_rebuilds_untouched_microcycles(
+    client, auth_headers, test_user,
+):
+    """POST /splits/launch is a split-change path, not just a scheduler call."""
+    seven = await _blueprint_id(SEVEN_DAY)
+    eight = await _blueprint_id(EIGHT_DAY)
+
+    response = await client.post(
+        "/splits/active", json={"blueprint_id": seven}, headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    async with SessionLocal() as db:
+        await ensure_structure(db, test_user.id)
+        await db.commit()
+
+    before = await _micros(test_user.id)
+    assert before and all(row.length_days == 7 for row in before.values())
+
+    response = await client.post(
+        "/splits/launch",
+        json={
+            "blueprint_id": eight,
+            "start_date": (date.today() + timedelta(days=1)).isoformat(),
+            "blackout_weekdays": [],
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+
+    after = await _micros(test_user.id)
+    assert all(row.length_days == 8 for row in after.values())
+    assert all(len(row.days_mapping) == 8 for row in after.values())
+
+
+async def test_launch_split_deactivates_incompatible_edited_active_microcycle(
+    client, auth_headers, test_user,
+):
+    seven = await _blueprint_id(SEVEN_DAY)
+    eight = await _blueprint_id(EIGHT_DAY)
+
+    response = await client.post(
+        "/splits/active", json={"blueprint_id": seven}, headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    async with SessionLocal() as db:
+        await ensure_structure(db, test_user.id)
+        row = (await db.execute(
+            select(AppUserMicrocycle).where(
+                AppUserMicrocycle.app_user_id == test_user.id,
+                AppUserMicrocycle.is_active.is_(True),
+            )
+        )).scalars().one()
+        edited = dict(row.days_mapping)
+        edited["1"] = {"type": "hard", "tag": edited["1"]["tag"]}
+        row.days_mapping = edited
+        edited_id = row.id
+        await db.commit()
+
+    response = await client.post(
+        "/splits/launch",
+        json={
+            "blueprint_id": eight,
+            "start_date": (date.today() + timedelta(days=1)).isoformat(),
+            "blackout_weekdays": [],
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+
+    async with SessionLocal() as db:
+        edited_row = await db.get(AppUserMicrocycle, edited_id)
+        assert edited_row.length_days == 7
+        assert edited_row.days_mapping["1"]["type"] == "hard"
+        assert edited_row.is_active is False

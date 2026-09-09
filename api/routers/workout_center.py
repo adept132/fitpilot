@@ -239,13 +239,22 @@ async def build_context(
     # Б. Ищем активный мезоцикл текущего пользователя
     active_meso_stmt = (
         select(AppUserMesocycle)
+        .join(Mesocycle, AppUserMesocycle.mesocycle_id == Mesocycle.id)
         .options(
             joinedload(AppUserMesocycle.mesocycle)
             .selectinload(Mesocycle.phases)  # Подгружаем список фаз
         )
         .where(
             AppUserMesocycle.app_user_id == app_user.id,
-            AppUserMesocycle.is_active == True
+            AppUserMesocycle.is_active == True,
+            # Legacy databases can contain cross-user join rows created
+            # before ownership validation was added.  The relation owner is
+            # not sufficient: the joined mesocycle must also be system-owned
+            # or belong to this same user before any fields are serialized.
+            (
+                Mesocycle.author_id.is_(None)
+                | (Mesocycle.author_id == app_user.id)
+            ),
         )
         .limit(1)
     )

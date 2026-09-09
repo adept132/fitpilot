@@ -1,10 +1,12 @@
 """Мезоциклы не текут между пользователями (финальное ревью P1-03, правка 2)."""
 import uuid
+from importlib import import_module
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, select, update
 
-from api.services.models import AppUser, Mesocycle, MesocyclePhase
+from api.services.models import AppUser, AppUserMesocycle, Mesocycle, MesocyclePhase
+from api.services.structure.bootstrap import ensure_structure
 from app.database import SessionLocal
 
 pytestmark = pytest.mark.asyncio
@@ -61,6 +63,94 @@ async def test_foreign_mesocycle_not_visible_in_workout_center_context(
         ids = [m["id"] for m in r.json()["available_mesocycles"]]
         assert foreign_id not in ids
     finally:
+        await _delete_user(other_id)
+
+
+async def test_historical_foreign_active_relation_is_not_serialized(
+    client, auth_headers, test_user,
+):
+    """A legacy bad join row must not expose another user's periodization."""
+    # First create the user's normal structure.  That makes the later foreign
+    # relation the only active one while ensuring the context bootstrap takes
+    # its idempotent path and does not repair the fixture for us.
+    async with SessionLocal() as db:
+        await ensure_structure(db, test_user.id)
+        await db.commit()
+
+    other_id = await _make_other_user()
+    try:
+        foreign_name = f"TOP SECRET {uuid.uuid4().hex[:8]}"
+        foreign_id = await _make_mesocycle(other_id, foreign_name)
+        async with SessionLocal() as db:
+            await db.execute(
+                update(AppUserMesocycle)
+                .where(AppUserMesocycle.app_user_id == test_user.id)
+                .values(is_active=False)
+            )
+            db.add(AppUserMesocycle(
+                app_user_id=test_user.id,
+                mesocycle_id=uuid.UUID(foreign_id),
+                is_active=True,
+                microcycle_length=7,
+                current_phase=1,
+            ))
+            await db.commit()
+
+        response = await client.get("/workout-center/context", headers=auth_headers)
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["selected_periodization"] is None
+        assert foreign_name not in response.text
+    finally:
+        await _delete_user(other_id)
+
+
+async def test_cleanup_migration_deactivates_only_cross_user_relations(test_user):
+    """The repair keeps own/system selections and neutralizes legacy leaks."""
+    other_id = await _make_other_user()
+    system_id = None
+    try:
+        own_id = await _make_mesocycle(test_user.id, f"Own {uuid.uuid4().hex[:8]}")
+        system_id = await _make_mesocycle(None, f"System {uuid.uuid4().hex[:8]}")
+        foreign_id = await _make_mesocycle(other_id, f"Foreign {uuid.uuid4().hex[:8]}")
+        async with SessionLocal() as db:
+            relations = [
+                AppUserMesocycle(
+                    app_user_id=test_user.id,
+                    mesocycle_id=uuid.UUID(mesocycle_id),
+                    is_active=True,
+                    microcycle_length=7,
+                    current_phase=1,
+                )
+                for mesocycle_id in (own_id, system_id, foreign_id)
+            ]
+            db.add_all(relations)
+            await db.commit()
+            relation_ids = [relation.id for relation in relations]
+
+        migration = import_module(
+            "migrations.versions.20260909_01_deactivate_cross_user_mesocycles"
+        )
+        async with SessionLocal() as db:
+            await db.run_sync(migration.deactivate_cross_user_relations)
+            await db.commit()
+            rows = (await db.execute(
+                select(AppUserMesocycle).where(
+                    AppUserMesocycle.id.in_(relation_ids)
+                )
+            )).scalars().all()
+
+        active_by_meso = {str(row.mesocycle_id): row.is_active for row in rows}
+        assert active_by_meso[own_id] is True
+        assert active_by_meso[system_id] is True
+        assert active_by_meso[foreign_id] is False
+    finally:
+        if system_id is not None:
+            async with SessionLocal() as db:
+                await db.execute(
+                    delete(Mesocycle).where(Mesocycle.id == uuid.UUID(system_id))
+                )
+                await db.commit()
         await _delete_user(other_id)
 
 

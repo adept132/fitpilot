@@ -440,6 +440,15 @@ async def launch_split(
     )
     session.add(new_user_split)
 
+    # The active split is already changed in this transaction, so rebuild the
+    # untouched profile microcycles before either committing or asking the
+    # scheduling engine to consume them.  flush is required because the
+    # shared service discovers the active split with a SELECT.
+    await session.flush()
+    from api.services.structure.bootstrap import rebuild_for_active_split
+
+    await rebuild_for_active_split(session, current_user.id)
+
     # 5. Очищаем будущее расписание в UserCalendarDay.
     # P0-09: request.start_date приходит ОТ ПОЛЬЗОВАТЕЛЯ и может лежать в
     # прошлом — без фильтра по статусу смена сплита стирала бы историю.

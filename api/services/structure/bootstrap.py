@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from api.services.models import (
+    AppUser,
     AppUserMesocycle,
     AppUserMicrocycle,
     AppUserProfile,
@@ -100,6 +101,25 @@ async def _autoselect_split(
     существует — в отличие от «Без мезоцикла», из-за которого признак
     активации переделывали в Задаче 8.
     """
+    # Serialize the check-and-insert sequence on the stable parent row.  A
+    # uniqueness constraint on UserSplit cannot express "only one active"
+    # without a new partial index, while every bootstrap already has exactly
+    # one AppUser row to lock.  Recheck after acquiring the lock because a
+    # concurrent request may have committed its selection while we waited.
+    locked_user_id = (await session.execute(
+        select(AppUser.id)
+        .where(AppUser.id == app_user_id)
+        .with_for_update()
+    )).scalars().first()
+    if locked_user_id is None:
+        return None
+
+    active_slots = await _active_split_slots(session, app_user_id)
+    if active_slots is not None:
+        return active_slots
+    if await _has_active_user_split(session, app_user_id):
+        return None
+
     candidates = await rank_splits(session, app_user_id, limit=1)
     if not candidates:
         return None
@@ -160,6 +180,11 @@ async def ensure_structure(session: AsyncSession, app_user_id: int) -> dict:
             return {
                 "mesocycles_created": 0, "microcycles_created": 0, "activated": False,
             }
+        # Existing profile rows may have been built for a previously selected
+        # split.  A freshly autoselected split is a real transition even when
+        # both preset collections already exist, so repair/deactivate before
+        # the idempotent early return below.
+        await rebuild_profile_microcycles(session, app_user_id, slots)
 
     # Задача 8, правка Critical: признак «пора заводить структуру» — не
     # «нет АКТИВНОГО мезоцикла/микроцикла», а «нет НИ ОДНОЙ записи вовсе»,
