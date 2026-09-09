@@ -215,6 +215,7 @@ async def active_block(db: AsyncSession, test_user: AppUser):
     from api.services.volume.repository import utc_today
 
     block = TrainingBlock(
+        phase_snapshot_trusted=True,
         app_user_id=test_user.id,
         block_index=1,
         phases=[{"phase_number": 1, "name": "medium", "effort_tier": "medium", "length_days": 7}],

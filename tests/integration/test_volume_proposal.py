@@ -239,6 +239,7 @@ async def test_apply_budget_lever_does_not_collapse_target_on_long_microcycle(
     клампит, и именно кламп — то, что проверяется.
     """
     block = TrainingBlock(
+        phase_snapshot_trusted=True,
         app_user_id=test_user.id, block_index=1,
         phases=[{"phase_number": 1, "name": "medium", "effort_tier": "medium", "length_days": 10}],
         microcycle_length=10,

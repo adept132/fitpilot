@@ -69,6 +69,7 @@ async def test_close_window_scales_landmarks_by_block_microcycle_length(
     floor(6*10/7)=8, floor(12*10/7)=17, floor(18*10/7)=25.
     """
     block = TrainingBlock(
+        phase_snapshot_trusted=True,
         app_user_id=test_user.id, block_index=1,
         phases=[{"phase_number": 1, "name": "medium", "effort_tier": "medium", "length_days": 10}],
         microcycle_length=10,

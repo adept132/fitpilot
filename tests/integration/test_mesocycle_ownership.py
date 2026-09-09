@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from importlib import import_module
 
 import pytest
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
 
 from api.services.models import (
     AppUser,
@@ -14,6 +14,8 @@ from api.services.models import (
     TrainingBlock,
     WorkoutSession,
 )
+from api.services.periodization.repository import create_block
+from api.services.periodization.types import PhaseSnapshot
 from api.services.structure.bootstrap import ensure_structure
 from app.database import SessionLocal
 
@@ -62,6 +64,7 @@ async def _make_relation_and_block(
     phase_name: str,
     *,
     block_index: int = 1,
+    trusted: bool = False,
 ) -> tuple[int, int]:
     """Persist the exact legacy shape that existed before ownership checks."""
     async with SessionLocal() as db:
@@ -85,6 +88,7 @@ async def _make_relation_and_block(
                 "effort_tier": "medium",
                 "length_days": 7,
             }],
+            phase_snapshot_trusted=trusted,
             microcycle_length=7,
             start_date=date.today(),
             planned_end_date=date.today() + timedelta(days=6),
@@ -169,7 +173,9 @@ async def test_foreign_block_snapshot_is_absent_from_all_context_responses(
             f"Foreign {uuid.uuid4().hex[:8]}",
             phase_name=secret,
         )
-        await _make_relation_and_block(test_user.id, foreign_id, secret)
+        await _make_relation_and_block(
+            test_user.id, foreign_id, secret, trusted=True,
+        )
 
         workout = await client.get("/workout-center/context", headers=auth_headers)
         periodization = await client.get(
@@ -186,6 +192,184 @@ async def test_foreign_block_snapshot_is_absent_from_all_context_responses(
         await _delete_user(other_id)
 
 
+async def test_cascade_null_foreign_snapshot_is_cleaned_and_never_serialized(
+    client, auth_headers, test_user,
+):
+    """Deleting the source must not turn a foreign snapshot into a generic one."""
+    other_id = await _make_other_user()
+    secret = f"CASCADE NULL SECRET {uuid.uuid4().hex}"
+    foreign_id = await _make_mesocycle(
+        other_id,
+        f"Cascade foreign {uuid.uuid4().hex[:8]}",
+        phase_name=secret,
+    )
+    _, block_id = await _make_relation_and_block(test_user.id, foreign_id, secret)
+    async with SessionLocal() as db:
+        workout = WorkoutSession(
+            app_user_id=test_user.id,
+            source="free",
+            status="finished",
+            training_block_id=block_id,
+            notes="cascade result survives",
+            started_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc),
+        )
+        db.add(workout)
+        await db.commit()
+        workout_id = workout.id
+
+    # author -> mesocycle CASCADE -> relation CASCADE -> both block FKs SET NULL
+    await _delete_user(other_id)
+    async with SessionLocal() as db:
+        orphaned = await db.get(TrainingBlock, block_id)
+        assert orphaned is not None
+        assert orphaned.user_mesocycle_id is None
+        assert orphaned.mesocycle_id is None
+
+        relation_cleanup = import_module(
+            "migrations.versions.20260909_01_deactivate_cross_user_mesocycles"
+        )
+        provenance_cleanup = import_module(
+            "migrations.versions.20260909_02_trust_training_block_snapshots"
+        )
+        await db.run_sync(relation_cleanup.deactivate_cross_user_relations)
+        await db.run_sync(
+            provenance_cleanup.backfill_and_cleanup_block_provenance
+        )
+        await db.commit()
+
+    workout_response = await client.get(
+        "/workout-center/context", headers=auth_headers,
+    )
+    periodization_response = await client.get(
+        "/periodization/context",
+        params={"local_date": date.today().isoformat()},
+        headers=auth_headers,
+    )
+    leaks = [
+        label
+        for label, response in (
+            ("workout-center", workout_response),
+            ("periodization", periodization_response),
+        )
+        if secret in response.text
+    ]
+    assert workout_response.status_code == 200, workout_response.text
+    assert periodization_response.status_code == 200, periodization_response.text
+    assert leaks == []
+
+    async with SessionLocal() as db:
+        cleaned = await db.get(TrainingBlock, block_id)
+        preserved_workout = await db.get(WorkoutSession, workout_id)
+        assert cleaned is not None
+        assert cleaned.status == "closed"
+        assert secret not in str(cleaned.phases)
+        assert preserved_workout is not None
+        assert preserved_workout.training_block_id == block_id
+        assert preserved_workout.notes == "cascade result survives"
+
+
+async def test_dangling_relation_source_is_not_treated_as_system_owned(
+    client, auth_headers, test_user,
+):
+    """An absent outer-joined Mesocycle has NULL fields but is not system-owned."""
+    secret = f"DANGLING RELATION SECRET {uuid.uuid4().hex}"
+    missing_mesocycle_id = uuid.uuid4()
+    constraint = "app_user_mesocycles_mesocycle_id_fkey"
+    relation_id = None
+    block_id = None
+    async with SessionLocal() as db:
+        await db.execute(text(
+            f"ALTER TABLE app_user_mesocycles DROP CONSTRAINT {constraint}"
+        ))
+        await db.commit()
+    try:
+        async with SessionLocal() as db:
+            relation = AppUserMesocycle(
+                app_user_id=test_user.id,
+                mesocycle_id=missing_mesocycle_id,
+                is_active=True,
+                microcycle_length=7,
+                current_phase=1,
+            )
+            db.add(relation)
+            await db.flush()
+            block = TrainingBlock(
+                app_user_id=test_user.id,
+                block_index=1,
+                user_mesocycle_id=relation.id,
+                mesocycle_id=None,
+                phases=[{
+                    "phase_number": 1,
+                    "name": secret,
+                    "effort_tier": "medium",
+                    "length_days": 7,
+                }],
+                phase_snapshot_trusted=True,
+                microcycle_length=7,
+                start_date=date.today(),
+                planned_end_date=date.today() + timedelta(days=6),
+                status="active",
+            )
+            db.add(block)
+            await db.commit()
+            relation_id = relation.id
+            block_id = block.id
+
+        workout_response = await client.get(
+            "/workout-center/context", headers=auth_headers,
+        )
+        periodization_response = await client.get(
+            "/periodization/context",
+            params={"local_date": date.today().isoformat()},
+            headers=auth_headers,
+        )
+        leaks = [
+            label
+            for label, response in (
+                ("workout-center", workout_response),
+                ("periodization", periodization_response),
+            )
+            if secret in response.text
+        ]
+        assert workout_response.status_code == 200, workout_response.text
+        assert periodization_response.status_code == 200, periodization_response.text
+        assert leaks == []
+
+        provenance_cleanup = import_module(
+            "migrations.versions.20260909_02_trust_training_block_snapshots"
+        )
+        async with SessionLocal() as db:
+            await db.run_sync(
+                provenance_cleanup.backfill_and_cleanup_block_provenance
+            )
+            await db.commit()
+            cleaned = await db.get(TrainingBlock, block_id)
+            assert cleaned is not None
+            assert cleaned.phase_snapshot_trusted is False
+            assert cleaned.status == "closed"
+            assert secret not in str(cleaned.phases)
+    finally:
+        async with SessionLocal() as db:
+            if block_id is not None:
+                await db.execute(
+                    delete(TrainingBlock).where(TrainingBlock.id == block_id)
+                )
+            if relation_id is not None:
+                await db.execute(
+                    delete(AppUserMesocycle).where(
+                        AppUserMesocycle.id == relation_id
+                    )
+                )
+            await db.commit()
+            await db.execute(text(
+                f"ALTER TABLE app_user_mesocycles ADD CONSTRAINT {constraint} "
+                "FOREIGN KEY (mesocycle_id) REFERENCES mesocycles(id) "
+                "ON DELETE CASCADE"
+            ))
+            await db.commit()
+
+
 async def test_owned_block_snapshot_remains_visible(
     client, auth_headers, test_user,
 ):
@@ -196,7 +380,9 @@ async def test_owned_block_snapshot_remains_visible(
         f"Own {uuid.uuid4().hex[:8]}",
         phase_name=phase_name,
     )
-    await _make_relation_and_block(test_user.id, own_id, phase_name)
+    await _make_relation_and_block(
+        test_user.id, own_id, phase_name, trusted=True,
+    )
 
     workout = await client.get("/workout-center/context", headers=auth_headers)
 
@@ -269,11 +455,17 @@ async def test_cleanup_migration_deactivates_only_cross_user_relations(test_user
             block_ids = [block.id for block in blocks]
             workout_id = workout.id
 
-        migration = import_module(
+        relation_cleanup = import_module(
             "migrations.versions.20260909_01_deactivate_cross_user_mesocycles"
         )
+        provenance_cleanup = import_module(
+            "migrations.versions.20260909_02_trust_training_block_snapshots"
+        )
         async with SessionLocal() as db:
-            await db.run_sync(migration.deactivate_cross_user_relations)
+            await db.run_sync(relation_cleanup.deactivate_cross_user_relations)
+            await db.run_sync(
+                provenance_cleanup.backfill_and_cleanup_block_provenance
+            )
             await db.commit()
             rows = (await db.execute(
                 select(AppUserMesocycle).where(
@@ -292,10 +484,13 @@ async def test_cleanup_migration_deactivates_only_cross_user_relations(test_user
         assert active_by_meso[system_id] is True
         assert active_by_meso[foreign_id] is False
         assert migrated_blocks[0].status == "active"
+        assert migrated_blocks[0].phase_snapshot_trusted is True
         assert migrated_blocks[0].phases[0]["name"] == "OWN VALID"
         assert migrated_blocks[1].status == "active"
+        assert migrated_blocks[1].phase_snapshot_trusted is True
         assert migrated_blocks[1].phases[0]["name"] == "SYSTEM VALID"
         assert migrated_blocks[2].status == "closed"
+        assert migrated_blocks[2].phase_snapshot_trusted is False
         assert migrated_blocks[2].close_reason == "ownership_invalid"
         assert migrated_blocks[2].user_mesocycle_id is None
         assert migrated_blocks[2].mesocycle_id is None
@@ -312,6 +507,126 @@ async def test_cleanup_migration_deactivates_only_cross_user_relations(test_user
                 )
                 await db.commit()
         await _delete_user(other_id)
+
+
+async def test_system_owned_block_snapshot_remains_trusted(
+    client, auth_headers, test_user,
+):
+    system_id = await _make_mesocycle(
+        None,
+        f"System block {uuid.uuid4().hex[:8]}",
+        phase_name=f"SYSTEM PHASE {uuid.uuid4().hex}",
+    )
+    try:
+        _, block_id = await _make_relation_and_block(
+            test_user.id,
+            system_id,
+            "SYSTEM PHASE",
+            trusted=True,
+        )
+        response = await client.get(
+            "/workout-center/context", headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["active_block"]["block_id"] == block_id
+    finally:
+        async with SessionLocal() as db:
+            await db.execute(
+                delete(Mesocycle).where(Mesocycle.id == uuid.UUID(system_id))
+            )
+            await db.commit()
+
+
+async def test_new_generic_block_is_explicitly_trusted_and_serialized(
+    client, auth_headers, test_user,
+):
+    phase_name = f"GENERIC PHASE {uuid.uuid4().hex}"
+    async with SessionLocal() as db:
+        block = await create_block(
+            db,
+            test_user.id,
+            date.today(),
+            block_index=1,
+            phases=(PhaseSnapshot(
+                phase_number=1,
+                name=phase_name,
+                effort_tier="medium",
+                length_days=7,
+            ),),
+            user_meso=None,
+            user_micro=None,
+            phase_snapshot_trusted=True,
+        )
+        await db.commit()
+        block_id = block.id
+        assert block.phase_snapshot_trusted is True
+
+    response = await client.get(
+        "/workout-center/context", headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["active_block"]["block_id"] == block_id
+    assert response.json()["active_block"]["phase_name"] == phase_name
+
+
+async def test_provenance_migration_quarantines_only_untrusted_generic_rows(
+    test_user,
+):
+    """Authorized tradeoff: old generic is closed; explicit new origin survives."""
+    legacy_secret = f"LEGACY GENERIC SECRET {uuid.uuid4().hex}"
+    current_name = f"CURRENT GENERIC {uuid.uuid4().hex}"
+    async with SessionLocal() as db:
+        legacy = TrainingBlock(
+            app_user_id=test_user.id,
+            block_index=1,
+            phases=[{
+                "phase_number": 1,
+                "name": legacy_secret,
+                "effort_tier": "medium",
+                "length_days": 7,
+            }],
+            phase_snapshot_trusted=False,
+            microcycle_length=7,
+            start_date=date.today(),
+            planned_end_date=date.today() + timedelta(days=6),
+            status="active",
+        )
+        current = TrainingBlock(
+            app_user_id=test_user.id,
+            block_index=2,
+            phases=[{
+                "phase_number": 1,
+                "name": current_name,
+                "effort_tier": "medium",
+                "length_days": 7,
+            }],
+            phase_snapshot_trusted=True,
+            microcycle_length=7,
+            start_date=date.today(),
+            planned_end_date=date.today() + timedelta(days=6),
+            status="active",
+        )
+        db.add_all([legacy, current])
+        await db.commit()
+        legacy_id, current_id = legacy.id, current.id
+
+        migration = import_module(
+            "migrations.versions.20260909_02_trust_training_block_snapshots"
+        )
+        await db.run_sync(migration.backfill_and_cleanup_block_provenance)
+        await db.commit()
+        db.expire_all()
+
+        migrated_legacy = await db.get(TrainingBlock, legacy_id)
+        migrated_current = await db.get(TrainingBlock, current_id)
+        assert migrated_legacy is not None
+        assert migrated_legacy.status == "closed"
+        assert migrated_legacy.phase_snapshot_trusted is False
+        assert legacy_secret not in str(migrated_legacy.phases)
+        assert migrated_current is not None
+        assert migrated_current.status == "active"
+        assert migrated_current.phase_snapshot_trusted is True
+        assert migrated_current.phases[0]["name"] == current_name
 
 
 async def test_system_mesocycle_visible_in_workout_center_context(

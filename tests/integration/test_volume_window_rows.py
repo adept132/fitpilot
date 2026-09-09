@@ -85,6 +85,7 @@ async def test_window_does_not_span_a_gap_between_blocks(db, test_user, active_b
 
     # Разрыв в неделю, затем блок 2 со своим микроциклом.
     second = TrainingBlock(
+        phase_snapshot_trusted=True,
         app_user_id=test_user.id, block_index=active_block.block_index + 1,
         phases=[{"phase_number": 1, "name": "medium",
                  "effort_tier": "medium", "length_days": 7}],

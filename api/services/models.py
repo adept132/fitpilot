@@ -1214,6 +1214,13 @@ class TrainingBlock(Base):
         UUID(as_uuid=True), ForeignKey("mesocycles.id", ondelete="SET NULL"), nullable=True
     )
     phases: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    # Positive proof for persisted human-readable phase labels.  Legacy rows
+    # default to untrusted because ON DELETE may already have erased both
+    # source FKs; authenticated creation sets this explicitly, including for
+    # intentionally generic blocks.
+    phase_snapshot_trusted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     user_microcycle_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("app_user_microcycles.id", ondelete="SET NULL"), nullable=True

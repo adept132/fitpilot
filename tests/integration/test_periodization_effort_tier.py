@@ -44,6 +44,7 @@ async def test_tier_comes_from_the_block_snapshot(db, test_user: AppUser):
     await db.flush()
 
     block = TrainingBlock(
+        phase_snapshot_trusted=True,
         app_user_id=test_user.id, block_index=1,
         user_mesocycle_id=user_meso.id, mesocycle_id=meso.id,
         phases=[
@@ -127,6 +128,7 @@ async def test_history_marks_session_in_inserted_deload_as_deload(db, test_user:
     await db.flush()
 
     block = TrainingBlock(
+        phase_snapshot_trusted=True,
         app_user_id=test_user.id, block_index=1,
         user_mesocycle_id=user_meso.id, mesocycle_id=meso.id,
         phases=[
@@ -266,6 +268,7 @@ async def test_autoprogression_preview_uses_block_snapshot_not_template(
 
     # Снимок блока переопределяет ту же фазу 1 на вставленную разгрузку.
     block = TrainingBlock(
+        phase_snapshot_trusted=True,
         app_user_id=test_user.id, block_index=1,
         user_mesocycle_id=user_meso.id, mesocycle_id=meso.id,
         phases=[{"phase_number": 1, "name": "Разгрузка", "effort_tier": "deload", "length_days": 7}],

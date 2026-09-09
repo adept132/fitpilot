@@ -27,6 +27,7 @@ async def test_block_survives_template_deletion(db, test_user: AppUser):
     await db.flush()
 
     block = TrainingBlock(
+        phase_snapshot_trusted=True,
         app_user_id=test_user.id,
         block_index=1,
         mesocycle_id=meso.id,
@@ -61,6 +62,7 @@ async def test_block_survives_template_deletion(db, test_user: AppUser):
 @pytest.mark.asyncio
 async def test_proposal_roundtrip(db, test_user: AppUser):
     block = TrainingBlock(
+        phase_snapshot_trusted=True,
         app_user_id=test_user.id,
         block_index=1,
         phases=[{"phase_number": 1, "name": "База", "effort_tier": "medium", "length_days": 7}],

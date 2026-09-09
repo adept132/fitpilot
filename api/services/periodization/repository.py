@@ -78,6 +78,7 @@ async def get_active_block(
             .where(
                 TrainingBlock.app_user_id == app_user_id,
                 TrainingBlock.status == "active",
+                TrainingBlock.phase_snapshot_trusted.is_(True),
                 or_(
                     TrainingBlock.mesocycle_id.is_(None),
                     and_(
@@ -93,6 +94,7 @@ async def get_active_block(
                     and_(
                         relation.id.is_not(None),
                         relation.app_user_id == app_user_id,
+                        relation_meso.id.is_not(None),
                         or_(
                             relation_meso.author_id.is_(None),
                             relation_meso.author_id == app_user_id,
@@ -155,6 +157,7 @@ async def create_block(
     phases: tuple[PhaseSnapshot, ...],
     user_meso: Optional[AppUserMesocycle],
     user_micro: Optional[AppUserMicrocycle],
+    phase_snapshot_trusted: bool,
     split_blueprint_id=None,
     entry_state: Optional[dict] = None,
 ) -> TrainingBlock:
@@ -171,6 +174,7 @@ async def create_block(
         user_mesocycle_id=user_meso.id if user_meso else None,
         mesocycle_id=user_meso.mesocycle_id if user_meso else None,
         phases=phase_ops.to_json(phases),
+        phase_snapshot_trusted=phase_snapshot_trusted,
         user_microcycle_id=user_micro.id if user_micro else None,
         microcycle_length=user_micro.length_days if user_micro else 7,
         split_blueprint_id=split_blueprint_id,
@@ -275,6 +279,7 @@ async def close_and_advance(
         next_phases = await _snapshot_phases_from_template(
             session, user_meso, block.microcycle_length
         )
+    next_snapshot_trusted = bool(next_phases)
     if not next_phases:
         # Фолбэк на снимок ЗАКРЫВАЕМОГО блока: свежего шаблона взять неоткуда
         # либо пользователь отвязал/сменил мезоцикл так, что активного не
@@ -287,6 +292,7 @@ async def close_and_advance(
         # фактически не использовались.
         user_meso = None
         next_phases = phase_ops.from_json(block.phases)
+        next_snapshot_trusted = block.phase_snapshot_trusted
 
     # Арифметику planned_end_date (и защиту от пустых фаз) не повторяем —
     # переиспользуем create_block. user_meso передаём НАСТОЯЩИЙ, когда фазы
@@ -304,6 +310,7 @@ async def close_and_advance(
         phases=next_phases,
         user_meso=user_meso,
         user_micro=None,
+        phase_snapshot_trusted=next_snapshot_trusted,
         split_blueprint_id=block.split_blueprint_id,
         entry_state=exit_state,
     )
@@ -560,6 +567,7 @@ async def ensure_active_block(
             phases=snapshot,
             user_meso=user_meso,
             user_micro=user_micro,
+            phase_snapshot_trusted=True,
             split_blueprint_id=active_split.blueprint_id if active_split else None,
             entry_state=entry_state,
         )

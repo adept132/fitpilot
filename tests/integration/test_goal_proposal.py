@@ -296,6 +296,7 @@ async def test_incomplete_evaluation_leaves_pending_proposal_untouched(
     # Блок есть, но НЕ активен -> запрос активного блока в refresh_goal_proposals
     # вернёт None, и функция обязана остановиться ДО блока expire-логики.
     block = TrainingBlock(
+        phase_snapshot_trusted=True,
         app_user_id=test_user.id,
         block_index=1,
         phases=[{"phase_number": 1, "name": "medium", "effort_tier": "medium", "length_days": 7}],

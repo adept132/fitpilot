@@ -176,6 +176,7 @@ async def test_ensure_recovers_when_block_appears_concurrently(db, test_user: Ap
         phases,
         user_meso,
         user_micro,
+        phase_snapshot_trusted,
         split_blueprint_id=None,
         entry_state=None,
     ):
@@ -189,6 +190,7 @@ async def test_ensure_recovers_when_block_appears_concurrently(db, test_user: Ap
             phases=phases,
             user_meso=user_meso,
             user_micro=user_micro,
+            phase_snapshot_trusted=phase_snapshot_trusted,
         )
         await session.commit()
         # Настоящая попытка ensure_active_block вставить блок с тем же
@@ -201,6 +203,7 @@ async def test_ensure_recovers_when_block_appears_concurrently(db, test_user: Ap
             phases=phases,
             user_meso=user_meso,
             user_micro=user_micro,
+            phase_snapshot_trusted=phase_snapshot_trusted,
             split_blueprint_id=split_blueprint_id,
             entry_state=entry_state,
         )
@@ -267,6 +270,7 @@ async def test_ensure_recovers_when_rollover_races_concurrently(db, test_user: A
         phases,
         user_meso,
         user_micro,
+        phase_snapshot_trusted,
         split_blueprint_id=None,
         entry_state=None,
     ):
@@ -282,6 +286,7 @@ async def test_ensure_recovers_when_rollover_races_concurrently(db, test_user: A
                 phases=phases,
                 user_meso=user_meso,
                 user_micro=user_micro,
+                phase_snapshot_trusted=phase_snapshot_trusted,
                 split_blueprint_id=split_blueprint_id,
                 entry_state=entry_state,
             )
@@ -296,6 +301,7 @@ async def test_ensure_recovers_when_rollover_races_concurrently(db, test_user: A
             phases=phases,
             user_meso=user_meso,
             user_micro=user_micro,
+            phase_snapshot_trusted=phase_snapshot_trusted,
             split_blueprint_id=split_blueprint_id,
             entry_state=entry_state,
         )

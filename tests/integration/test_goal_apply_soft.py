@@ -59,6 +59,7 @@ async def active_block(test_user):
     from api.services.models import TrainingBlock
     async with SessionLocal() as db:
         block = TrainingBlock(
+            phase_snapshot_trusted=True,
             app_user_id=test_user.id, block_index=1, phases=[],
             microcycle_length=7, start_date=date.today(),
             planned_end_date=date.today() + timedelta(days=28), status="active",
