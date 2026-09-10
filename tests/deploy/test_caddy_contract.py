@@ -48,7 +48,11 @@ def test_versioned_caddy_and_compose_contracts_exist() -> None:
 def test_compose_keeps_api_private_and_mounts_only_required_release_paths() -> None:
     compose_text = _read(COMPOSE_FILE)
     compose = yaml.safe_load(compose_text)
-    assert set(compose) == {"services", "volumes"}
+    assert set(compose) == {
+        "services",
+        "volumes",
+        "x-eurith-release-view-contract",
+    }
     assert set(compose["services"]) == {"api", "caddy"}
     assert compose["volumes"] == {"caddy_data": {}, "caddy_config": {}}
 
@@ -69,12 +73,33 @@ def test_compose_keeps_api_private_and_mounts_only_required_release_paths() -> N
         "group_add": [SHARED_GID],
         "volumes": [
             "./backend/deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro",
-            "/opt/eurith/releases/android/sha256:/srv/eurith/releases/android/sha256:ro",
+            "/opt/eurith/release-caddy-view:/srv/eurith/releases/android/sha256:ro",
             "caddy_data:/data",
             "caddy_config:/config",
         ],
         "ports": ["80:80", "443:443", "443:443/udp"],
     }
+
+
+def test_compose_requires_a_nosymfollow_host_view_before_caddy_starts() -> None:
+    compose = yaml.safe_load(_read(COMPOSE_FILE))
+    assert compose["x-eurith-release-view-contract"] == {
+        "source": "/opt/eurith/releases/android/sha256",
+        "view": "/opt/eurith/release-caddy-view",
+        "required_vfs_options": ["ro", "nosymfollow"],
+        "blocking_probes": [
+            "host-regular-file-readable",
+            "host-external-symlink-denied",
+            "container-vfs-ro-nosymfollow",
+            "container-external-symlink-denied",
+        ],
+    }
+    caddy_volumes = compose["services"]["caddy"]["volumes"]
+    assert not any(
+        mount.startswith("/opt/eurith/releases:")
+        or mount.startswith("/opt/eurith/releases/android/sha256:")
+        for mount in caddy_volumes
+    )
 
 
 def test_caddy_receives_no_secret_or_staging_configuration() -> None:

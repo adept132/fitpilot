@@ -18,7 +18,7 @@ services:
       - "${RELEASE_SHARED_GID:?set in /etc/eurith/release-deploy.env}"
     volumes:
       - ./backend/deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - /opt/eurith/releases/android/sha256:/srv/eurith/releases/android/sha256:ro
+      - /opt/eurith/release-caddy-view:/srv/eurith/releases/android/sha256:ro
       - caddy_data:/data
       - caddy_config:/config
     ports:
@@ -29,3 +29,18 @@ services:
 volumes:
   caddy_data: {}
   caddy_config: {}
+
+# Machine-readable pre-start security contract. Host provisioning must create
+# this view as a bind mount and remount it ro,nosymfollow. Deployment remains
+# blocked until every probe succeeds with the actual Caddy container identity.
+x-eurith-release-view-contract:
+  source: /opt/eurith/releases/android/sha256
+  view: /opt/eurith/release-caddy-view
+  required_vfs_options:
+    - ro
+    - nosymfollow
+  blocking_probes:
+    - host-regular-file-readable
+    - host-external-symlink-denied
+    - container-vfs-ro-nosymfollow
+    - container-external-symlink-denied

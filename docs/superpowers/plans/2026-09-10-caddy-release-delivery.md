@@ -17,7 +17,7 @@
 - Direct access to every `/_release_files/*` variant returns `404`; only upstream status `200` plus the exact `/_release_files/` prefix can reach `file_server`.
 - Caddy copies only `Content-Type`, `Content-Disposition`, `ETag`, and `Digest`; it generates length, range, and last-modified metadata from the opened file and never exposes `X-Accel-Redirect`.
 - The `256MiB` request ceiling applies only to exact `POST /internal/app-releases/android/direct-apk`; FastAPI retains its 250 MiB artifact limit.
-- API mounts `/opt/eurith/releases:/var/lib/eurith/releases:rw`; Caddy mounts only `/opt/eurith/releases/android/sha256:/srv/eurith/releases/android/sha256:ro`; `.staging` is never visible to Caddy.
+- API mounts `/opt/eurith/releases:/var/lib/eurith/releases:rw`; host provisioning exposes the final subtree through `/opt/eurith/release-caddy-view` remounted `ro,nosymfollow`; Caddy mounts only that view at `/srv/eurith/releases/android/sha256:ro`; `.staging` is never visible to Caddy. Deployment blocks unless host and container probes confirm both mount flags, a regular read, external-symlink denial, and write denial.
 - Host directories are setgid mode `2770`, finalized APKs are mode `0640`, and runtime UID/GID values are resolved rather than assumed.
 - `/etc/eurith/api-release.env` and `/etc/eurith/release-cleanup.env` are root-owned mode `0640`; publisher, operator, and webhook secrets are independent, never printed, never committed, and exposed only to their named consumers. Non-secret Compose interpolation lives in `/etc/eurith/release-deploy.env`.
 - A PostgreSQL custom dump, complete release-volume archive, and checksum manifest must be created and restored together in isolation before the first Caddy-enabled production switch.
@@ -139,7 +139,7 @@ Reviewer must independently verify the size comparison remains typed and active,
 
 - [ ] **Step 1: Write static contract tests first**
 
-Create tests that load both files as text/YAML-compatible mappings and assert exact invariants: `caddy:2.11.4`, no published API port, `api` has only the full `:rw` release mount, `caddy` has only the final-subtree `:ro` mount, both use required `RELEASE_SHARED_GID`, only API reads `/etc/eurith/api-release.env`, and Caddy text contains `request_body { max_size 256MiB }`, exact publish method/path matching, exact internal-prefix denial before proxying, conjunctive `status 200` plus header matching, and no `copy_headers Content-Length`.
+Create tests that load both files as text/YAML-compatible mappings and assert exact invariants: `caddy:2.11.4`, no published API port, `api` has only the full `:rw` release mount, `caddy` has only the dedicated `/opt/eurith/release-caddy-view` `:ro` mount, the overlay carries the exact `ro,nosymfollow` host/container blocking-probe contract, both services use required `RELEASE_SHARED_GID`, only API reads `/etc/eurith/api-release.env`, and Caddy text contains `request_body { max_size 256MiB }`, exact publish method/path matching, exact internal-prefix denial before proxying, conjunctive `status 200` plus header matching, and no `copy_headers Content-Length`.
 
 Include negative assertions for `publisher`, `operator`, `webhook`, `DATABASE_URL`, `.staging`, `nginx`, and broad `/internal/*` upload-limit matchers in the Caddy service/config.
 
@@ -173,13 +173,22 @@ services:
     group_add: ["${RELEASE_SHARED_GID:?set in /etc/eurith/release-deploy.env}"]
     volumes:
       - ./backend/deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - /opt/eurith/releases/android/sha256:/srv/eurith/releases/android/sha256:ro
+      - /opt/eurith/release-caddy-view:/srv/eurith/releases/android/sha256:ro
       - caddy_data:/data
       - caddy_config:/config
     ports: ["80:80", "443:443", "443:443/udp"]
 volumes:
   caddy_data: {}
   caddy_config: {}
+x-eurith-release-view-contract:
+  source: /opt/eurith/releases/android/sha256
+  view: /opt/eurith/release-caddy-view
+  required_vfs_options: [ro, nosymfollow]
+  blocking_probes:
+    - host-regular-file-readable
+    - host-external-symlink-denied
+    - container-vfs-ro-nosymfollow
+    - container-external-symlink-denied
 ```
 
 Do not add API host ports or any secret environment to Caddy. The production command always supplies the existing base Compose file first and this overlay second.
@@ -204,7 +213,7 @@ git add deploy/caddy/Caddyfile deploy/compose.release.yml tests/deploy/test_cadd
 git commit -m "feat(release): add pinned Caddy delivery contract"
 ```
 
-Reviewer must attempt matcher reordering, a broad upload matcher, a writable Caddy mount, and a copied upstream length; each mutation must make `test_caddy_contract.py` fail.
+Reviewer must attempt matcher reordering, a broad upload matcher, a writable Caddy mount, a direct mount of `/opt/eurith/releases/android/sha256`, omission of the `nosymfollow` gate contract, and a copied upstream length; each mutation must make `test_caddy_contract.py` fail.
 
 ### Task 3: Prove delivery with real Uvicorn, PostgreSQL, and Caddy
 
@@ -222,7 +231,7 @@ Reviewer must attempt matcher reordering, a broad upload matcher, a writable Cad
 
 Allow only localhost database names matching existing accepted prefixes or `fitpilot_task_caddy_*`; retain rejection of `fitpilot`, `eurith`, remote hosts, missing URL, and ambiguous names. Add a unit test for each accepted/rejected case before changing the guard.
 
-Create integration tests for full GET, HEAD, `Range: bytes=2-5`, direct and percent-encoded internal paths, `../` traversal variants, upstream status/header matrix, missing/symlinked/wrong-size artifact, header injection, upstream false length, exact-route 256 MiB+1 rejection, unrelated POST passthrough, and Caddy read-without-write/rename/chmod/delete.
+Create integration tests for full GET, HEAD, `Range: bytes=2-5`, direct and percent-encoded internal paths, `../` traversal variants, upstream status/header matrix, missing/wrong-size artifact, header injection, upstream false length, exact-route 256 MiB+1 rejection, unrelated POST passthrough, and Caddy read-without-write/rename/chmod/delete. Before serving, assert `ro,nosymfollow` on the temporary host view and inside the Caddy container; place a symlink in the source final tree targeting a readable file outside it and prove both host-view and Caddy HTTP access fail while an adjacent regular APK succeeds.
 
 - [ ] **Step 2: Run the focused tests and observe RED**
 
@@ -240,7 +249,7 @@ Expected: the new database prefix is rejected and the Caddy harness fixtures are
 4. write byte fixture `b"EURITH-CADDY-RANGE-FIXTURE"` under a temporary `android/sha256` tree and set `RELEASE_STORAGE_ROOT` to its API-visible root;
 5. start the real application with `uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=reserved_port, http="h11", lifespan="off", log_level="warning"))`;
 6. run the exact production Caddyfile with test-only `EURITH_SITE_ADDRESS`, `EURITH_UPSTREAM`, and `RELEASE_FILE_ROOT` environment values pointing at loopback and the temporary mount; do not duplicate or generate routing directives in the harness;
-7. launch `caddy:2.11.4` with only the final subtree mounted read-only and wait for readiness;
+7. create a temporary bind view of the final subtree, remount it `ro,nosymfollow`, verify both VFS flags and regular-read/external-symlink-denial on the host, launch `caddy:2.11.4` with only that view mounted read-only, verify the flags and both read outcomes again inside the container, then wait for readiness;
 8. expose malformed response variants through a test-only ASGI router that never ships in `api/`;
 9. on teardown, stop Caddy/Uvicorn, delete only the seeded row and temporary files, and leave database creation/drop to the caller that created the exact guarded database.
 
@@ -279,12 +288,12 @@ Reviewer must inspect Docker mounts and raw responses, rerun the tests, and conf
 - Create: `tests/deploy/test_provision_release_host.py`
 
 **Interfaces:**
-- Consumes: `--root PATH` (default `/`, test-only alternate root), `--secret-source-dir PATH`, `--api-release-env PATH`, `--cleanup-env PATH`, `--deploy-env PATH`, and an already built Compose `api` service.
-- Produces: status lines containing only `group=created|existing`, `storage=created|verified`, `api_env=created|existing`, `cleanup_env=created|existing`, `deploy_env=updated`, `permissions=verified`; exit `0` only after runtime probes pass.
+- Consumes: `--root PATH` (default `/`, test-only alternate root), `--secret-source-dir PATH`, `--api-release-env PATH`, `--cleanup-env PATH`, `--deploy-env PATH`, and already built Compose `api`/`caddy` services.
+- Produces: the idempotent `/opt/eurith/release-caddy-view` bind mount remounted `ro,nosymfollow`; status lines containing only `group=created|existing`, `storage=created|verified`, `release_view=created|verified`, `api_env=created|existing`, `cleanup_env=created|existing`, `deploy_env=updated`, `permissions=verified`; exit `0` only after host and container runtime probes pass.
 
 - [ ] **Step 1: Write fake-root tests before scripts**
 
-Use temporary directories and fake `docker`, `getent`, `groupadd`, `install`, and `chown` executables prepended to `PATH`. Cover first use, repeat execution, pre-existing correct files, incorrect ownership/mode, malformed secret source, duplicate secret values, missing cleanup database source, resolved UID/GID propagation, API staging atomic write, Caddy final read, and all Caddy mutation failures. Assert captured stdout/stderr never contains any supplied secret or full database URL.
+Use temporary directories and fake `docker`, `findmnt`, `mount`, `umount`, `getent`, `groupadd`, `install`, and `chown` executables prepended to `PATH`. Cover first use, repeat execution, pre-existing correct files, incorrect ownership/mode, malformed secret source, duplicate secret values, missing cleanup database source, resolved UID/GID propagation, API staging atomic write, creation/remount of the dedicated view, exact host/container `ro,nosymfollow` checks, regular-file reads, external-symlink denial, Caddy final read, and all Caddy mutation failures. Assert captured stdout/stderr never contains any supplied secret or full database URL.
 
 - [ ] **Step 2: Run tests and observe RED**
 
@@ -294,7 +303,7 @@ Expected: failures report that `deploy/provision-release-host.sh` and its shared
 
 - [ ] **Step 3: Implement shared fail-closed helpers**
 
-`release_common.sh` must enable `set -Eeuo pipefail`, provide `die`, `require_command`, `require_root`, `require_full_sha`, `require_safe_absolute_path`, `assert_mode_owner_group`, `sha256_file`, and `redacted_status`. It must reject newline-bearing inputs, symlinks for protected files/directories, `/` as a mutable target, and paths below the checkout for secrets/backups.
+`release_common.sh` must enable `set -Eeuo pipefail`, provide `die`, `require_command`, `require_root`, `require_full_sha`, `require_safe_absolute_path`, `assert_mode_owner_group`, `assert_mount_vfs_options`, `assert_regular_read_and_external_symlink_denied`, `sha256_file`, and `redacted_status`. It must reject newline-bearing inputs, symlinks for protected files/directories, `/` as a mutable target, and paths below the checkout for secrets/backups. Host provisioning must never start Caddy if the view is absent, is an ordinary directory, lacks either `ro` or `nosymfollow`, or either host/container symlink probe succeeds unexpectedly.
 
 - [ ] **Step 4: Implement first-use versus existing installation**
 
@@ -315,7 +324,7 @@ git add deploy/lib/release_common.sh deploy/provision-release-host.sh tests/depl
 git commit -m "feat(deploy): provision protected release storage"
 ```
 
-Expected: tests pass twice against the same fake root, second run reports existing/verified state, and no secret appears in output. Reviewer must inject world-readable modes, duplicate tokens, a symlink destination, and a writable Caddy mount and observe rejection.
+Expected: tests pass twice against the same fake root, second run reports existing/verified state, and no secret appears in output. Reviewer must inject world-readable modes, duplicate tokens, a symlink destination, a direct-tree/writable Caddy mount, a missing `nosymfollow` flag, and a container that follows the external symlink; each must be rejected.
 
 ### Task 5: Create and verify paired database and release-volume backups
 

@@ -87,7 +87,7 @@ Uvicorn/container ports and the release host path are not publicly reachable.
 | Threat | Required control |
 | --- | --- |
 | A client guesses a content-addressed path | Every public `/_release_files/*` request is rejected before proxying; only a qualifying upstream response can enter the file handler. |
-| A compromised or buggy upstream selects another file | The handoff matcher requires status `200` and the exact `/_release_files/` prefix; FastAPI permits only `android/sha256/<64-lowercase-hex>.apk`; rewrite is rooted below Caddy's read-only final subtree; traversal and symlink tests fail closed. |
+| A compromised or buggy upstream selects another file | The handoff matcher requires status `200` and the exact `/_release_files/` prefix; FastAPI permits only `android/sha256/<64-lowercase-hex>.apk`; Caddy sees the final subtree only through a host bind view remounted `ro,nosymfollow`; host and container probes must prove that regular files work while an external symlink is denied. |
 | An upstream leaks its internal handoff header | `X-Accel-Redirect` is consumed only inside the matching response route and removed from all public responses, including malformed and non-200 responses. |
 | Header injection changes the filename or metadata | FastAPI validates `version_name`; Caddy copies only the four approved metadata headers and never copies the upstream length. Tests cover CR/LF rejection. |
 | A large unauthenticated body exhausts API resources | A `256MiB` Caddy request-body ceiling applies only to `POST /internal/app-releases/android/direct-apk`; FastAPI retains its strict 250 MiB artifact limit. Other internal endpoints do not inherit the multipart allowance. |
@@ -188,7 +188,17 @@ Compose has asymmetric mounts:
 
 - API: `/opt/eurith/releases:/var/lib/eurith/releases:rw`;
 - Caddy:
-  `/opt/eurith/releases/android/sha256:/srv/eurith/releases/android/sha256:ro`.
+  `/opt/eurith/release-caddy-view:/srv/eurith/releases/android/sha256:ro`.
+
+`/opt/eurith/release-caddy-view` is not an ordinary directory. Host provisioning
+bind-mounts `/opt/eurith/releases/android/sha256` there and remounts that view
+with the per-mount VFS options `ro,nosymfollow`. Caddy never mounts the writable
+source tree directly. Deployment is blocked unless `findmnt` confirms both
+options on the host view and inside the actual Caddy container, a regular-file
+read succeeds, and a symlink targeting a readable file outside the release tree
+fails from both namespaces. This has been proven feasible on the production
+kernel 6.8.0 and Docker Engine 29.7 line with a disposable mount/container probe;
+the deployment repeats the proof instead of relying on the earlier observation.
 
 The API receives the resolved supplementary group. Caddy receives the same
 group only to traverse/read final files; its bind mount is read-only even
@@ -273,8 +283,9 @@ created until the backend production canary gate below succeeds.
    image. The test must observe real file bytes, not a mocked final response.
 3. **Prepare host state.** Resolve actual API and Caddy identities, create the
    shared group and setgid directories, install root-owned env files, and add
-   the API `rw` plus Caddy final-subtree `ro` mounts. Verify permissions with
-   the runtime identities.
+   the API `rw` mount plus the dedicated Caddy `ro,nosymfollow` host view. Verify
+   mount flags, regular reads, external-symlink denial, and write denial with the
+   runtime identities before Caddy can start.
 4. **Back up.** Create and verify the paired database and release-volume backup
    described above. Abort on any hash or missing-file discrepancy.
 5. **Render and validate.** Run `docker compose config` with protected env input
@@ -370,19 +381,23 @@ hash verification—not to undo ordinary release state.
 ### Caddy integration tests
 
 - Use the pinned Caddy v2.11.4 image, a real Uvicorn/h11 API, a temporary
-  read-only final mount, and a valid database release row.
+  `ro,nosymfollow` bind view of the final subtree, and a valid database release
+  row. The test must first assert that the flag is visible in the container.
 - A full GET returns byte-identical APK data and Caddy-generated length.
 - HEAD and single-range GET return correct headers/status/body; digest and ETag
   remain the FastAPI-approved values.
 - Direct public access to the exact internal path and its encoded/path-traversal
   variants returns `404` and never opens a file.
 - `200` plus the exact prefix succeeds; wrong status, absent header, alternate
-  prefix, malformed path, symlink, missing file, and injected headers fail
-  without leaking the internal value.
+  prefix, malformed path, missing file, and injected headers fail without
+  leaking the internal value. A symlink in the final source tree targeting a
+  readable file outside it must fail at the Caddy mount boundary even if the
+  upstream deliberately selects that symlink.
 - Upstream `Content-Length` is ignored; the actual file length wins.
 - `256MiB` applies only to the exact direct-APK publish POST, the oversize case
   returns `413`, and normal endpoint limits/behavior are unchanged.
-- Caddy can read but cannot write, rename, chmod, or delete the mounted APK.
+- Caddy can read but cannot write, rename, chmod, or delete the mounted APK;
+  neither Caddy nor the host view follows a symlink outside the final subtree.
 
 ### Deployment and recovery tests
 
@@ -399,7 +414,9 @@ hash verification—not to undo ordinary release state.
 - The production Compose revision runs the exact approved backend SHA and pinned
   Caddy v2.11.4 image with private application ports.
 - API and Caddy have the required asymmetric mounts; staging is invisible to
-  Caddy; final files are `0640` under setgid directories.
+  Caddy; final files are `0640` under setgid directories; Caddy receives only
+  the dedicated host view whose `ro,nosymfollow` flags and external-symlink
+  denial have been verified inside its container.
 - Secrets are independently generated, root-owned at rest, absent from Git and
   logs, and scoped to their named consumers. Caddy receives none.
 - FastAPI still validates artifact size but never sets full artifact
