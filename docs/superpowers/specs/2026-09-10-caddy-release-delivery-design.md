@@ -188,28 +188,32 @@ Compose has asymmetric mounts:
 
 - API: `/opt/eurith/releases:/var/lib/eurith/releases:rw`;
 - Caddy:
-  `/opt/eurith/release-caddy-view:/srv/eurith/releases/android/sha256:ro`.
+  `/opt/eurith/release-caddy-view/android/sha256:/srv/eurith/releases/android/sha256:ro`;
+- Caddy probe:
+  `/opt/eurith/release-caddy-view/.probe:/run/eurith-release-view-probe:ro`.
 
-`/opt/eurith/release-caddy-view` is not an ordinary directory. Host provisioning
-bind-mounts `/opt/eurith/releases/android/sha256` there and remounts that view
-with the per-mount VFS options `ro,nosymfollow`. Caddy never mounts the writable
-source tree directly. Deployment is blocked unless `findmnt` confirms both
-options on the host view and inside the actual Caddy container, a regular-file
-read succeeds, and a symlink targeting a readable file outside the release tree
-fails from both namespaces. This has been proven feasible on the production
-kernel 6.8.0 and Docker Engine 29.7 line with a disposable mount/container probe;
-the deployment repeats the proof instead of relying on the earlier observation.
+`/opt/eurith/release-caddy-view` is a dedicated host tree outside API storage.
+Host provisioning bind-mounts `/opt/eurith/releases/android/sha256` at its
+`android/sha256` child and remounts that child with the per-mount VFS options
+`ro,nosymfollow`. A separate `.probe` sibling contains a fixed non-secret regular
+file and a symlink to `/etc/passwd`; it is also exposed `ro,nosymfollow`. The API
+and cleanup jobs cannot see the probe sibling, and Caddy never mounts the
+writable source tree directly. Deployment is blocked unless `findmnt` confirms
+both options on the host views and inside the actual Caddy container, the regular
+probe read succeeds, and the external symlink cannot be followed. This has been
+proven feasible on the production kernel 6.8.0 and Docker Engine 29.7 line with
+a disposable mount/container probe; the deployment repeats the proof instead of
+relying on the earlier observation.
 
 Compose uses long bind syntax with `create_host_path: false`, so a missing view
-cannot silently become an ordinary directory. Before Caddy starts, the pinned
-`caddy:2.11.4` image runs a networkless, read-only, capability-free one-shot
-`release-view-gate`. It reads `/proc/self/mountinfo`, requires the exact target
-mount to contain both VFS options, reads a fixed non-secret regular marker, and
-requires a sibling symlink to resolve to `/etc/passwd` while remaining
-unreadable. Host provisioning installs these probe entries before Compose runs.
-The `caddy` service depends on `release-view-gate` with
-`condition: service_completed_successfully`; removing or failing the gate
-prevents Caddy startup.
+cannot silently become an ordinary directory. The pinned `caddy:2.11.4` service
+has an explicit read-only `caddy-entrypoint.sh` wrapper and an empty Compose
+command. On every container start or restart the wrapper reads
+`/proc/self/mountinfo`, requires both exact Caddy mount targets to contain `ro`
+and `nosymfollow`, reads the fixed regular probe, requires the external symlink
+to resolve to `/etc/passwd`, and fails if that symlink can be opened. Only after
+all checks pass does it `exec caddy run --config /etc/caddy/Caddyfile --adapter
+caddyfile`; a stale successful sidecar cannot bypass a later failed check.
 
 The API receives the resolved supplementary group. Caddy receives the same
 group only to traverse/read final files; its bind mount is read-only even

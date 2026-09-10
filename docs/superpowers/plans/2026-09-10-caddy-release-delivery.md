@@ -17,7 +17,7 @@
 - Direct access to every `/_release_files/*` variant returns `404`; only upstream status `200` plus the exact `/_release_files/` prefix can reach `file_server`.
 - Caddy copies only `Content-Type`, `Content-Disposition`, `ETag`, and `Digest`; it generates length, range, and last-modified metadata from the opened file and never exposes `X-Accel-Redirect`.
 - The `256MiB` request ceiling applies only to exact `POST /internal/app-releases/android/direct-apk`; FastAPI retains its 250 MiB artifact limit.
-- API mounts `/opt/eurith/releases:/var/lib/eurith/releases:rw`; host provisioning exposes the final subtree through `/opt/eurith/release-caddy-view` remounted `ro,nosymfollow`; Caddy mounts only that view at `/srv/eurith/releases/android/sha256:ro`; `.staging` is never visible to Caddy. Deployment blocks unless host and container probes confirm both mount flags, a regular read, external-symlink denial, and write denial.
+- API mounts `/opt/eurith/releases:/var/lib/eurith/releases:rw`; host provisioning exposes the final subtree through `/opt/eurith/release-caddy-view/android/sha256` remounted `ro,nosymfollow` and keeps fixed probes in the protected sibling `/opt/eurith/release-caddy-view/.probe`; Caddy mounts those children separately. `.staging` and the probes are never visible to the API through its storage mount. Caddy's entrypoint blocks every start or restart unless container mount flags, a regular read, and external-symlink denial pass; deployment additionally proves the equivalent host checks and write denial.
 - Host directories are setgid mode `2770`, finalized APKs are mode `0640`, and runtime UID/GID values are resolved rather than assumed.
 - `/etc/eurith/api-release.env` and `/etc/eurith/release-cleanup.env` are root-owned mode `0640`; publisher, operator, and webhook secrets are independent, never printed, never committed, and exposed only to their named consumers. Non-secret Compose interpolation lives in `/etc/eurith/release-deploy.env`.
 - A PostgreSQL custom dump, complete release-volume archive, and checksum manifest must be created and restored together in isolation before the first Caddy-enabled production switch.
@@ -129,18 +129,19 @@ Reviewer must independently verify the size comparison remains typed and active,
 
 **Files:**
 - Create: `deploy/caddy/Caddyfile`
-- Create: `deploy/caddy/release-view-gate.sh`
+- Create: `deploy/caddy/caddy-entrypoint.sh`
 - Create: `deploy/compose.release.yml`
 - Create: `tests/deploy/test_caddy_contract.py`
+- Create: `tests/deploy/test_caddy_entrypoint.py`
 - Delete after Task 3 validation: `deploy/nginx/releases.conf`
 
 **Interfaces:**
 - Consumes: FastAPI success header `X-Accel-Redirect: /_release_files/android/sha256/<64-lowercase-hex>.apk`; base production Compose services named `api` and `postgres`.
-- Produces: one-shot `release-view-gate` and Caddy HTTPS service `caddy`; Caddy cannot start unless the gate exits successfully after checking the protected view; defaults `EURITH_UPSTREAM=api:8000` and `RELEASE_FILE_ROOT=/srv/eurith/releases`; environment variables `EURITH_SITE_ADDRESS`, `EURITH_UPSTREAM`, `RELEASE_FILE_ROOT`, and `RELEASE_SHARED_GID`, with only the site address and group ID supplied by `/etc/eurith/release-deploy.env` in production.
+- Produces: Caddy HTTPS service `caddy` with a mandatory entrypoint that rechecks the protected final and probe mounts on every start or restart before executing Caddy; defaults `EURITH_UPSTREAM=api:8000` and `RELEASE_FILE_ROOT=/srv/eurith/releases`; environment variables `EURITH_SITE_ADDRESS`, `EURITH_UPSTREAM`, `RELEASE_FILE_ROOT`, and `RELEASE_SHARED_GID`, with only the site address and group ID supplied by `/etc/eurith/release-deploy.env` in production.
 
 - [ ] **Step 1: Write static contract tests first**
 
-Create tests that load the files as text/YAML-compatible mappings and assert exact invariants: `caddy:2.11.4`, no published API port, `api` has only the full `:rw` release mount, `caddy` and `release-view-gate` have only the dedicated `/opt/eurith/release-caddy-view` `:ro` mount, every gate/Caddy host bind uses long syntax with `create_host_path: false`, the overlay carries the exact `ro,nosymfollow` host/container blocking-probe contract, all three services use the required `RELEASE_SHARED_GID`, only API reads `/etc/eurith/api-release.env`, Caddy depends on successful gate completion, and Caddy text contains `request_body { max_size 256MiB }`, exact publish method/path matching, exact internal-prefix denial before proxying, conjunctive `status 200` plus header matching, and no `copy_headers Content-Length`.
+Create tests that load the files as text/YAML-compatible mappings and assert exact invariants: `caddy:2.11.4`, no published API port, `api` has only the full `:rw` release mount, Caddy mounts only the dedicated final and probe views read-only, every Caddy host bind uses long syntax with `create_host_path: false`, the overlay carries the exact `ro,nosymfollow` host/container blocking-probe contract, both services use the required `RELEASE_SHARED_GID`, only API reads `/etc/eurith/api-release.env`, and Caddy has the exact entrypoint with an empty command. Assert Caddy text contains `request_body { max_size 256MiB }`, exact publish method/path matching, exact internal-prefix denial before proxying, conjunctive `status 200` plus header matching, and no `copy_headers Content-Length`.
 
 Include negative assertions for `publisher`, `operator`, `webhook`, `DATABASE_URL`, `.staging`, `nginx`, and broad `/internal/*` upload-limit matchers in the Caddy service/config.
 
@@ -167,32 +168,14 @@ services:
     group_add: ["${RELEASE_SHARED_GID:?set in /etc/eurith/release-deploy.env}"]
     volumes: [/opt/eurith/releases:/var/lib/eurith/releases:rw]
     expose: ["8000"]
-  release-view-gate:
-    image: caddy:2.11.4
-    restart: "no"
-    entrypoint: [/bin/sh, /usr/local/bin/release-view-gate.sh]
-    read_only: true
-    network_mode: none
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    group_add: ["${RELEASE_SHARED_GID:?set in /etc/eurith/release-deploy.env}"]
-    volumes:
-      - type: bind
-        source: ./backend/deploy/caddy/release-view-gate.sh
-        target: /usr/local/bin/release-view-gate.sh
-        read_only: true
-        bind: {create_host_path: false}
-      - type: bind
-        source: /opt/eurith/release-caddy-view
-        target: /srv/eurith/releases/android/sha256
-        read_only: true
-        bind: {create_host_path: false}
   caddy:
     image: caddy:2.11.4
     restart: unless-stopped
     depends_on:
       api: {condition: service_started}
-      release-view-gate: {condition: service_completed_successfully}
+    entrypoint: [/bin/sh, /usr/local/bin/caddy-entrypoint.sh]
+    command: []
+    read_only: true
     group_add: ["${RELEASE_SHARED_GID:?set in /etc/eurith/release-deploy.env}"]
     volumes:
       - type: bind
@@ -201,8 +184,18 @@ services:
         read_only: true
         bind: {create_host_path: false}
       - type: bind
-        source: /opt/eurith/release-caddy-view
+        source: ./backend/deploy/caddy/caddy-entrypoint.sh
+        target: /usr/local/bin/caddy-entrypoint.sh
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /opt/eurith/release-caddy-view/android/sha256
         target: /srv/eurith/releases/android/sha256
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /opt/eurith/release-caddy-view/.probe
+        target: /run/eurith-release-view-probe
         read_only: true
         bind: {create_host_path: false}
       - caddy_data:/data
@@ -213,7 +206,8 @@ volumes:
   caddy_config: {}
 x-eurith-release-view-contract:
   source: /opt/eurith/releases/android/sha256
-  view: /opt/eurith/release-caddy-view
+  view: /opt/eurith/release-caddy-view/android/sha256
+  probe: /opt/eurith/release-caddy-view/.probe
   required_vfs_options: [ro, nosymfollow]
   blocking_probes:
     - host-regular-file-readable
@@ -222,7 +216,7 @@ x-eurith-release-view-contract:
     - container-external-symlink-denied
 ```
 
-`release-view-gate.sh` reads only `/proc/self/mountinfo` and two fixed probe entries installed by Task 4. It requires `ro,nosymfollow`, reads the regular marker, verifies the external marker is a symlink to `/etc/passwd`, and fails if that symlink can be opened. It logs only `release_view_gate=passed|failed`. Do not add API host ports or any secret environment to Caddy or the gate. The production command always supplies the existing base Compose file first and this overlay second.
+`caddy-entrypoint.sh` runs on every Caddy container start or restart. It reads only `/proc/self/mountinfo` and the fixed entries `regular` and `external` under the separately mounted probe sibling installed by Task 4. It requires `ro,nosymfollow` on both exact mount targets, reads the regular marker, verifies the external marker is a symlink to `/etc/passwd`, and fails if that symlink can be opened. Only then may it `exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile`; it logs only `release_view_gate=passed|failed`. Do not add API host ports or any secret environment to Caddy. The production command always supplies the existing base Compose file first and this overlay second.
 
 - [ ] **Step 5: Validate text and pinned Caddy syntax**
 
@@ -240,11 +234,11 @@ Expected: pytest passes, `fmt --diff` emits no diff, and adapt/validate exit `0`
 - [ ] **Step 6: Commit and request independent security review**
 
 ```bash
-git add deploy/caddy/Caddyfile deploy/caddy/release-view-gate.sh deploy/compose.release.yml tests/deploy/test_caddy_contract.py
+git add deploy/caddy/Caddyfile deploy/caddy/caddy-entrypoint.sh deploy/compose.release.yml tests/deploy/test_caddy_contract.py tests/deploy/test_caddy_entrypoint.py
 git commit -m "feat(release): add pinned Caddy delivery contract"
 ```
 
-Reviewer must attempt matcher reordering, a broad upload matcher, a writable Caddy mount, a direct mount of `/opt/eurith/releases/android/sha256`, omission of the `nosymfollow` gate contract, removal of `create_host_path: false`, removal/bypass of `service_completed_successfully`, and a copied upstream length; each mutation must make `test_caddy_contract.py` fail.
+Reviewer must attempt matcher reordering, a broad upload matcher, a writable Caddy mount, a direct mount of `/opt/eurith/releases/android/sha256`, moving the probe beneath API storage, omission of the `nosymfollow` contract, removal of `create_host_path: false`, removal/bypass of the Caddy entrypoint, a non-empty Compose command, resurrection of a one-shot gate service, and a copied upstream length; each mutation must make the contract or entrypoint behavior tests fail.
 
 ### Task 3: Prove delivery with real Uvicorn, PostgreSQL, and Caddy
 
@@ -320,7 +314,7 @@ Reviewer must inspect Docker mounts and raw responses, rerun the tests, and conf
 
 **Interfaces:**
 - Consumes: `--root PATH` (default `/`, test-only alternate root), `--secret-source-dir PATH`, `--api-release-env PATH`, `--cleanup-env PATH`, `--deploy-env PATH`, and already built Compose `api`/`caddy` services.
-- Produces: the idempotent `/opt/eurith/release-caddy-view` bind mount remounted `ro,nosymfollow`; status lines containing only `group=created|existing`, `storage=created|verified`, `release_view=created|verified`, `api_env=created|existing`, `cleanup_env=created|existing`, `deploy_env=updated`, `permissions=verified`; exit `0` only after host and container runtime probes pass.
+- Produces: the idempotent `/opt/eurith/release-caddy-view/android/sha256` bind mount remounted `ro,nosymfollow` plus the protected sibling `/opt/eurith/release-caddy-view/.probe`; status lines containing only `group=created|existing`, `storage=created|verified`, `release_view=created|verified`, `api_env=created|existing`, `cleanup_env=created|existing`, `deploy_env=updated`, `permissions=verified`; exit `0` only after host and container runtime probes pass.
 
 - [ ] **Step 1: Write fake-root tests before scripts**
 
@@ -336,7 +330,7 @@ Expected: failures report that `deploy/provision-release-host.sh` and its shared
 
 `release_common.sh` must enable `set -Eeuo pipefail`, provide `die`, `require_command`, `require_root`, `require_full_sha`, `require_safe_absolute_path`, `assert_mode_owner_group`, `assert_mount_vfs_options`, `assert_regular_read_and_external_symlink_denied`, `sha256_file`, and `redacted_status`. It must reject newline-bearing inputs, symlinks for protected files/directories, `/` as a mutable target, and paths below the checkout for secrets/backups. Host provisioning must never start Caddy if the view is absent, is an ordinary directory, lacks either `ro` or `nosymfollow`, or either host/container symlink probe succeeds unexpectedly.
 
-Provisioning atomically installs the fixed non-secret regular marker `.eurith-release-view-gate-regular` in the source final directory and an exact sibling symlink `.eurith-release-view-gate-external -> /etc/passwd`, then creates/remounts the dedicated view. The marker names are outside the valid `<64-lowercase-hex>.apk` storage-key grammar. Existing entries must have the exact type, target/content, owner, group, and mode or provisioning fails without replacement. The Compose one-shot gate runs after provisioning and before Caddy; it has no network, write access, capabilities, secrets, or success path unless the container sees `ro,nosymfollow`, reads the regular marker, and cannot follow the external symlink.
+Provisioning atomically installs the fixed non-secret files `regular` and `external -> /etc/passwd` beneath `/opt/eurith/release-caddy-view/.probe`, outside `/opt/eurith/releases` and therefore outside API and cleanup traversal. It then bind-mounts the final subtree at `/opt/eurith/release-caddy-view/android/sha256` and protects both Caddy-visible children with `ro,nosymfollow`. Existing probe entries must have the exact type, target/content, owner, group, and mode or provisioning fails without replacement. The Caddy entrypoint repeats the container-side mount and behavior checks on every start or restart before executing Caddy; it has no write access or secrets and no success path unless the container sees `ro,nosymfollow`, reads the regular marker, and cannot follow the external symlink.
 
 - [ ] **Step 4: Implement first-use versus existing installation**
 

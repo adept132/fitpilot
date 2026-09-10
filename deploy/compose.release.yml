@@ -9,42 +9,17 @@ services:
     expose:
       - "8000"
 
-  release-view-gate:
-    image: caddy:2.11.4
-    restart: "no"
-    entrypoint:
-      - /bin/sh
-      - /usr/local/bin/release-view-gate.sh
-    read_only: true
-    network_mode: none
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    group_add:
-      - "${RELEASE_SHARED_GID:?set in /etc/eurith/release-deploy.env}"
-    volumes:
-      - type: bind
-        source: ./backend/deploy/caddy/release-view-gate.sh
-        target: /usr/local/bin/release-view-gate.sh
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: /opt/eurith/release-caddy-view
-        target: /srv/eurith/releases/android/sha256
-        read_only: true
-        bind:
-          create_host_path: false
-
   caddy:
     image: caddy:2.11.4
     restart: unless-stopped
     depends_on:
       api:
         condition: service_started
-      release-view-gate:
-        condition: service_completed_successfully
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/caddy-entrypoint.sh
+    command: []
+    read_only: true
     group_add:
       - "${RELEASE_SHARED_GID:?set in /etc/eurith/release-deploy.env}"
     volumes:
@@ -55,8 +30,20 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: /opt/eurith/release-caddy-view
+        source: ./backend/deploy/caddy/caddy-entrypoint.sh
+        target: /usr/local/bin/caddy-entrypoint.sh
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /opt/eurith/release-caddy-view/android/sha256
         target: /srv/eurith/releases/android/sha256
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /opt/eurith/release-caddy-view/.probe
+        target: /run/eurith-release-view-probe
         read_only: true
         bind:
           create_host_path: false
@@ -76,7 +63,8 @@ volumes:
 # blocked until every probe succeeds with the actual Caddy container identity.
 x-eurith-release-view-contract:
   source: /opt/eurith/releases/android/sha256
-  view: /opt/eurith/release-caddy-view
+  view: /opt/eurith/release-caddy-view/android/sha256
+  probe: /opt/eurith/release-caddy-view/.probe
   required_vfs_options:
     - ro
     - nosymfollow
