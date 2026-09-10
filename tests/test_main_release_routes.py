@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 
 # The public-route tests deliberately exercise the real application router.
@@ -380,10 +381,19 @@ def test_latest_returns_direct_download_instruction(monkeypatch):
     assert response.status_code == 200
     instruction = response.json()["release"]
     assert instruction["delivery_method"] == "direct_apk"
+    assert instruction["source_commit"] == release.source_commit
     assert instruction["download_url"].endswith(f"/app-releases/{release.id}/download")
     assert instruction["sha256"] == release.artifact_sha256
     assert instruction["size_bytes"] == release.artifact_size_bytes
     assert instruction["min_supported_version_code"] is None
+    assert not {
+        "artifact_storage_key",
+        "ci_run_id",
+        "idempotency_key",
+        "fingerprint",
+        "eas_build_id",
+        "eas_update_id",
+    }.intersection(instruction)
 
 
 def test_latest_exposes_minimum_supported_version_code(monkeypatch):
@@ -443,10 +453,32 @@ def test_latest_returns_compatible_eas_instruction(monkeypatch):
     assert response.status_code == 200
     instruction = response.json()["release"]
     assert instruction["delivery_method"] == "eas_update"
+    assert instruction["source_commit"] == release.source_commit
     assert instruction["eas_update_group_id"] == "update-group-1"
     assert instruction["download_url"] is None
     assert instruction["sha256"] is None
     assert instruction["min_supported_version_code"] == 2
+
+
+def test_latest_rejects_an_invalid_public_source_commit(monkeypatch):
+    routes = _router_module()
+    release = _release(source_commit="B" * 40)
+
+    async def selected_instruction(_db, _query):
+        return SimpleNamespace(
+            current_version_code=1,
+            update_available=True,
+            mandatory=False,
+            current_release_withdrawn=False,
+            release=release,
+        )
+
+    monkeypatch.setattr(routes, "latest_instruction", selected_instruction)
+    with pytest.raises(ValidationError, match="source_commit"):
+        TestClient(app).get(
+            "/app-releases/android/latest",
+            params={"channel": "production-direct", "current_version_code": 1},
+        )
 
 
 def test_latest_rejects_unknown_channel_and_non_positive_version():

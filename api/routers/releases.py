@@ -49,6 +49,7 @@ def _public_release(release: AppRelease, request: Request) -> PublicRelease:
     direct = record.delivery_method == "direct_apk"
     return PublicRelease(
         id=record.id,
+        source_commit=record.source_commit,
         delivery_method=record.delivery_method,
         version_code=record.version_code,
         version_name=record.version_name,

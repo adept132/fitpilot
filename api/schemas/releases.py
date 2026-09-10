@@ -100,6 +100,7 @@ class PublicRelease(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: UUID
+    source_commit: SourceCommit
     delivery_method: DeliveryMethod
     version_code: VersionCode
     version_name: VersionName
