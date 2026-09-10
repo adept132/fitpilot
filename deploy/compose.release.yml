@@ -9,16 +9,57 @@ services:
     expose:
       - "8000"
 
+  release-view-gate:
+    image: caddy:2.11.4
+    restart: "no"
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/release-view-gate.sh
+    read_only: true
+    network_mode: none
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    group_add:
+      - "${RELEASE_SHARED_GID:?set in /etc/eurith/release-deploy.env}"
+    volumes:
+      - type: bind
+        source: ./backend/deploy/caddy/release-view-gate.sh
+        target: /usr/local/bin/release-view-gate.sh
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /opt/eurith/release-caddy-view
+        target: /srv/eurith/releases/android/sha256
+        read_only: true
+        bind:
+          create_host_path: false
+
   caddy:
     image: caddy:2.11.4
     restart: unless-stopped
     depends_on:
-      - api
+      api:
+        condition: service_started
+      release-view-gate:
+        condition: service_completed_successfully
     group_add:
       - "${RELEASE_SHARED_GID:?set in /etc/eurith/release-deploy.env}"
     volumes:
-      - ./backend/deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - /opt/eurith/release-caddy-view:/srv/eurith/releases/android/sha256:ro
+      - type: bind
+        source: ./backend/deploy/caddy/Caddyfile
+        target: /etc/caddy/Caddyfile
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /opt/eurith/release-caddy-view
+        target: /srv/eurith/releases/android/sha256
+        read_only: true
+        bind:
+          create_host_path: false
       - caddy_data:/data
       - caddy_config:/config
     ports:

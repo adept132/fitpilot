@@ -53,7 +53,7 @@ def test_compose_keeps_api_private_and_mounts_only_required_release_paths() -> N
         "volumes",
         "x-eurith-release-view-contract",
     }
-    assert set(compose["services"]) == {"api", "caddy"}
+    assert set(compose["services"]) == {"api", "release-view-gate", "caddy"}
     assert compose["volumes"] == {"caddy_data": {}, "caddy_config": {}}
 
     api = compose["services"]["api"]
@@ -69,11 +69,26 @@ def test_compose_keeps_api_private_and_mounts_only_required_release_paths() -> N
     assert caddy == {
         "image": "caddy:2.11.4",
         "restart": "unless-stopped",
-        "depends_on": ["api"],
+        "depends_on": {
+            "api": {"condition": "service_started"},
+            "release-view-gate": {"condition": "service_completed_successfully"},
+        },
         "group_add": [SHARED_GID],
         "volumes": [
-            "./backend/deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro",
-            "/opt/eurith/release-caddy-view:/srv/eurith/releases/android/sha256:ro",
+            {
+                "type": "bind",
+                "source": "./backend/deploy/caddy/Caddyfile",
+                "target": "/etc/caddy/Caddyfile",
+                "read_only": True,
+                "bind": {"create_host_path": False},
+            },
+            {
+                "type": "bind",
+                "source": "/opt/eurith/release-caddy-view",
+                "target": "/srv/eurith/releases/android/sha256",
+                "read_only": True,
+                "bind": {"create_host_path": False},
+            },
             "caddy_data:/data",
             "caddy_config:/config",
         ],
@@ -95,11 +110,63 @@ def test_compose_requires_a_nosymfollow_host_view_before_caddy_starts() -> None:
         ],
     }
     caddy_volumes = compose["services"]["caddy"]["volumes"]
-    assert not any(
-        mount.startswith("/opt/eurith/releases:")
-        or mount.startswith("/opt/eurith/releases/android/sha256:")
-        for mount in caddy_volumes
-    )
+    bind_sources = {
+        mount["source"] for mount in caddy_volumes if isinstance(mount, dict)
+    }
+    assert "/opt/eurith/release-caddy-view" in bind_sources
+    assert "/opt/eurith/releases" not in bind_sources
+    assert "/opt/eurith/releases/android/sha256" not in bind_sources
+
+
+def test_release_view_gate_is_mandatory_and_fail_closed() -> None:
+    compose = yaml.safe_load(_read(COMPOSE_FILE))
+    gate = compose["services"]["release-view-gate"]
+    assert gate == {
+        "image": "caddy:2.11.4",
+        "restart": "no",
+        "entrypoint": ["/bin/sh", "/usr/local/bin/release-view-gate.sh"],
+        "read_only": True,
+        "network_mode": "none",
+        "cap_drop": ["ALL"],
+        "security_opt": ["no-new-privileges:true"],
+        "group_add": [SHARED_GID],
+        "volumes": [
+            {
+                "type": "bind",
+                "source": "./backend/deploy/caddy/release-view-gate.sh",
+                "target": "/usr/local/bin/release-view-gate.sh",
+                "read_only": True,
+                "bind": {"create_host_path": False},
+            },
+            {
+                "type": "bind",
+                "source": "/opt/eurith/release-caddy-view",
+                "target": "/srv/eurith/releases/android/sha256",
+                "read_only": True,
+                "bind": {"create_host_path": False},
+            },
+        ],
+    }
+    gate_script = _read(ROOT / "deploy" / "caddy" / "release-view-gate.sh")
+    for required in (
+        "/proc/self/mountinfo",
+        "nosymfollow",
+        ".eurith-release-view-gate-regular",
+        ".eurith-release-view-gate-external",
+        "readlink",
+        "head -c 1",
+    ):
+        assert required in gate_script
+    assert '$5 == target { print $6; found = 1; exit }' in gate_script
+    assert 'case ",$mount_options," in' in gate_script
+    assert '*,ro,*) ;;' in gate_script
+    assert '*,nosymfollow,*) ;;' in gate_script
+    assert '[ -f "$regular" ] || fail' in gate_script
+    assert '[ -L "$external" ] || fail' in gate_script
+    assert '[ "$(readlink "$external" 2>/dev/null)" = "/etc/passwd" ] || fail' in gate_script
+    assert 'if head -c 1 "$external" >/dev/null 2>&1; then' in gate_script
+    assert "|| true" not in gate_script
+    assert "release_view_gate=passed" in gate_script
 
 
 def test_caddy_receives_no_secret_or_staging_configuration() -> None:

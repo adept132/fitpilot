@@ -200,6 +200,17 @@ fails from both namespaces. This has been proven feasible on the production
 kernel 6.8.0 and Docker Engine 29.7 line with a disposable mount/container probe;
 the deployment repeats the proof instead of relying on the earlier observation.
 
+Compose uses long bind syntax with `create_host_path: false`, so a missing view
+cannot silently become an ordinary directory. Before Caddy starts, the pinned
+`caddy:2.11.4` image runs a networkless, read-only, capability-free one-shot
+`release-view-gate`. It reads `/proc/self/mountinfo`, requires the exact target
+mount to contain both VFS options, reads a fixed non-secret regular marker, and
+requires a sibling symlink to resolve to `/etc/passwd` while remaining
+unreadable. Host provisioning installs these probe entries before Compose runs.
+The `caddy` service depends on `release-view-gate` with
+`condition: service_completed_successfully`; removing or failing the gate
+prevents Caddy startup.
+
 The API receives the resolved supplementary group. Caddy receives the same
 group only to traverse/read final files; its bind mount is read-only even
 though the shared host directory is group writable for the API. A deployment
