@@ -496,7 +496,22 @@ def test_latest_rejects_unknown_channel_and_non_positive_version():
     assert invalid_version.status_code == 422
 
 
-def test_download_returns_accel_headers_for_existing_direct_apk(monkeypatch, tmp_path):
+def test_download_headers_return_typed_expected_size():
+    routes = _router_module()
+
+    result = routes._download_headers(_release())
+
+    assert result is not None
+    headers, expected_size = result
+    assert expected_size == 12
+    assert isinstance(expected_size, int)
+    assert "Content-Length" not in headers
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_download_returns_accel_headers_for_existing_direct_apk(
+    monkeypatch, tmp_path, method
+):
     routes = _router_module()
     release = _release()
     artifact = tmp_path / release.artifact_storage_key
@@ -509,13 +524,23 @@ def test_download_returns_accel_headers_for_existing_direct_apk(monkeypatch, tmp
 
     monkeypatch.setattr(routes, "_release_by_id", selected_release)
     monkeypatch.setattr(routes, "release_storage_root", lambda: tmp_path)
-    response = TestClient(app).get(f"/app-releases/{release.id}/download")
+    response = TestClient(app).request(
+        method, f"/app-releases/{release.id}/download"
+    )
 
     assert response.status_code == 200
+    assert response.content == b""
+    assert "content-length" not in response.headers
+    assert set(response.headers) >= {
+        "x-accel-redirect",
+        "content-type",
+        "content-disposition",
+        "etag",
+        "digest",
+    }
     assert response.headers["x-accel-redirect"] == f"/_release_files/{release.artifact_storage_key}"
     assert response.headers["content-type"] == "application/vnd.android.package-archive"
     assert response.headers["content-disposition"] == 'attachment; filename="eurith-1.0.1.apk"'
-    assert response.headers["content-length"] == "12"
     assert response.headers["etag"] == f'"sha256:{release.artifact_sha256}"'
     assert response.headers["digest"].startswith("sha-256=")
 

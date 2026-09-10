@@ -1,4 +1,4 @@
-"""Unauthenticated Android release discovery and nginx-controlled APK delivery."""
+"""Unauthenticated Android release discovery and proxy-owned APK delivery."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -122,7 +123,7 @@ def _download_filename(version_name: object) -> str:
     return "eurith-update.apk"
 
 
-def _download_headers(release: AppRelease) -> dict[str, str] | None:
+def _download_headers(release: AppRelease) -> tuple[dict[str, str], int] | None:
     sha256 = getattr(release, "artifact_sha256", None)
     size = getattr(release, "artifact_size_bytes", None)
     if (
@@ -133,21 +134,27 @@ def _download_headers(release: AppRelease) -> dict[str, str] | None:
         or size <= 0
     ):
         return None
-    return {
-        "Content-Type": "application/vnd.android.package-archive",
-        "Content-Disposition": f'attachment; filename="{_download_filename(release.version_name)}"',
-        "Content-Length": str(size),
-        "ETag": f'"sha256:{sha256}"',
-        "Digest": f"sha-256={base64.b64encode(bytes.fromhex(sha256)).decode('ascii')}",
-    }
+    return (
+        {
+            "Content-Type": "application/vnd.android.package-archive",
+            "Content-Disposition": f'attachment; filename="{_download_filename(release.version_name)}"',
+            "ETag": f'"sha256:{sha256}"',
+            "Digest": f"sha-256={base64.b64encode(bytes.fromhex(sha256)).decode('ascii')}",
+        },
+        size,
+    )
 
 
-@router.get("/app-releases/{release_id}/download", name="download_release")
+@router.api_route(
+    "/app-releases/{release_id}/download",
+    name="download_release",
+    methods=["GET", "HEAD"],
+)
 async def download_release(
     release_id: UUID,
     db: AsyncSession = Depends(get_db),
-) -> Response:
-    """Hand a validated, internal-only location to nginx for a published APK."""
+) -> StreamingResponse:
+    """Hand a validated internal location to the artifact-serving proxy."""
 
     release = await _release_by_id(db, release_id)
     if release is None or release.delivery_method != "direct_apk":
@@ -157,16 +164,17 @@ async def download_release(
     if release.status != "published":
         raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "release.not_found")
 
-    headers = _download_headers(release)
+    handoff = _download_headers(release)
     path = _artifact_path(
         release_storage_root(), release.artifact_storage_key, release.artifact_sha256
     )
-    if headers is None or path is None:
+    if handoff is None or path is None:
         raise LocalizedHTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE, "release.artifact_unavailable"
         )
     try:
-        if path.stat().st_size != int(headers["Content-Length"]):
+        headers, expected_size = handoff
+        if path.stat().st_size != expected_size:
             raise OSError("stored artifact size does not match release metadata")
     except (OSError, ValueError):
         raise LocalizedHTTPException(
@@ -175,4 +183,4 @@ async def download_release(
     storage_key = release.artifact_storage_key
     assert isinstance(storage_key, str)  # path validation above guarantees this.
     headers["X-Accel-Redirect"] = f"/_release_files/{storage_key}"
-    return Response(status_code=status.HTTP_200_OK, headers=headers)
+    return StreamingResponse(iter(()), status_code=status.HTTP_200_OK, headers=headers)
