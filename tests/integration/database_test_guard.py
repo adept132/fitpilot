@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import os
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
+
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
 
 _DISPOSABLE_DATABASE = re.compile(
@@ -18,12 +21,25 @@ def require_disposable_integration_database(
     """Return an explicit local disposable URL or stop before app imports."""
     source = os.environ if env is None else env
     url = source.get("TEST_DATABASE_URL", "").strip()
-    parsed = urlparse(url)
-    database_name = parsed.path.lstrip("/")
+    try:
+        split = urlsplit(url)
+        parsed = make_url(url)
+        connect_args = parsed.translate_connect_args()
+    except (ArgumentError, TypeError, ValueError):
+        split = None
+        parsed = None
+        connect_args = {}
+    database_name = connect_args.get("database", "")
+    effective_host = connect_args.get("host", "")
     if (
         not url
-        or parsed.scheme != "postgresql+asyncpg"
-        or parsed.hostname not in _LOCAL_HOSTS
+        or split is None
+        or parsed is None
+        or split.query != ""
+        or split.fragment != ""
+        or parsed.drivername != "postgresql+asyncpg"
+        or parsed.query
+        or effective_host not in _LOCAL_HOSTS
         or _DISPOSABLE_DATABASE.fullmatch(database_name) is None
     ):
         raise RuntimeError(

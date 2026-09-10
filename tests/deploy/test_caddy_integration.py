@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 import sys
 
 import pytest
+from _pytest.outcomes import Failed, Skipped
+import tests.deploy.caddy_harness as harness_module
 
 from tests.deploy.caddy_harness import (
     CADDY_IMAGE,
@@ -39,6 +42,75 @@ def test_caddy_harness_accepts_its_exact_disposable_prefix() -> None:
     require_caddy_database(
         {"TEST_DATABASE_URL": "postgresql+asyncpg://localhost/fitpilot_task_caddy_a1b2c3"}
     )
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["database", "linux", "root", "docker", "mount", "umount", "findmnt", "image"],
+)
+def test_required_release_host_mode_turns_every_missing_prerequisite_into_failure(
+    monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    """Catches deployment treating an unavailable real-process gate as success."""
+    monkeypatch.setenv("CADDY_INTEGRATION_REQUIRED", "1")
+    database = (
+        "postgresql+asyncpg://localhost/fitpilot"
+        if missing == "database"
+        else "postgresql+asyncpg://localhost/fitpilot_task_caddy_required"
+    )
+    monkeypatch.setenv("TEST_DATABASE_URL", database)
+    monkeypatch.setattr(sys, "platform", "win32" if missing == "linux" else "linux")
+    monkeypatch.setattr(os, "geteuid", lambda: 1000 if missing == "root" else 0, raising=False)
+    monkeypatch.setattr(
+        harness_module.shutil,
+        "which",
+        lambda command: None if command == missing else f"/usr/bin/{command}",
+    )
+
+    def image_inspect(*args: object, **kwargs: object) -> object:
+        return harness_module.subprocess.CompletedProcess(
+            args=[], returncode=1 if missing == "image" else 0, stdout=b"", stderr=b""
+        )
+
+    monkeypatch.setattr(harness_module, "_run", image_inspect)
+    with pytest.raises(Failed, match="required.*unavailable"):
+        with CaddyHarness.start_or_skip():
+            pass
+
+
+def test_developer_mode_keeps_unavailable_runtime_as_explicit_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CADDY_INTEGRATION_REQUIRED", raising=False)
+    monkeypatch.setattr(
+        CaddyHarness,
+        "_unavailable_reason",
+        staticmethod(lambda: "requires a Linux release host"),
+    )
+    with pytest.raises(Skipped, match="runtime gate unavailable"):
+        with CaddyHarness.start_or_skip():
+            pass
+
+
+def test_unsafe_database_stops_before_app_import_or_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches Alembic or application startup occurring before URL rejection."""
+    monkeypatch.setenv(
+        "TEST_DATABASE_URL",
+        "postgresql+asyncpg://localhost/fitpilot_task_caddy_safe?host=db.internal",
+    )
+    monkeypatch.setenv("CADDY_INTEGRATION_REQUIRED", "1")
+    imported_before = {name: name in sys.modules for name in ("api.main", "app.database")}
+
+    def forbidden_subprocess(*args: object, **kwargs: object) -> object:
+        raise AssertionError("subprocess started before database URL rejection")
+
+    monkeypatch.setattr(harness_module, "_run", forbidden_subprocess)
+    with pytest.raises(Failed, match="TEST_DATABASE_URL"):
+        with CaddyHarness.start_or_skip():
+            pass
+    assert {name: name in sys.modules for name in imported_before} == imported_before
 
 
 def test_harness_contract_is_pinned_and_uses_exact_production_caddyfile() -> None:
@@ -118,6 +190,13 @@ def test_full_head_and_range_are_served_by_caddy(caddy: CaddyHarness) -> None:
     assert partial.headers["content-length"] == "4"
     assert partial.headers["etag"] == caddy.etag
     assert partial.headers["digest"] == caddy.digest
+
+
+def test_required_release_host_runtime_sentinel(caddy: CaddyHarness) -> None:
+    """Proves a required host run entered the real Uvicorn/Postgres/Caddy harness."""
+    if os.environ.get("CADDY_INTEGRATION_REQUIRED") != "1":
+        pytest.skip("release-host sentinel requires CADDY_INTEGRATION_REQUIRED=1")
+    assert caddy.runtime_case_count > 0
 
 
 @pytest.mark.parametrize(

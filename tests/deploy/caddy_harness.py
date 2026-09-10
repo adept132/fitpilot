@@ -259,6 +259,7 @@ class CaddyHarness:
         self.container_probe_symlink_read_denied = False
         self.container_mount_sources = ""
         self.caddy_mutations_denied: set[str] = set()
+        self.runtime_case_count = 0
 
     @classmethod
     def production_caddyfile(cls) -> Path:
@@ -269,7 +270,10 @@ class CaddyHarness:
     def start_or_skip(cls) -> Iterator["CaddyHarness"]:
         reason = cls._unavailable_reason()
         if reason:
-            pytest.skip(f"caddy_integration runtime gate unavailable: {reason}")
+            message = f"caddy_integration required runtime gate unavailable: {reason}"
+            if os.environ.get("CADDY_INTEGRATION_REQUIRED") == "1":
+                pytest.fail(message)
+            pytest.skip(message.replace("required ", ""))
         database_url = require_caddy_database()
         harness = cls(database_url)
         try:
@@ -280,6 +284,11 @@ class CaddyHarness:
 
     @staticmethod
     def _unavailable_reason() -> str | None:
+        url = os.environ.get("TEST_DATABASE_URL", "").strip()
+        try:
+            require_caddy_database({"TEST_DATABASE_URL": url} if url else {})
+        except RuntimeError:
+            return "TEST_DATABASE_URL must name unique local fitpilot_task_caddy_* database"
         if sys.platform != "linux":
             return "requires a Linux release host for bind remount nosymfollow"
         if not hasattr(os, "geteuid") or os.geteuid() != 0:
@@ -287,13 +296,6 @@ class CaddyHarness:
         for command in ("docker", "mount", "umount", "findmnt"):
             if shutil.which(command) is None:
                 return f"missing required executable: {command}"
-        url = os.environ.get("TEST_DATABASE_URL", "").strip()
-        try:
-            require_caddy_database(
-                {"TEST_DATABASE_URL": url} if url else {}
-            )
-        except RuntimeError:
-            return "TEST_DATABASE_URL must name unique local fitpilot_task_caddy_* database"
         image = _run(
             ["docker", "image", "inspect", CADDY_IMAGE],
             cwd=Path.cwd(),
@@ -354,6 +356,7 @@ class CaddyHarness:
         self.thread.start()
         self._wait_http(self.api_port, "/__caddy_test/counter/all")
         self._start_caddy()
+        self.runtime_case_count = 1
 
     async def _seed(self, session_factory: Any, app_release: Any) -> None:
         variants = {

@@ -133,7 +133,7 @@ Reviewer must independently verify the size comparison remains typed and active,
 - Create: `deploy/compose.release.yml`
 - Create: `tests/deploy/test_caddy_contract.py`
 - Create: `tests/deploy/test_caddy_entrypoint.py`
-- Delete after Task 3 validation: `deploy/nginx/releases.conf`
+- Retain through Task 5: `deploy/nginx/releases.conf`; delete atomically with the nginx documentation replacement in Task 6.
 
 **Interfaces:**
 - Consumes: FastAPI success header `X-Accel-Redirect: /_release_files/android/sha256/<64-lowercase-hex>.apk`; base production Compose services named `api` and `postgres`.
@@ -246,7 +246,6 @@ Reviewer must attempt matcher reordering, a broad upload matcher, a writable Cad
 - Create: `tests/deploy/caddy_harness.py`
 - Create: `tests/deploy/test_caddy_integration.py`
 - Modify: `tests/integration/database_test_guard.py`
-- Delete: `deploy/nginx/releases.conf`
 
 **Interfaces:**
 - Consumes: explicit local `TEST_DATABASE_URL` naming a unique `fitpilot_task_caddy_*` database; Docker; `deploy/caddy/Caddyfile`; Caddy v2.11.4.
@@ -295,15 +294,14 @@ python -m pytest tests/deploy/test_caddy_integration.py -q -m caddy_integration
 
 Expected: all cases pass against real Uvicorn/h11, PostgreSQL, and Caddy v2.11.4; Docker inspection confirms the Caddy bind is read-only and excludes `.staging`. Drop only the exact database created for this run after the suite exits.
 
-- [ ] **Step 6: Remove the obsolete nginx artifact, commit, and review**
+- [ ] **Step 6: Commit the harness while retaining the documented nginx artifact**
 
 ```bash
-git rm deploy/nginx/releases.conf
 git add tests/integration/database_test_guard.py tests/test_integration_database_guard.py tests/deploy/caddy_harness.py tests/deploy/test_caddy_integration.py
 git commit -m "test(release): verify Caddy APK delivery end to end"
 ```
 
-Reviewer must inspect Docker mounts and raw responses, rerun the tests, and confirm no test can connect unless the guarded disposable URL is explicit.
+The obsolete nginx artifact remains present while active documentation references it. Task 6 removes both atomically. Reviewer must inspect Docker mounts and raw responses, rerun the tests, and confirm no test can connect unless the guarded disposable URL is explicit.
 
 ### Task 4: Provision host permissions and protected configuration idempotently
 
@@ -408,6 +406,7 @@ Reviewer must restore the generated pair independently, corrupt one byte in a co
 - Modify: `deploy/README.md`
 - Modify: `docs/releases/update-center-backend-checklist.md`
 - Create: `tests/deploy/test_release_deploy_contract.py`
+- Delete: `deploy/nginx/releases.conf`
 
 **Interfaces:**
 - Consumes: `deploy.sh <full-40-hex-backend-sha> <full-40-hex-mobile-candidate-sha>`; base Compose path `EURITH_BASE_COMPOSE`; protected `/etc/eurith/release-deploy.env`; explicit canary URL `EURITH_PUBLIC_API_URL`.
@@ -427,7 +426,7 @@ Expected: current `deploy.sh` lacks the mobile SHA, paired backup, Caddy validat
 
 - [ ] **Step 3: Refactor `deploy.sh` into the specified gate sequence**
 
-Require two full SHAs. Fetch and resolve backend SHA exactly, verify it is contained by the approved remote integration/main ref, record old SHA, and refuse dirty state. Hash the base Compose, overlay, and Caddyfile. Read non-secret interpolation with `--env-file /etc/eurith/release-deploy.env`; never write `docker compose config` output. Run provisioning verification, paused paired backup, isolated restore drill, Caddy syntax plus loopback integration, one-head/migration-path checks, build exact API image, migrate once, then start API and Caddy together with the same two Compose files.
+Require two full SHAs. Fetch and resolve backend SHA exactly, verify it is contained by the approved remote integration/main ref, record old SHA, and refuse dirty state. Hash the base Compose, overlay, and Caddyfile. Read non-secret interpolation with `--env-file /etc/eurith/release-deploy.env`; never write `docker compose config` output. Run provisioning verification, paused paired backup, isolated restore drill, Caddy syntax plus the loopback integration command `CADDY_INTEGRATION_REQUIRED=1 python -m pytest tests/deploy/test_caddy_integration.py -q -m caddy_integration` with an explicitly created/exported unique local `fitpilot_task_caddy_*` database, one-head/migration-path checks, build exact API image, migrate once, then start API and Caddy together with the same two Compose files. Any skip or zero executed real-runtime sentinel cases is fatal and blocks the switch.
 
 Rollback checks out the exact old SHA and restarts the prior API/Caddy/Compose revision only after schema compatibility is affirmed. It retains the paired backup and never restores it automatically. Any incompatible/destructive migration exits before migration and points to a separate expand/contract process.
 
@@ -439,11 +438,12 @@ If the registry already contains a published direct APK, query only its public I
 
 - [ ] **Step 5: Replace nginx documentation and encode the backend-before-mobile gate**
 
-Document exact first-use and existing-host commands, consumer-by-consumer secret installation/rotation, permission probes, backup/restore, deploy, canary, log/metric alert criteria, rollback, withdrawal-before-infrastructure-disable, and first-real-release closure. State that successful push is not deployment and successful backend deployment is not APK publication. Remove all deployable nginx instructions.
+Document exact first-use and existing-host commands, consumer-by-consumer secret installation/rotation, permission probes, backup/restore, deploy, canary, log/metric alert criteria, rollback, withdrawal-before-infrastructure-disable, and first-real-release closure. State that successful push is not deployment and successful backend deployment is not APK publication. Remove all deployable nginx instructions and delete `deploy/nginx/releases.conf` in the same Task 6 commit, never earlier.
 
 - [ ] **Step 6: Run focused and full local verification**
 
 ```bash
+CADDY_INTEGRATION_REQUIRED=1 python -m pytest tests/deploy/test_caddy_integration.py -q -m caddy_integration
 python -m pytest tests/test_main_release_routes.py tests/test_release_handoff_uvicorn.py tests/deploy -q
 python -m pytest -q
 python -m compileall api
