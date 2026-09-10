@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 
 _DISPOSABLE_DATABASE = re.compile(
-    r"^fitpilot_(?:integration|task[0-9]+)_[a-z0-9][a-z0-9_]*$"
+    r"^fitpilot_(?:integration|task[0-9]+|task_caddy)_[a-z0-9][a-z0-9_]*$"
 )
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
@@ -28,6 +28,7 @@ def require_disposable_integration_database(
     ):
         raise RuntimeError(
             "integration tests require explicit TEST_DATABASE_URL on localhost "
-            "for a unique fitpilot_integration_* or fitpilot_taskN_* database"
+            "for a unique fitpilot_integration_*, fitpilot_taskN_*, or "
+            "fitpilot_task_caddy_* database"
         )
     return url

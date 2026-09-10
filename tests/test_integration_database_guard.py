@@ -16,6 +16,10 @@ import pytest
         "postgresql+asyncpg://db.internal/fitpilot_task7_unique",
         "postgresql+asyncpg://localhost/postgres",
         "postgresql+asyncpg://localhost/fitpilot_task7",
+        "postgresql+asyncpg://localhost/fitpilot_task_caddy",
+        "postgresql+asyncpg://localhost/fitpilot_task_caddy_",
+        "postgresql+asyncpg://localhost/fitpilot_task_caddy-bad",
+        "postgresql+asyncpg://db.internal/fitpilot_task_caddy_a1b2c3",
         "postgresql://localhost/fitpilot_task7_unique",
     ],
 )
@@ -32,7 +36,11 @@ def test_integration_guard_rejects_missing_remote_or_nondisposable_database(url:
 
 @pytest.mark.parametrize(
     "database_name",
-    ["fitpilot_integration_a1b2c3", "fitpilot_task7_a1b2c3"],
+    [
+        "fitpilot_integration_a1b2c3",
+        "fitpilot_task7_a1b2c3",
+        "fitpilot_task_caddy_a1b2c3",
+    ],
 )
 def test_integration_guard_accepts_unique_local_disposable_database(database_name: str) -> None:
     """Catches a prefix policy that prevents the full suite from using its own task DB."""
