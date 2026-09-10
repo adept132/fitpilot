@@ -169,3 +169,18 @@ def test_handoff_serves_from_read_only_root_and_copies_only_approved_metadata() 
 
 def test_access_log_is_json_and_explicitly_redacts_sensitive_headers() -> None:
     text = _read(CADDYFILE)
+    log = _block(text, "log {")
+    assert "output stdout" in log
+    filtered = _block(log, "format filter {")
+    assert "wrap json" in filtered
+    fields = _block(filtered, "fields {")
+    assert fields.splitlines()[1:-1] == [
+        "\t\t\t\trequest>headers>Authorization delete",
+        "\t\t\t\trequest>headers>X-Hub-Signature-256 delete",
+        "\t\t\t\trequest>headers>X-Accel-Redirect delete",
+    ]
+    # The stock access logger does not record request bodies, upstream response
+    # headers, or handler filesystem roots. Keep custom fields disabled so APK
+    # notes/body/path data cannot be appended later without changing this test.
+    assert "log_append" not in text
+    assert "request>body" not in filtered
