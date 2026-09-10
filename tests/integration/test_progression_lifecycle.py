@@ -331,3 +331,238 @@ async def test_second_plan_workout_exits_bootstrap_scheme(
     assert prescription is not None
     assert prescription["scheme"] != "e1rm_factor", prescription
     assert prescription["reason_code"] != "bootstrap_no_prescription", prescription
+
+
+def test_plan_exercise_stamps_rep_range_in_basis():
+    """Клиенту нужен низ планового диапазона: в ветке роста double.py
+    sets[n].rep_min это prior + 1, а не ctx.rep_min (P0-11 §6.4).
+
+    Отличие от брифа: там ctx собирался с ПУСТОЙ историей и
+    state=ProgressionState(last_top_weight=40.0) в надежде получить
+    непустое предписание. Но plan_exercise() безусловно пересчитывает
+    state из history через rebuild_state() и переданный state
+    отбрасывает целиком (см. test_state_is_rebuilt_even_if_caller_passed_an_empty_one
+    в tests/test_progression_engine.py) — а с пустой историей
+    resolve_scheme() всегда уходит в бутстрап e1rm_factor, которому
+    нужен ctx.state.working_e1rm, а его взять неоткуда, и результат —
+    no_basis с пустыми sets (test_empty_history_returns_no_basis, тот
+    же файл). Штамповать в пустом предписании нечего — см. второй тест
+    ниже. Чтобы этот тест проверял именно штамп, а не падал на пустом
+    sets по причине, не связанной со штампом, здесь собрана настоящая
+    история: одна сессия, где все подходы взяли потолок диапазона —
+    double.py уходит в ветку "прибавить вес", которая гарантированно
+    непустая.
+    """
+    from api.services.progression import params
+    from api.services.progression.engine import plan_exercise
+    from api.services.progression.types import (
+        ExerciseHistory,
+        Prescription,
+        ProgressionState,
+        SchemeContext,
+        SessionFact,
+        SetFact,
+        SetPrescription,
+    )
+
+    prior_prescription = Prescription(
+        scheme=params.SCHEME_DOUBLE,
+        sets=tuple(SetPrescription(n, 40.0, 8, 12, 2, "normal") for n in range(1, 4)),
+        reason_code="progressed",
+        reason_text="x",
+    )
+    history = ExerciseHistory(
+        exercise_id=1,
+        sessions=(
+            SessionFact(
+                session_id=1,
+                finished_at=None,
+                prescription=prior_prescription,
+                sets=tuple(SetFact(n, 40.0, 12, 2) for n in range(1, 4)),
+            ),
+        ),
+    )
+
+    ctx = SchemeContext(
+        history=history,
+        state=ProgressionState(),
+        last_outcome=None,
+        target_sets=3,
+        rep_min=8,
+        rep_max=12,
+        rep_range_source="microcycle",
+        target_rir=2,
+        equipment=("barbell",),
+    )
+
+    prescription = plan_exercise(ctx)
+
+    assert prescription.sets, "нужен непустой sets, иначе штамповать нечего"
+    assert prescription.basis["rep_range"] == [8, 12]
+
+
+def test_rep_range_stamp_does_not_touch_empty_prescription():
+    """Пустое предписание (no_basis) остаётся пустым и без штампа —
+    штамповать нечего, и basis пустого предписания читать некому."""
+    from api.services.progression.engine import plan_exercise
+    from api.services.progression.types import (
+        ExerciseHistory,
+        ProgressionState,
+        SchemeContext,
+    )
+
+    ctx = SchemeContext(
+        history=ExerciseHistory(exercise_id=1),
+        state=ProgressionState(),  # ни истории, ни якоря веса
+        last_outcome=None,
+        target_sets=3,
+        rep_min=8,
+        rep_max=12,
+        rep_range_source="microcycle",
+        target_rir=2,
+        equipment=("barbell",),
+    )
+
+    prescription = plan_exercise(ctx)
+
+    assert prescription.sets == ()
+    assert "rep_range" not in prescription.basis
+
+
+# --- Тесты P0-11: live_prescription в load_history ---
+
+
+async def _finished_session(client, auth_headers, exercise_id, weight, reps):
+    """Завершённая сессия с одним упражнением и одним подходом.
+
+    Возвращает (workout_id, session_exercise_id). Через HTTP, а не через
+    ORM: load_history отбирает сессии по status == "finished", и путь
+    завершения должен быть настоящим.
+    """
+    workout = (
+        await client.post("/workouts/start", headers=auth_headers, json={"source": "free"})
+    ).json()
+    add = (
+        await client.post(
+            f"/workouts/{workout['id']}/exercises",
+            headers=auth_headers,
+            json={"exercise_id": exercise_id},
+        )
+    ).json()
+    se_id = add["exercises"][-1]["id"]
+
+    await client.post(
+        f"/workout-session-exercises/{se_id}/sets",
+        headers=auth_headers,
+        json={"weight": weight, "reps": reps, "effort_level": "medium"},
+    )
+    finish = await client.post(f"/workouts/{workout['id']}/finish", headers=auth_headers)
+    assert finish.status_code == 200, finish.text
+    return workout["id"], se_id
+
+
+def _live_payload(weight: float, owner_exercise_id: int) -> dict:
+    return {
+        "scheme": "double",
+        "sets": [
+            {
+                "set_number": 1,
+                "weight_kg": weight,
+                "rep_min": 8,
+                "rep_max": 12,
+                "rir": 2,
+                "kind": "normal",
+            }
+        ],
+        "reason_code": "progressed",
+        "reason_text": "",
+        "basis": {"exercise_id": owner_exercise_id},
+        "engine_version": 2,
+        "provisional": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_load_history_prefers_live_prescription(
+    client, auth_headers, seeded_history, db, test_user
+):
+    """P0-11: evaluate() обязан сравнивать факт с тем, что человек видел.
+
+    Внутрисессионная петля подняла вес до 42.5, пользователь его взял.
+    Без live_prescription сервер сравнил бы с исходной целью и выставил
+    deviated — «ушёл с плана» за выполнение собственной рекомендации.
+    """
+    from api.services.models import WorkoutSessionExercise
+    from api.services.progression.state import evaluate
+
+    _, se_id = await _finished_session(
+        client, auth_headers, seeded_history.id, weight=42.5, reps=10
+    )
+
+    row = (
+        await db.execute(
+            select(WorkoutSessionExercise).where(WorkoutSessionExercise.id == se_id)
+        )
+    ).scalar_one()
+    row.live_prescription = _live_payload(42.5, seeded_history.id)
+    await db.commit()
+
+    history = await repository.load_history(db, test_user.id, seeded_history.id)
+    newest = history.sessions[0]
+    outcome = evaluate(newest.prescription, newest.sets, 2.5)
+
+    assert newest.prescription.sets[0].weight_kg == 42.5
+    assert outcome.status == "hit"
+
+
+@pytest.mark.asyncio
+async def test_load_history_falls_back_to_prescription(
+    client, auth_headers, seeded_history, db, test_user
+):
+    """Без live_prescription поведение не меняется ни в одном сценарии."""
+    from api.services.models import WorkoutSessionExercise
+
+    _, se_id = await _finished_session(
+        client, auth_headers, seeded_history.id, weight=40.0, reps=10
+    )
+
+    row = (
+        await db.execute(
+            select(WorkoutSessionExercise).where(WorkoutSessionExercise.id == se_id)
+        )
+    ).scalar_one()
+    assert row.live_prescription is None
+
+    history = await repository.load_history(db, test_user.id, seeded_history.id)
+
+    assert history.sessions[0].prescription is not None
+    assert history.sessions[0].prescription.sets
+
+
+@pytest.mark.asyncio
+async def test_live_prescription_of_other_exercise_is_ignored(
+    client, auth_headers, seeded_history, db, test_user
+):
+    """Метка принадлежности проверяется у live так же, как у исходного.
+
+    После замены упражнения строка меняет exercise_id, а write-once
+    prescription остаётся от старого. Если live этой проверки не проходит,
+    он становится обходной дорогой для чужой цели.
+    """
+    from api.services.models import WorkoutSessionExercise
+
+    _, se_id = await _finished_session(
+        client, auth_headers, seeded_history.id, weight=40.0, reps=10
+    )
+
+    row = (
+        await db.execute(
+            select(WorkoutSessionExercise).where(WorkoutSessionExercise.id == se_id)
+        )
+    ).scalar_one()
+    row.live_prescription = _live_payload(99.0, seeded_history.id + 1000)
+    await db.commit()
+
+    history = await repository.load_history(db, test_user.id, seeded_history.id)
+
+    assert history.sessions[0].prescription is None

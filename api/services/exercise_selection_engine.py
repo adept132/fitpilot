@@ -83,7 +83,7 @@ def order_by_systemic_cost(selected: list[dict]) -> list[dict]:
 
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from api.services.muscle_keys import key_for_muscle
 
 
@@ -96,8 +96,13 @@ class SelectionPolicy:
 @dataclass
 class SelectionConfig:
     use_supersets: bool = False
+    max_superset_size: int = 2
     accent_muscle: Optional[str] = None  # EN system key
+    accent_muscles: tuple[str, ...] = ()  # Up to two per-plan accents.
+    duration_minutes: Optional[int] = None
     seed: Optional[int] = None
+    favorite_exercise_ids: set[int] = field(default_factory=set)
+    disliked_exercise_ids: set[int] = field(default_factory=set)
 
 
 @dataclass
@@ -114,6 +119,27 @@ class SelectedExercise:
 
 MIN_SETS = 2
 MAX_SETS = 4
+
+# Direct work for these smaller groups should not be forced through the
+# "compound first" rule. Otherwise a single dubiously classified compound can
+# monopolize every regeneration (notably biceps in Upper), while the whole
+# isolation pool and user favorites never become candidates.
+ISOLATION_FIRST_MUSCLES = {
+    "biceps", "triceps", "forearms", "calves", "abs",
+    "front_delts", "side_delts", "rear_delts",
+}
+
+
+def configured_targets(session_targets: dict, config: SelectionConfig) -> dict[str, int]:
+    targets = {k: int(round(v)) for k, v in session_targets.items() if v and v > 0}
+    accents = list(dict.fromkeys((*config.accent_muscles, config.accent_muscle)))
+    for accent in [value for value in accents if value][:2]:
+        if accent in targets:
+            targets[accent] = max(targets[accent], int(round(targets[accent] * 1.5)))
+    # Duration is deliberately not applied here. It needs concrete exercises,
+    # rep ranges, rest settings, equipment transitions and supersets, so it is
+    # evaluated after selection by plan_duration.fit_to_duration().
+    return targets
 
 
 def is_compound(ex) -> bool:
@@ -155,10 +181,13 @@ def select_exercises(session_targets, pool, allowed_equipment_keys, prehab_flags
                      config: SelectionConfig,
                      policy: SelectionPolicy = SelectionPolicy()) -> list:
     rng = random.Random(config.seed)
-    targets: dict[str, int] = {k: int(round(v)) for k, v in session_targets.items() if v and v > 0}
+    targets = configured_targets(session_targets, config)
 
     # Split the filtered pool into compound / isolation candidate lists per muscle.
-    filtered = filter_pool(pool, allowed_equipment_keys, prehab_flags)
+    filtered = [
+        ex for ex in filter_pool(pool, allowed_equipment_keys, prehab_flags)
+        if ex.id not in config.disliked_exercise_ids
+    ]
     comp_by_key: dict[str, list] = {}
     iso_by_key: dict[str, list] = {}
     for ex in filtered:
@@ -191,7 +220,8 @@ def select_exercises(session_targets, pool, allowed_equipment_keys, prehab_flags
             v = getattr(ex, "vector", None)
             diversity = (2 if a not in used_actions else 0) + (1 if v not in used_vectors else 0)
             balance = -tier_counts.get(ex.fatigue_tier, 0)
-            key = (balance, diversity, -i)  # -i: deterministic, keeps earlier/lower-tier on ties
+            favorite = 1 if ex.id in config.favorite_exercise_ids else 0
+            key = (balance, diversity, favorite, -i)
             if best_key is None or key > best_key:
                 best_key, best_i = key, i
         if best_i is None:
@@ -209,7 +239,10 @@ def select_exercises(session_targets, pool, allowed_equipment_keys, prehab_flags
         if not comps and not isos:
             continue
 
-        compound_chunks, iso_chunks = _allocate(targets[muscle_key])
+        if muscle_key in ISOLATION_FIRST_MUSCLES and isos:
+            compound_chunks, iso_chunks = [], _split_sets(targets[muscle_key])
+        else:
+            compound_chunks, iso_chunks = _allocate(targets[muscle_key])
         # (chunk_sets, prefer_compound) work items.
         slots = [(s, True) for s in compound_chunks] + [(s, False) for s in iso_chunks]
         used_actions: set = set()  # action/vector diversity is tracked per muscle
@@ -252,7 +285,8 @@ def select_exercises(session_targets, pool, allowed_equipment_keys, prehab_flags
         dominant = max(counts, key=lambda k: (counts[k], -k))
         peak = counts[dominant]
         swapped = False
-        for ci, c in enumerate(chosen):
+        # Preserve a favorite when an equally valid non-favorite can be swapped.
+        for ci, c in sorted(enumerate(chosen), key=lambda row: row[1]["exercise_id"] in config.favorite_exercise_ids):
             if c["fatigue_tier"] != dominant:
                 continue
             mk = key_for_muscle(c["primary_muscle"])
@@ -260,7 +294,11 @@ def select_exercises(session_targets, pool, allowed_equipment_keys, prehab_flags
             cands = [e for e in leftover
                      if e.fatigue_tier != dominant
                      and not (is_axial(e) and axial_count[0] >= policy.axial_cap)]
-            cands.sort(key=lambda e: (counts.get(e.fatigue_tier, 0), e.id))
+            cands.sort(key=lambda e: (
+                counts.get(e.fatigue_tier, 0),
+                0 if e.id in config.favorite_exercise_ids else 1,
+                e.id,
+            ))
             for repl in cands:
                 new_counts = dict(counts)
                 new_counts[dominant] -= 1
@@ -296,7 +334,7 @@ def select_exercises(session_targets, pool, allowed_equipment_keys, prehab_flags
         for i, c in enumerate(ordered)
     ]
     if config.use_supersets:
-        result = group_supersets(result, rng)
+        result = group_supersets(result, rng, max_size=config.max_superset_size)
     return result
 
 
@@ -310,8 +348,8 @@ def _muscles_of(sel: "SelectedExercise") -> set:
     return m
 
 
-def group_supersets(selected: list, rng: random.Random) -> list:
-    """Pair non-heavy exercises into supersets and reorder so partners are adjacent.
+def group_supersets(selected: list, rng: random.Random, max_size: int = 2) -> list:
+    """Group compatible non-heavy exercises and keep group members adjacent.
 
     Eligible = every exercise that is NOT a heavy compound (fatigue_tier != 1; this
     also excludes axial squats/hinges, which are tier 1). Pairs are formed greedily
@@ -319,23 +357,28 @@ def group_supersets(selected: list, rng: random.Random) -> list:
     same-muscle and tier1+tier1 supersets). Partners are then placed next to each
     other and the list is re-indexed, because the plan editor groups a superset only
     from CONSECUTIVE items sharing a superset_group_id."""
+    max_size = max(2, min(3, max_size))
     eligible = [i for i, s in enumerate(selected) if s.fatigue_tier != 1]
     used: set[int] = set()
     for a in range(len(eligible)):
         i = eligible[a]
         if i in used:
             continue
+        group = [i]
         for b in range(a + 1, len(eligible)):
             j = eligible[b]
             if j in used:
                 continue
-            if _muscles_of(selected[i]) & _muscles_of(selected[j]):
+            if any(_muscles_of(selected[index]) & _muscles_of(selected[j]) for index in group):
                 continue
+            group.append(j)
+            if len(group) >= max_size:
+                break
+        if len(group) >= 2:
             gid = str(uuid.UUID(int=rng.getrandbits(128)))
-            selected[i].superset_group_id = gid
-            selected[j].superset_group_id = gid
-            used.update({i, j})
-            break
+            for index in group:
+                selected[index].superset_group_id = gid
+            used.update(group)
 
     # Reorder so each superset's members sit together (keep the first member's slot).
     ordered: list = []

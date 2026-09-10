@@ -2,11 +2,12 @@
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db
+from api.errors import LocalizedHTTPException
 from api.schemas.body import BodyEntry, BodyEntryRequest, BodyOverviewResponse
 from api.services.app_user_service import get_current_app_user
 from api.services.body_service import (
@@ -39,9 +40,10 @@ async def create_body_entry(
     if payload.measurements:
         bad = [k for k in payload.measurements if k not in BODY_METRIC_KEYS]
         if bad:
-            raise HTTPException(
+            raise LocalizedHTTPException(
                 status.HTTP_400_BAD_REQUEST,
-                f"Неизвестные метрики: {', '.join(bad)}",
+                "body.unknown_metrics",
+                {"metrics": ", ".join(bad)},
             )
 
     nothing = (
@@ -51,7 +53,7 @@ async def create_body_entry(
         and not payload.measurements
     )
     if nothing:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Нет данных для записи")
+        raise LocalizedHTTPException(status.HTTP_400_BAD_REQUEST, "body.entry_empty")
 
     await record_body_entry(
         db,

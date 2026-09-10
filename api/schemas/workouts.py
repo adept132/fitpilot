@@ -5,7 +5,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal, Optional, Dict, Union, List
 from api.schemas.supersets import WorkoutStructureResponse
-from pydantic import BaseModel, ConfigDict, Field
+from api.services.muscle_keys import to_system_key
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 WorkoutSource = Literal["free", "split_day", "plan"]
@@ -26,6 +27,12 @@ class ExerciseShortResponse(BaseModel):
 
     id: int
     name: str
+    name_en: str | None = Field(default=None, exclude=True)
+    description: str | None = Field(default=None, exclude=True)
+    description_en: str | None = Field(default=None, exclude=True)
+    source: str | None = Field(default=None, exclude=True)
+    localized_names: Dict[str, str] = Field(default_factory=dict)
+    localized_descriptions: Dict[str, str] = Field(default_factory=dict)
     fatigue_tier: int | None = None
 
     category: str | None = None
@@ -33,6 +40,51 @@ class ExerciseShortResponse(BaseModel):
 
     main_muscle_group: str | None = None
     secondary_muscle_groups: Optional[Union[List[str], str]] = None
+
+    # P0-09: нормализованные системные ключи. Раньше клиент нормализовал
+    # русские названия сам, тремя копиями RU_TO_EN_MAP, и каждая копия
+    # расходилась со справочником по-своему. Нормализация — на бэкенде,
+    # в единственном to_system_key.
+    muscle_key: Optional[str] = None
+    secondary_muscle_keys: List[str] = []
+
+    @model_validator(mode="after")
+    def _normalize_muscle_keys(self) -> "ExerciseShortResponse":
+        from api.services.exercise_localization import (
+            localized_descriptions,
+            localized_names,
+        )
+
+        self.localized_names = localized_names(self)
+        self.localized_descriptions = localized_descriptions(self)
+        self.muscle_key = to_system_key(self.main_muscle_group)
+
+        raw_secondary = self.secondary_muscle_groups
+        if isinstance(raw_secondary, str):
+            items: List[str] = [s.strip() for s in raw_secondary.split(",") if s.strip()]
+        else:
+            items = list(raw_secondary or [])
+
+        # P0-09 I5 (Important): to_system_key схлопывает несколько RU/EN
+        # синонимов на один системный ключ — каталог вполне может нести
+        # два разных сырых названия, нормализующихся в одно и то же.
+        # Дедуп на бэкенде, а не у каждого потребителя по отдельности:
+        # клиентский трекер суммирует += по каждому элементу списка и
+        # удвоил бы вклад мышцы, тогда как measure.contribution() (сервер)
+        # дедуп уже делает у СЕБЯ — расхождение клиента и сервера была
+        # находкой ревью. Также исключаем главную мышцу: если каталог
+        # продублировал её среди синергистов, прямой вклад уже учтён
+        # через muscle_key.
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for raw in items:
+            key = to_system_key(raw)
+            if key is None or key == self.muscle_key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(key)
+        self.secondary_muscle_keys = deduped
+        return self
 
 
 class AutoprogressionResponse(BaseModel):
@@ -66,6 +118,18 @@ class WorkoutSessionSetResponse(BaseModel):
     parent_set_id: int | None = None
     superset_round: int | None = None
     is_completed: bool
+    # P1-14: без этого поля флаг виден только в ответе на создание подхода
+    # и пропадает при любой перезагрузке — GET /workouts/active, GET по id,
+    # подтверждении sync и пул-дельте.
+    is_max_reps: bool = False
+    # Ревью, находка 2: серверный вердикт аномальности (90 дней истории +
+    # e1RM-джамп, api/services/anomaly_guard.py) — клиенту нужен именно он,
+    # а не собственный checkSet по медиане текущей сессии, иначе экран и
+    # rebuild_records расходятся в том, что считать «фактом» подхода.
+    # Тот же урок, что у is_max_reps выше: без поля здесь вердикт был бы
+    # виден только в AddWorkoutSetResponse (ответе на создание) и пропадал
+    # бы при перечитывании — GET /workouts/active, GET по id, sync, pull.
+    is_anomalous: bool = False
     updated_at: datetime
 
 
@@ -140,6 +204,8 @@ class AddWorkoutSetRequest(BaseModel):
     superset_round: int | None = Field(default=None, gt=0)
     # Клиент выставляет true, когда пользователь подтвердил подозрительное значение.
     anomaly_confirmed: bool = False
+    # P1-14: подход на максимум повторов — режим, ортогональный set_type.
+    is_max_reps: bool = False
 
 
 class AddWorkoutSetResponse(BaseModel):
@@ -156,6 +222,8 @@ class AddWorkoutSetResponse(BaseModel):
     superset_round: int | None = None
     is_completed: bool
     is_anomalous: bool = False
+    # P1-14: подход на максимум повторов — режим, ортогональный set_type.
+    is_max_reps: bool = False
     updated_at: datetime
 
 
@@ -172,6 +240,8 @@ class UpdateWorkoutSetRequest(BaseModel):
     is_completed: bool | None = None
     # Клиент выставляет true, когда пользователь подтвердил подозрительное значение.
     anomaly_confirmed: bool = False
+    # P1-14: подход на максимум повторов — режим, ортогональный set_type.
+    is_max_reps: bool | None = None
 
 
 class RepeatWorkoutSetRequest(BaseModel):
@@ -181,6 +251,7 @@ class RepeatWorkoutSetRequest(BaseModel):
 class WorkoutFinishedExerciseSummary(BaseModel):
     exercise_id: int
     exercise_name: str
+    localized_names: Dict[str, str] = Field(default_factory=dict)
     sets_count: int
     total_reps: int
     total_volume: Decimal | None = None

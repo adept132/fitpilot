@@ -1,11 +1,16 @@
-"""Характеризационные тесты бюджета объёма (api/services/volume_calculator.py)."""
+"""Характеризационные тесты бюджета объёма (api/services/volume_calculator.py).
+
+P0-09 Task 3: EXPERIENCE_CONSTRAINTS удалён — потолки теперь приходят из
+api.services.volume.landmarks (SYSTEMIC_CAP_EFF/SESSION_MAX), а
+per-muscle цели клампятся в диапазон MEV/MRV вместо base*0.5..base*1.4.
+Числа ниже пересчитаны под новый контракт; там, где это меняет саму суть
+теста (не только число), это отмечено отдельным комментарием.
+"""
 
 import pytest
 
-from api.services.volume_calculator import (
-    EXPERIENCE_CONSTRAINTS,
-    calculate_volume_budget,
-)
+from api.services.volume.landmarks import SYSTEMIC_CAP_EFF
+from api.services.volume_calculator import calculate_volume_budget
 
 
 @pytest.mark.parametrize("level", ["beginner", "intermediate", "advanced"])
@@ -17,25 +22,29 @@ def test_budget_is_produced_for_every_level(level):
 
 @pytest.mark.parametrize("level", ["beginner", "intermediate", "advanced"])
 def test_total_respects_systemic_cap(level):
-    # ВНИМАНИЕ: при пустом фокусе базовые таблицы всех уровней и так лежат под
-    # кэпом (59/84/111 против 70/95/120), поэтому ветка обрезки здесь НЕ
-    # исполняется — тест фиксирует лишь этот факт конфигурации, а не работу
-    # обрезки. Саму обрезку пинит отдельный тест ниже.
+    # ВНИМАНИЕ: при пустом фокусе балансные суммы (60/91/118 для
+    # beginner/intermediate/advanced) и так лежат под эффективным кэпом
+    # landmarks.SYSTEMIC_CAP_EFF (80/110/140), поэтому ветка обрезки здесь
+    # НЕ исполняется — тест фиксирует лишь этот факт конфигурации, а не
+    # работу обрезки. Саму обрезку пинит отдельный тест ниже.
     budget = calculate_volume_budget(level, [])
-    cap = EXPERIENCE_CONSTRAINTS[level]["systemic_cap"]
+    cap = SYSTEMIC_CAP_EFF[level]
     assert budget.meta.total_weekly_sets <= cap
 
 
 def test_total_is_trimmed_to_cap_when_focus_pushes_over():
-    # Дискриминирующий тест на сам механизм обрезки по systemic_cap. Пять
-    # фокусных мышц на advanced поднимают сумму выше кэпа (120), и функция
-    # обязана урезать её ровно до кэпа. Balanced-сумма advanced = 111, так что
-    # результат 120 достигается именно прибавкой фокусов с последующей обрезкой,
-    # а не совпадением. Если удалить блок «if total_sets > systemic_cap», сумма
-    # осталась бы выше 120 и обе ассерции упали бы.
-    cap = EXPERIENCE_CONSTRAINTS["advanced"]["systemic_cap"]
+    # Дискриминирующий тест на сам механизм обрезки по systemic_cap.
+    # P0-09: подобранный набор фокусов заменён — прежний (chest, biceps,
+    # triceps, side_delts, quads) при фокусе целится в MAV, а не в
+    # base*1.4, и с этими пятью мышцами сумма (135) уже не переваливает
+    # через новый эффективный кэп (140), так что обрезка не срабатывала бы.
+    # side_delts/rear_delts/lats/mid_back/calves доводят до-обрезки сумму
+    # до 141 — на 1 выше кэпа, и не-фокусные мышцы (в частности chest и
+    # quads, у которых raw target = base*0.85 всё ещё выше их MEV) дают
+    # ровно 1 подход запаса, так что обрезка снимает сумму ровно до кэпа.
+    cap = SYSTEMIC_CAP_EFF["advanced"]
     budget = calculate_volume_budget(
-        "advanced", ["chest", "biceps", "triceps", "side_delts", "quads"]
+        "advanced", ["side_delts", "rear_delts", "lats", "mid_back", "calves"]
     )
     assert budget.meta.total_weekly_sets == cap
     assert budget.meta.total_weekly_sets > calculate_volume_budget(
@@ -109,4 +118,4 @@ def test_shorter_microcycle_reduces_total():
 
 def test_unknown_level_falls_back_to_beginner_caps():
     budget = calculate_volume_budget("alien", [])
-    assert budget.meta.total_weekly_sets <= EXPERIENCE_CONSTRAINTS["beginner"]["systemic_cap"]
+    assert budget.meta.total_weekly_sets <= SYSTEMIC_CAP_EFF["beginner"]

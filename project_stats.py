@@ -41,9 +41,7 @@ def scan_directory(directory):
 if __name__ == "__main__":
     project_dirs = [
         "C:/Users/Admin/PycharmProjects/FitPilotBot/app",
-        "C:/Users/Admin/PycharmProjects/FitPilotBot/bot",
-        "C:/Users/Admin/PycharmProjects/FitPilotBot/handlers",
-        "C:/Users/Admin/PycharmProjects/FitPilotBot/services"
+        "C:/Users/Admin/PycharmProjects/FitPilotBot/api",
     ]
 
     all_lines, all_functions, all_files = 0, 0, 0

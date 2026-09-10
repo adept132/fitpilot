@@ -90,6 +90,8 @@ class ParsedWorkout:
 class SkippedRow:
     line: int
     reason: str
+    reason_key: str
+    reason_params: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -197,16 +199,27 @@ def parse_csv(text: str, default_unit: str = UNIT_KG) -> ParseResult:
         name_raw = _clean(col(row, COL_EXERCISE_NAME))
 
         if not date_raw:
-            result.skipped.append(SkippedRow(line_number, "пустая дата"))
+            result.skipped.append(SkippedRow(
+                line_number, "пустая дата", "data.import.row.empty_date"
+            ))
             continue
         if not name_raw:
-            result.skipped.append(SkippedRow(line_number, "пустое название упражнения"))
+            result.skipped.append(SkippedRow(
+                line_number,
+                "пустое название упражнения",
+                "data.import.row.empty_exercise",
+            ))
             continue
 
         started_at = _parse_date(date_raw)
         if started_at is None:
             result.skipped.append(
-                SkippedRow(line_number, f"не распознана дата: {date_raw!r}")
+                SkippedRow(
+                    line_number,
+                    f"не распознана дата: {date_raw!r}",
+                    "data.import.row.invalid_date",
+                    {"value": repr(date_raw)},
+                )
             )
             continue
 
@@ -217,6 +230,8 @@ def parse_csv(text: str, default_unit: str = UNIT_KG) -> ParseResult:
                 SkippedRow(
                     line_number,
                     f"нечисловой номер подхода: {_clean(col(row, COL_SET_ORDER))!r}",
+                    "data.import.row.invalid_set_order",
+                    {"value": repr(_clean(col(row, COL_SET_ORDER)))},
                 )
             )
             continue
@@ -229,12 +244,17 @@ def parse_csv(text: str, default_unit: str = UNIT_KG) -> ParseResult:
         if not weight_raw and not reps:
             distance = _to_float(col(row, COL_DISTANCE)) or 0
             seconds = _to_float(col(row, COL_SECONDS)) or 0
+            is_cardio = bool(distance or seconds)
             reason = (
                 "кардио-подход (только дистанция/время)"
-                if distance or seconds
+                if is_cardio
                 else "пустой подход (нет веса и повторов)"
             )
-            result.skipped.append(SkippedRow(line_number, reason))
+            result.skipped.append(SkippedRow(
+                line_number,
+                reason,
+                "data.import.row.cardio" if is_cardio else "data.import.row.empty_set",
+            ))
             continue
 
         row_unit = normalize_unit(col(row, COL_WEIGHT_UNIT)) if has_unit_column else None

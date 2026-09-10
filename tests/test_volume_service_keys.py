@@ -64,3 +64,36 @@ def test_uppercase_code_target_matches_en_budget():
 
     assert "front_delts" in result
     assert result["front_delts"]["target_sets"] >= 1
+
+
+def test_weekly_floor_is_scaled_to_session_in_short_repeating_split():
+    profile = SimpleNamespace(volume_budget={
+        "constraints": {"max_sets_per_session_per_muscle": 10},
+        "weekly_targets": {
+            "chest": {"target_sets": 15, "min_floor": 8},
+            "lats": {"target_sets": 8, "min_floor": 8},
+            "mid_back": {"target_sets": 8, "min_floor": 8},
+            "front_delts": {"target_sets": 5, "min_floor": 5},
+            "side_delts": {"target_sets": 8, "min_floor": 8},
+            "rear_delts": {"target_sets": 5, "min_floor": 5},
+            "biceps": {"target_sets": 14, "min_floor": 8},
+            "triceps": {"target_sets": 8, "min_floor": 8},
+        },
+    })
+    upper_muscles = list(profile.volume_budget["weekly_targets"])
+    upper = _day("Upper", "upper", upper_muscles)
+    lower = _day("Lower", "lower", ["quads", "hamstrings"])
+    rest = _day("Rest", "active_rest", [])
+    blueprint = SimpleNamespace(
+        length_days=3,
+        slots=[SimpleNamespace(day=upper), SimpleNamespace(day=lower), SimpleNamespace(day=rest)],
+    )
+
+    result = asyncio.run(VolumeService.calculate_session_targets(
+        FakeSession(profile, blueprint), app_user_id=1, day_tag="Upper",
+    ))
+
+    # Regression: the unscaled weekly floors produced exactly 58 sets here.
+    assert sum(item["target_sets"] for item in result.values()) == 28
+    assert result["chest"]["target_sets"] == 6
+    assert result["lats"]["target_sets"] == 3

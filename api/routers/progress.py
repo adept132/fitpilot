@@ -1,10 +1,11 @@
 from datetime import timezone, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db
+from api.errors import LocalizedHTTPException
 from api.schemas.exercises import ExerciseFullHistoryResponse
 from api.schemas.progress import (
     ExerciseForecastResponse,
@@ -17,44 +18,235 @@ from api.schemas.progress import (
     DisciplineResponse,
     DisciplineDay,
     DisciplineDensity,
+    ProgressAchievement,
+)
+from api.schemas.volume import (
+    AdherenceRead,
+    MuscleVolumeRead,
+    VolumeOverviewRead,
+    WindowRead,
 )
 from api.services.app_user_service import get_current_app_user
 from api.services.exercise_search_service import ExerciseSearchService
 from api.services.fatigue.service import compute_readiness
 from api.services.forecast_service import build_strength_forecast
 from api.services.models import Exercise, WorkoutSessionSet, WorkoutSessionExercise, AppUserProfile, WorkoutSession
-from api.services.statistics_service import get_weekly_performed_sets
+from api.services.volume import repository as volume_repo
+from api.services.volume.landmarks import landmarks_for, reachable_mrv
+from api.services.volume.service import targets_from_budget
+from api.services.exercise_localization import localized_names
 
 router = APIRouter()
 
 
-@router.get("/api/progress/volume-overview")
-async def get_volume_overview(
-        current_user=Depends(get_current_app_user),  # Переименовали для ясности, так как прилетает объект AppUser
-        db: AsyncSession = Depends(get_db)
+@router.get("/progress/achievements", response_model=list[ProgressAchievement])
+async def get_progress_achievements(
+        limit: int = Query(100, ge=1, le=500),
+        current_user=Depends(get_current_app_user),
+        db: AsyncSession = Depends(get_db),
 ):
-    # Достаем настоящий числовой ID из объекта
-    actual_user_id = current_user.id
+    """Immutable chronology of e1RM records using the Brzycki formula.
 
-    # 1. Запрос профиля с правильным ID
-    query = select(AppUserProfile).where(AppUserProfile.app_user_id == actual_user_id)
-    result = await db.execute(query)
-    user_profile = result.scalar_one_or_none()
+    The first valid performance establishes the first record. Warm-ups, drop
+    sets and anomalous values do not create records.
+    """
+    result = await db.execute(
+        select(
+            WorkoutSession.id,
+            WorkoutSession.finished_at,
+            WorkoutSessionExercise.exercise_id,
+            Exercise.name,
+            Exercise.name_en,
+            Exercise.source,
+            WorkoutSessionSet.weight,
+            WorkoutSessionSet.reps,
+        )
+        .select_from(WorkoutSessionSet)
+        .join(WorkoutSessionExercise)
+        .join(WorkoutSession)
+        .join(Exercise)
+        .where(
+            WorkoutSession.app_user_id == current_user.id,
+            WorkoutSession.status == "finished",
+            WorkoutSession.finished_at.is_not(None),
+            WorkoutSessionSet.is_completed.is_(True),
+            WorkoutSessionSet.is_anomalous.is_(False),
+            WorkoutSessionSet.set_type == "normal",
+            WorkoutSessionSet.weight.is_not(None),
+            WorkoutSessionSet.reps.is_not(None),
+            WorkoutSessionSet.weight > 0,
+            WorkoutSessionSet.reps > 0,
+        )
+        .order_by(WorkoutSession.finished_at, WorkoutSession.id, WorkoutSessionExercise.exercise_id)
+    )
 
-    if not user_profile:
-        raise HTTPException(status_code=404, detail="Профиль пользователя не найден")
+    performances: dict[tuple[int, int], dict] = {}
+    for row in result.all():
+        if len(row) == 6:
+            # Keep compatibility with lightweight query fakes and rows
+            # captured before the additive localization columns existed.
+            workout_id, finished_at, exercise_id, exercise_name, raw_weight, raw_reps = row
+            exercise_name_en = None
+            exercise_source = None
+        else:
+            (
+                workout_id,
+                finished_at,
+                exercise_id,
+                exercise_name,
+                exercise_name_en,
+                exercise_source,
+                raw_weight,
+                raw_reps,
+            ) = row
+        key = (workout_id, exercise_id)
+        item = performances.setdefault(key, {
+            "workout_id": workout_id,
+            "achieved_at": finished_at,
+            "exercise_id": exercise_id,
+            "exercise_name": exercise_name,
+            "localized_names": localized_names({
+                "name": exercise_name,
+                "name_en": exercise_name_en,
+                "source": exercise_source,
+            }),
+            "e1rm": 0.0,
+            "weight": 0.0,
+            "reps": 0,
+        })
+        weight, reps = float(raw_weight), int(raw_reps)
+        # The formula is undefined at 37 reps and negative above it. Those
+        # high-rep sets stay in workout history but cannot establish e1RM.
+        if reps >= 37:
+            continue
+        e1rm = weight * 36.0 / (37.0 - reps)
+        if e1rm > item["e1rm"]:
+            item["e1rm"] = e1rm
+            item["weight"] = weight
+            item["reps"] = reps
 
-    # Достаем JSONB с бюджетом
-    current_budget = user_profile.volume_budget
+    best: dict[int, float] = {}
+    achievements: list[ProgressAchievement] = []
+    for item in performances.values():
+        if item["e1rm"] <= 0:
+            continue
+        previous = best.get(item["exercise_id"])
+        if previous is None or item["e1rm"] > previous + 1e-6:
+            achievements.append(ProgressAchievement(
+                id=f'{item["workout_id"]}:{item["exercise_id"]}:e1rm',
+                exercise_id=item["exercise_id"],
+                exercise_name=item["exercise_name"],
+                localized_names=item["localized_names"],
+                e1rm=round(item["e1rm"], 1),
+                previous_e1rm=round(previous, 1) if previous is not None else None,
+                weight=round(item["weight"], 2),
+                reps=item["reps"],
+                achieved_at=item["achieved_at"],
+                workout_id=item["workout_id"],
+            ))
+        best[item["exercise_id"]] = max(previous or 0.0, item["e1rm"])
 
-    # 2. Считаем выполненные подходы за неделю (передаем только числовой ID!)
-    performed_sets = await get_weekly_performed_sets(db, actual_user_id)
+    achievements.sort(key=lambda item: (item.achieved_at, item.workout_id), reverse=True)
+    return achievements[:limit]
 
-    # 3. Отправляем готовую склейку
-    return {
-        "budget": current_budget,
-        "performed_sets": performed_sets
-    }
+
+@router.get("/api/progress/volume-overview", response_model=VolumeOverviewRead)
+async def get_volume_overview(
+        current_user=Depends(get_current_app_user),
+        db: AsyncSession = Depends(get_db),
+) -> VolumeOverviewRead:
+    """Текущее окно объёма: цель, предписание, факт и прогноз по мышцам.
+
+    Открытое окно считается живым запросом — оно меняется после каждого
+    подхода, кэшировать нечего. Прогноз получается сложением уже
+    сгенерированного плана, а не экстраполяцией.
+    """
+    today = volume_repo.utc_today()
+
+    profile = (await db.execute(
+        select(AppUserProfile).where(AppUserProfile.app_user_id == current_user.id)
+    )).scalar_one_or_none()
+    level = profile.experience_level if profile else None
+    budget = profile.volume_budget if profile else None
+    targets = targets_from_budget(profile)
+
+    window = await volume_repo.current_window(db, current_user.id, today)
+    if window is None:
+        return VolumeOverviewRead(level=level, budget=budget)
+
+    prescribed = await volume_repo.prescribed_for(db, current_user.id, window)
+    performed = await volume_repo.performed_for(db, current_user.id, window)
+    planned_work_sets, completed_work_sets = await volume_repo.physical_set_totals(
+        db, current_user.id, window
+    )
+    rows = volume_repo.build_rows(targets, prescribed, performed)
+    adherence = await volume_repo.adherence_for_range(
+        db, current_user.id, window.start_date, window.end_date
+    )
+
+    # Прогноз: факт на сегодня плюс предписание ОСТАВШИХСЯ дней окна.
+    remaining = volume_repo.Window(
+        block_id=window.block_id, window_index=window.window_index,
+        phase_number=window.phase_number,
+        start_date=max(today + timedelta(days=1), window.start_date),
+        end_date=window.end_date, is_deload=window.is_deload,
+    )
+    remaining_prescribed = (
+        await volume_repo.prescribed_for(db, current_user.id, remaining)
+        if remaining.start_date <= remaining.end_date
+        else {}
+    )
+
+    # Спека §5.1: показываемый прямой потолок клампится достижимым в
+    # КОНКРЕТНОМ сплите. У человека, тренирующего грудь раз в неделю,
+    # табличный потолок недосягаем и висел бы молчащим предупреждением.
+    frequency = await volume_repo.muscle_frequency(db, current_user.id, window)
+
+    muscles: dict[str, MuscleVolumeRead] = {}
+    # P0-09 I4: shim совместимости со сборками ДО shape v2 (см. докстринг
+    # поля в api/schemas/volume.py) — то же эффективное выполненное, что
+    # уходит в muscles[*], просто сложенное в одно число на мышцу.
+    performed_sets: dict[str, float] = {}
+    for muscle, row in rows.items():
+        lm = landmarks_for(muscle, level)
+        if lm is None:
+            continue
+        ahead = remaining_prescribed.get(muscle)
+        muscles[muscle] = MuscleVolumeRead(
+            target=row.target,
+            prescribed=row.prescribed,
+            performed_direct=row.performed_direct,
+            performed_indirect=row.performed_indirect,
+            forecast=row.performed_effective + (ahead.effective if ahead else 0.0),
+            mev=lm.mev, mav=lm.mav, mrv=lm.mrv,
+            mev_direct=lm.mev_direct,
+            mrv_direct=reachable_mrv(muscle, level, frequency.get(muscle, 1)),
+        )
+        performed_sets[muscle] = row.performed_effective
+
+    length = (window.end_date - window.start_date).days + 1
+    return VolumeOverviewRead(
+        window=WindowRead(
+            index=window.window_index,
+            day=min(length, (today - window.start_date).days + 1),
+            length=length,
+            start_date=window.start_date.isoformat(),
+            end_date=window.end_date.isoformat(),
+            phase_number=window.phase_number,
+            is_deload=window.is_deload,
+        ),
+        level=level,
+        adherence=AdherenceRead(
+            planned_days=adherence.planned_days,
+            completed_days=adherence.completed_days,
+            missed_days=adherence.missed_days,
+        ),
+        planned_work_sets=planned_work_sets,
+        completed_work_sets=completed_work_sets,
+        muscles=muscles,
+        budget=budget,
+        performed_sets=performed_sets,
+    )
 
 
 @router.get("/progress/exercise-history/{exercise_id}", response_model=ExerciseFullHistoryResponse)
@@ -74,7 +266,7 @@ async def get_exercise_history(
     )
 
     if not history_data:
-        raise HTTPException(status_code=404, detail="Упражнение не найдено или по нему нет записей")
+        raise LocalizedHTTPException(404, "progress.exercise_history_not_found")
 
     return history_data
 
@@ -99,7 +291,7 @@ async def get_exercise_forecast(
         settings=profile.settings if profile else None,
     )
     if forecast is None:
-        raise HTTPException(status_code=404, detail="Упражнение не найдено")
+        raise LocalizedHTTPException(404, "exercise.not_found")
 
     return ExerciseForecastResponse(**forecast)
 

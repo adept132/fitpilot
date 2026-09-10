@@ -40,6 +40,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.services.models import (
@@ -371,3 +372,140 @@ async def test_poisoned_stored_prescription_degrades_to_bootstrap_not_a_crash(
     # 50кг x8 в испорченной сессии, а не 500 и не голый no_basis.
     assert added["prescription"]["scheme"] == "e1rm_factor"
     assert added["recommended_weight"] is not None
+
+
+# --- P0-11, Задача 7: live_prescription — производное значение, не write-once ---
+
+
+def _live_prescription_payload(weight: float) -> dict:
+    return {
+        "scheme": "double",
+        "sets": [
+            {
+                "set_number": 1,
+                "weight_kg": weight,
+                "rep_min": 8,
+                "rep_max": 12,
+                "rir": 2,
+                "kind": "normal",
+            }
+        ],
+        "reason_code": "progressed",
+    }
+
+
+@pytest.mark.asyncio
+async def test_sync_overwrites_live_prescription(
+    client, auth_headers, finished_session_with_prescription, db
+):
+    """live_prescription — производное значение, а не обещание.
+
+    Оно чистая функция от (предписание, факты, шаг), поэтому
+    last-write-wins безопасен: худшее последствие конфликта — устаревший
+    кэш, который перезапишется следующим подходом. Write-once здесь,
+    наоборот, заморозил бы цель первого же подхода навсегда.
+    """
+    from api.services.models import WorkoutSessionExercise
+
+    def build(weight: float, base_version: int) -> dict:
+        return {
+            "client_uuid": str(uuid.uuid4()),
+            "server_id": snapshot["id"],
+            "base_version": base_version,
+            "source": snapshot["source"],
+            "status": snapshot["status"],
+            "split_day_id": None,
+            "plan_id": None,
+            "notes": None,
+            "volume_targets": None,
+            "started_at": snapshot["started_at"],
+            "finished_at": snapshot["finished_at"],
+            "exercises": [
+                {
+                    "client_uuid": str(uuid.uuid4()),
+                    "server_id": e["id"],
+                    "exercise_id": e["exercise"]["id"],
+                    "order_index": e["order_index"],
+                    "superset_group": None,
+                    "notes": None,
+                    "live_prescription": _live_prescription_payload(weight),
+                    "sets": [],
+                }
+                for e in snapshot["exercises"]
+            ],
+        }
+
+    before = (await client.get("/sync/changes", headers=auth_headers)).json()
+    snapshot = _find_workout(before, finished_session_with_prescription.workout_id)
+    version = before["versions"][str(snapshot["id"])]
+    se_id = snapshot["exercises"][0]["id"]
+
+    first = await client.post(
+        "/sync/workouts", headers=auth_headers, json=build(40.0, version)
+    )
+    assert first.status_code == 200, first.text
+
+    mid = (await client.get("/sync/changes", headers=auth_headers)).json()
+    second = await client.post(
+        "/sync/workouts",
+        headers=auth_headers,
+        json=build(42.5, mid["versions"][str(snapshot["id"])]),
+    )
+    assert second.status_code == 200, second.text
+
+    row = (
+        await db.execute(
+            select(WorkoutSessionExercise).where(WorkoutSessionExercise.id == se_id)
+        )
+    ).scalar_one()
+    assert row.live_prescription["sets"][0]["weight_kg"] == 42.5
+
+
+@pytest.mark.asyncio
+async def test_sync_live_prescription_does_not_touch_write_once_prescription(
+    client, auth_headers, finished_session_with_prescription, db
+):
+    """Регресс P0-06: исходное предписание живой целью не подменяется."""
+    from api.services.models import WorkoutSessionExercise
+
+    before = (await client.get("/sync/changes", headers=auth_headers)).json()
+    snapshot = _find_workout(before, finished_session_with_prescription.workout_id)
+    se_id = snapshot["exercises"][0]["id"]
+    original = snapshot["exercises"][0]["prescription"]
+
+    payload = {
+        "client_uuid": str(uuid.uuid4()),
+        "server_id": snapshot["id"],
+        "base_version": before["versions"][str(snapshot["id"])],
+        "source": snapshot["source"],
+        "status": snapshot["status"],
+        "split_day_id": None,
+        "plan_id": None,
+        "notes": None,
+        "volume_targets": None,
+        "started_at": snapshot["started_at"],
+        "finished_at": snapshot["finished_at"],
+        "exercises": [
+            {
+                "client_uuid": str(uuid.uuid4()),
+                "server_id": e["id"],
+                "exercise_id": e["exercise"]["id"],
+                "order_index": e["order_index"],
+                "superset_group": None,
+                "notes": None,
+                "live_prescription": _live_prescription_payload(99.0),
+                "sets": [],
+            }
+            for e in snapshot["exercises"]
+        ],
+    }
+    resp = await client.post("/sync/workouts", headers=auth_headers, json=payload)
+    assert resp.status_code == 200, resp.text
+
+    row = (
+        await db.execute(
+            select(WorkoutSessionExercise).where(WorkoutSessionExercise.id == se_id)
+        )
+    ).scalar_one()
+    assert row.prescription == original
+    assert row.live_prescription["sets"][0]["weight_kg"] == 99.0

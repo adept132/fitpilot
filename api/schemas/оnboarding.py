@@ -51,6 +51,7 @@ class VolumeBudget(BaseModel):
     weekly_targets: Dict[str, MuscleTarget]
 
 class UpdateSettingsRequest(BaseModel):
+    language: Optional[Literal["ru", "en"]] = None
     locations: Optional[List[str]] = None
     prehab_flags: Optional[List[str]] = None
     effort_display_mode: Optional[Literal["hidden", "text", "rir"]] = None

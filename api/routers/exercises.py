@@ -7,14 +7,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from api.deps import get_db
+from api.errors import LocalizedHTTPException
 from api.schemas.workouts import ExerciseShortResponse
 from api.services.app_user_service import get_current_app_user
 from api.services.exercise_search_service import ExerciseSearchService
+from api.services.exercise_localization import localized_descriptions, localized_names
 from api.services.exercise_utils import get_base_exercise_query
 from api.services.fatigue_tiers import calculate_fatigue_tier
 from api.services.heuristics import HeuristicsEngine
 from app.database import get_session
-from api.services.models import Exercise, WorkoutSession, WorkoutSessionExercise, WorkoutSessionSet, AppUser, WorkoutPlanExercise, UserExerciseNote
+from api.services.models import Exercise, WorkoutSession, WorkoutSessionExercise, WorkoutSessionSet, AppUser, WorkoutPlanExercise, UserExerciseNote, UserExercisePreference
 from api.schemas.exercises import (
     ExerciseListItemResponse,
     ExerciseDetailResponse,
@@ -25,9 +27,28 @@ from api.schemas.exercises import (
     ExerciseAlternativeResponse, ReplaceExerciseRequest, CustomExerciseCreate,
     ExerciseNoteRequest, ExerciseNoteResponse,
     ExerciseClassifyRequest, ExerciseClassifyResponse,
+    ExercisePreferenceRequest, ExercisePreferenceResponse,
 )
 
 router = APIRouter(tags=["exercises"])
+
+
+def _custom_exercise_response(exercise: Exercise) -> ExerciseSearchItem:
+    return ExerciseSearchItem(
+        id=exercise.id,
+        name=exercise.name,
+        description=exercise.description,
+        localized_names=localized_names(exercise),
+        localized_descriptions=localized_descriptions(exercise),
+        main_muscle_group=exercise.main_muscle_group,
+        secondary_muscle_groups=exercise.secondary_muscle_groups or [],
+        category=exercise.category,
+        fatigue_tier=exercise.fatigue_tier,
+        equipment_needed=exercise.equipment_needed or [],
+        source=exercise.source,
+        image_url=None,
+        image_approx=bool(exercise.image_approx),
+    )
 
 
 def _thumb_url(request: Request, image_urls, image_approx) -> tuple[Optional[str], bool]:
@@ -62,7 +83,8 @@ async def list_exercises(
         type=type,
         equipment=equipment,
         recent=recent,
-        source=source # <--- Передали!
+        source=source, # <--- Передали!
+        language=getattr(current_user, "_request_language", "ru"),
     )
 
     response_items = []
@@ -76,6 +98,7 @@ async def list_exercises(
                 ExerciseListItemResponse(
                     id=item.get("id"),
                     name=item.get("name"),
+                    localized_names=localized_names(item),
                     category=item.get("category") or "base",
                     main_muscle_group=item.get("main_muscle_group") or "unknown",
                     secondary_muscle_groups=item.get("secondary_muscle_groups") or [],
@@ -86,6 +109,7 @@ async def list_exercises(
                     source=item.get("source") or "default",
                     image_url=image_url,
                     image_approx=image_approx,
+                    preference=item.get("preference"),
                 )
             )
         else:
@@ -96,6 +120,7 @@ async def list_exercises(
                 ExerciseListItemResponse(
                     id=item.id,
                     name=item.name,
+                    localized_names=localized_names(item),
                     category=item.category,
                     main_muscle_group=item.main_muscle_group,
                     secondary_muscle_groups=item.secondary_muscle_groups or [],
@@ -106,6 +131,7 @@ async def list_exercises(
                     source=item.source,
                     image_url=image_url,
                     image_approx=image_approx,
+                    preference=getattr(item, "_user_preference", None),
                 )
             )
 
@@ -124,7 +150,7 @@ async def get_exercise_detail(
     exercise = result.scalar_one_or_none()
 
     if exercise is None:
-        raise HTTPException(status_code=404, detail="Exercise not found")
+        raise LocalizedHTTPException(404, "exercise.not_found")
 
     # Личная заметка текущего пользователя к этому упражнению
     note_row = await session.execute(
@@ -134,6 +160,10 @@ async def get_exercise_detail(
         )
     )
     note = note_row.scalar_one_or_none()
+    preference = (await session.execute(select(UserExercisePreference.preference).where(
+        UserExercisePreference.app_user_id == app_user.id,
+        UserExercisePreference.exercise_id == exercise_id,
+    ))).scalar_one_or_none()
 
     # Относительные пути из БД -> абсолютные URL на нашу статику (/media/...).
     # base_url уже включает схему и хост, поэтому host в БД не хардкодим.
@@ -146,18 +176,97 @@ async def get_exercise_detail(
     return ExerciseDetailResponse(
         id=exercise.id,
         name=exercise.name,
+        localized_names=localized_names(exercise),
         category=exercise.category,
         main_muscle_group=exercise.main_muscle_group,
         secondary_muscle_groups=exercise.secondary_muscle_groups or [],
         equipment_needed=exercise.equipment_needed or [],
         difficulty=exercise.difficulty,
         description=exercise.description,
+        localized_descriptions=localized_descriptions(exercise),
         source=exercise.source,
         video_url=exercise.video_url,
         image_urls=image_urls,
         image_approx=bool(exercise.image_approx),
         note=note,
+        preference=preference,
     )
+
+
+@router.get("/preferences", response_model=list[ExercisePreferenceResponse])
+async def list_exercise_preferences(
+    preference: Optional[str] = Query(None, pattern="^(favorite|disliked)$"),
+    session: AsyncSession = Depends(get_db),
+    app_user: AppUser = Depends(get_current_app_user),
+):
+    stmt = select(UserExercisePreference).where(
+        UserExercisePreference.app_user_id == app_user.id,
+        UserExercisePreference.exercise_id.is_not(None),
+    )
+    if preference:
+        stmt = stmt.where(UserExercisePreference.preference == preference)
+    rows = (await session.execute(stmt.order_by(UserExercisePreference.exercise_name))).scalars().all()
+    exercise_ids = [row.exercise_id for row in rows]
+    exercises = (
+        await session.execute(select(Exercise).where(Exercise.id.in_(exercise_ids)))
+    ).scalars().all() if exercise_ids else []
+    by_id = {exercise.id: exercise for exercise in exercises}
+    return [ExercisePreferenceResponse(
+        exercise_id=row.exercise_id,
+        exercise_name=row.exercise_name,
+        localized_names=(
+            localized_names(by_id[row.exercise_id])
+            if row.exercise_id in by_id else {"ru": row.exercise_name}
+        ),
+        preference=row.preference,
+    ) for row in rows]
+
+
+@router.put("/exercises/{exercise_id}/preference", response_model=ExercisePreferenceResponse)
+async def set_exercise_preference(
+    exercise_id: int,
+    payload: ExercisePreferenceRequest,
+    session: AsyncSession = Depends(get_db),
+    app_user: AppUser = Depends(get_current_app_user),
+):
+    exercise = (await session.execute(
+        get_base_exercise_query(app_user.id).where(Exercise.id == exercise_id)
+    )).scalar_one_or_none()
+    if exercise is None:
+        raise LocalizedHTTPException(404, "exercise.not_found")
+    row = (await session.execute(select(UserExercisePreference).where(
+        UserExercisePreference.app_user_id == app_user.id,
+        UserExercisePreference.exercise_id == exercise_id,
+    ))).scalar_one_or_none()
+    if row is None:
+        row = UserExercisePreference(app_user_id=app_user.id, exercise_id=exercise_id,
+                                     exercise_name=exercise.name, preference=payload.preference)
+        session.add(row)
+    else:
+        row.preference = payload.preference
+        row.exercise_name = exercise.name
+    await session.commit()
+    return ExercisePreferenceResponse(
+        exercise_id=exercise.id,
+        exercise_name=exercise.name,
+        localized_names=localized_names(exercise),
+        preference=payload.preference,
+    )
+
+
+@router.delete("/exercises/{exercise_id}/preference", status_code=status.HTTP_204_NO_CONTENT)
+async def clear_exercise_preference(
+    exercise_id: int,
+    session: AsyncSession = Depends(get_db),
+    app_user: AppUser = Depends(get_current_app_user),
+):
+    row = (await session.execute(select(UserExercisePreference).where(
+        UserExercisePreference.app_user_id == app_user.id,
+        UserExercisePreference.exercise_id == exercise_id,
+    ))).scalar_one_or_none()
+    if row is not None:
+        await session.delete(row)
+        await session.commit()
 
 
 @router.put("/exercises/{exercise_id}/note", response_model=ExerciseNoteResponse)
@@ -172,7 +281,7 @@ async def update_exercise_note(
         get_base_exercise_query(app_user.id).where(Exercise.id == exercise_id)
     )
     if exists.scalar_one_or_none() is None:
-        raise HTTPException(status_code=404, detail="Exercise not found")
+        raise LocalizedHTTPException(404, "exercise.not_found")
 
     note_text = payload.note.strip()
 
@@ -283,7 +392,7 @@ async def get_exercise_history_workout_detail(
     workout = result.scalar_one_or_none()
 
     if workout is None:
-        raise HTTPException(status_code=404, detail="Workout not found")
+        raise LocalizedHTTPException(404, "workout.not_found")
 
     session_exercise = next(
         (item for item in workout.exercises if item.exercise_id == exercise_id),
@@ -291,10 +400,7 @@ async def get_exercise_history_workout_detail(
     )
 
     if session_exercise is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Exercise not found in this workout",
-        )
+        raise LocalizedHTTPException(404, "exercise.not_found_in_workout")
 
     completed_sets = [s for s in session_exercise.sets if s.is_completed]
     total_reps = sum(s.reps or 0 for s in completed_sets)
@@ -306,6 +412,7 @@ async def get_exercise_history_workout_detail(
         source=workout.source,
         exercise_id=session_exercise.exercise.id,
         exercise_name=session_exercise.exercise.name,
+        localized_names=localized_names(session_exercise.exercise),
         sets_count=len(completed_sets),
         total_reps=total_reps,
         total_volume=total_volume,
@@ -330,9 +437,23 @@ async def get_exercise_history_workout_detail(
 )
 async def get_exercise_last_performance(
     exercise_id: int,
+    context_workout_id: Optional[int] = Query(None),
     session: AsyncSession = Depends(get_db),
     app_user: AppUser = Depends(get_current_app_user),
 ):
+    context_workout = None
+    if context_workout_id is not None:
+        context_workout = (
+            await session.execute(
+                select(WorkoutSession).where(
+                    WorkoutSession.id == context_workout_id,
+                    WorkoutSession.app_user_id == app_user.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if context_workout is None:
+            raise LocalizedHTTPException(404, "workout.not_found")
+
     stmt = (
         select(WorkoutSession)
         .join(
@@ -351,6 +472,13 @@ async def get_exercise_last_performance(
         .order_by(WorkoutSession.finished_at.desc())
     )
 
+    # A planned split day must compare against the same day of the split, not
+    # simply the most recent workout that happened to contain the exercise.
+    if context_workout is not None and context_workout.split_day_id is not None:
+        stmt = stmt.where(
+            WorkoutSession.split_day_id == context_workout.split_day_id
+        )
+
     result = await session.execute(stmt)
     workout = result.scalars().first()
 
@@ -363,7 +491,7 @@ async def get_exercise_last_performance(
     )
 
     if session_exercise is None:
-        raise HTTPException(status_code=404, detail="Exercise not found in workout")
+        raise LocalizedHTTPException(404, "exercise.not_found_in_workout")
 
     completed_sets = [s for s in session_exercise.sets if s.is_completed]
 
@@ -373,6 +501,7 @@ async def get_exercise_last_performance(
         source=workout.source,
         exercise_id=session_exercise.exercise.id,
         exercise_name=session_exercise.exercise.name,
+        localized_names=localized_names(session_exercise.exercise),
         sets=[
             ExerciseHistoryWorkoutSetResponse(
                 id=s.id,
@@ -408,6 +537,7 @@ async def search_exercises(
         type=type,
         equipment=equipment,
         recent=recent,
+        language=getattr(user, "_request_language", "ru"),
     )
 
     # Сервис отдаёт либо ORM-объекты (без q), либо dict (ветка ExerciseMatcher).
@@ -421,13 +551,18 @@ async def search_exercises(
             items.append(ExerciseSearchItem(
                 id=it.get("id"),
                 name=it.get("name"),
+                localized_names=localized_names(it),
+                description=it.get("description"),
+                localized_descriptions=localized_descriptions(it),
                 main_muscle_group=it.get("main_muscle_group") or "unknown",
                 secondary_muscle_groups=it.get("secondary_muscle_groups") or [],
                 category=it.get("category") or "base",
+                fatigue_tier=it.get("fatigue_tier") or 2,
                 equipment_needed=it.get("equipment_needed"),
                 source=it.get("source") or "default",
                 image_url=image_url,
                 image_approx=image_approx,
+                preference=it.get("preference"),
             ))
         else:
             image_url, image_approx = _thumb_url(
@@ -436,13 +571,18 @@ async def search_exercises(
             items.append(ExerciseSearchItem(
                 id=it.id,
                 name=it.name,
+                localized_names=localized_names(it),
+                description=it.description,
+                localized_descriptions=localized_descriptions(it),
                 main_muscle_group=it.main_muscle_group,
                 secondary_muscle_groups=it.secondary_muscle_groups or [],
                 category=it.category,
+                fatigue_tier=it.fatigue_tier,
                 equipment_needed=it.equipment_needed,
                 source=it.source,
                 image_url=image_url,
                 image_approx=image_approx,
+                preference=getattr(it, "_user_preference", None),
             ))
     return items
 
@@ -500,12 +640,13 @@ async def get_last_for_context(
 @router.get("/{exercise_id}/alternatives", response_model=List[ExerciseAlternativeResponse])
 async def get_exercise_alternatives(
     exercise_id: int,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    app_user: AppUser = Depends(get_current_app_user),
 ):
     # 1. Находим исходное упражнение
     target_ex = await db.get(Exercise, exercise_id)
     if not target_ex:
-        raise HTTPException(status_code=404, detail="Упражнение не найдено")
+        raise LocalizedHTTPException(404, "exercise.not_found")
 
     # 2. Формируем логику начисления баллов (Scoring Model) прямо в SQL
     score_column = (
@@ -537,8 +678,11 @@ async def get_exercise_alternatives(
     #    осмысленного совпадения, хотя в score их равенство и даёт баллы.
     target_equipment = set(target_ex.equipment_needed or [])
 
+    preferences = await ExerciseSearchService.preference_map(db, app_user.id)
     alternatives = []
     for ex_obj, score in rows:
+        if preferences.get(ex_obj.id) == "disliked":
+            continue
         # Enum'ы наследуют str, поэтому сравнение со строкой "unknown" работает
         # и для enum-инстанса, и для сырой строки — не зависим от десериализации.
         reasons = []
@@ -552,14 +696,18 @@ async def get_exercise_alternatives(
         alt_data = ExerciseAlternativeResponse(
             id=ex_obj.id,
             name=ex_obj.name,
+            localized_names=localized_names(ex_obj),
             main_muscle_group=ex_obj.main_muscle_group,
             equipment_needed=ex_obj.equipment_needed,
+            fatigue_tier=ex_obj.fatigue_tier,
+            secondary_muscle_groups=ex_obj.secondary_muscle_groups or [],
             match_score=score,
             match_reasons=reasons,
+            preference=preferences.get(ex_obj.id),
         )
         alternatives.append(alt_data)
 
-    return alternatives
+    return sorted(alternatives, key=lambda item: (-item.match_score, 0 if item.preference == "favorite" else 1, item.name))
 
 
 @router.post("/sessions/{session_id}/exercises/{session_ex_id}/replace")
@@ -582,12 +730,12 @@ async def replace_session_exercise(
     target_session_ex = result.scalar_one_or_none()
 
     if not target_session_ex:
-        raise HTTPException(status_code=404, detail="Упражнение в сессии не найдено")
+        raise LocalizedHTTPException(404, "exercise.session_not_found")
 
     # 2. Проверяем, существует ли новое упражнение в БД
     new_ex = await db.get(Exercise, payload.new_exercise_id)
     if not new_ex:
-        raise HTTPException(status_code=404, detail="Новое упражнение не найдено в БД")
+        raise LocalizedHTTPException(404, "exercise.replacement_not_found")
 
     # === Защита от дубликатов ===
     duplicate_check = await db.execute(
@@ -597,10 +745,7 @@ async def replace_session_exercise(
         )
     )
     if duplicate_check.scalars().first():
-        raise HTTPException(
-            status_code=400,
-            detail="Это упражнение уже добавлено в текущую тренировку"
-        )
+        raise LocalizedHTTPException(400, "exercise.already_in_workout")
 
     # Запоминаем исходное упражнение ДО подмены — понадобится для замены в плане.
     old_exercise_id = target_session_ex.exercise_id
@@ -749,7 +894,7 @@ async def create_custom_exercise(
             )
         )).scalar_one_or_none()
         if existing:
-            return existing
+            return _custom_exercise_response(existing)
 
     # 1. Защита от дубликатов
     duplicate_stmt = select(Exercise).where(
@@ -758,10 +903,7 @@ async def create_custom_exercise(
     )
     duplicate_result = await db.execute(duplicate_stmt)
     if duplicate_result.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Упражнение с таким названием уже существует в вашем списке."
-        )
+        raise LocalizedHTTPException(status.HTTP_409_CONFLICT, "exercise.name_conflict")
 
     # === УМНАЯ КЛАССИФИКАЦИЯ ===
 
@@ -819,4 +961,4 @@ async def create_custom_exercise(
     await db.commit()
     await db.refresh(new_exercise)
 
-    return new_exercise
+    return _custom_exercise_response(new_exercise)

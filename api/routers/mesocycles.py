@@ -1,24 +1,53 @@
-from fastapi import APIRouter, Depends, status, HTTPException
+from fastapi import APIRouter, Depends, Request, status
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 from uuid import UUID
 from api.deps import get_db
+from api.errors import LocalizedHTTPException
+from api.i18n import resolve_language, tr
 from api.routers.workout_center import build_context
 from api.schemas.mesocycle import MesocycleCreate, UpdateSelectedMesocyclePayload, UpdateMesocyclePhasePayload
 from api.services.app_user_service import get_current_app_user
 from api.services.models import Mesocycle, MesocyclePhase, AppUser, AppUserMesocycle
 from api.services.validator import AntiSuicideValidator
+from api.services.structure.mesocycle_presets import localized_preset_fields
 
 router = APIRouter(prefix="/mesocycles", tags=["Mesocycles"])
 
 
 @router.get("/")
-async def get_mesocycles(db: AsyncSession = Depends(get_db)):
-    """Получить список всех доступных шаблонов мезоциклов."""
-    result = await db.execute(select(Mesocycle))
-    return result.scalars().all()
+async def get_mesocycles(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: AppUser = Depends(get_current_app_user),
+):
+    """Получить системные и принадлежащие текущему пользователю мезоциклы."""
+    result = await db.execute(
+        select(Mesocycle).where(
+            (Mesocycle.author_id.is_(None))
+            | (Mesocycle.author_id == current_user.id)
+        )
+    )
+    language = getattr(
+        request.state,
+        "language",
+        resolve_language(request.headers.get("Accept-Language"), None),
+    )
+    response = []
+    for mesocycle in result.scalars().all():
+        item = jsonable_encoder(mesocycle)
+        item["name"], item["description"] = localized_preset_fields(
+            code=mesocycle.code,
+            stored_name=mesocycle.name,
+            stored_description=mesocycle.description,
+            is_system=mesocycle.author_id is None,
+            language=language,
+        )
+        response.append(item)
+    return response
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
@@ -67,7 +96,7 @@ async def get_mesocycle(mesocycle_id: UUID, db: AsyncSession = Depends(get_db),
     meso = result.scalar_one_or_none()
 
     if not meso:
-        raise HTTPException(status_code=404, detail="Стратегия не найдена")
+        raise LocalizedHTTPException(404, "mesocycle.not_found")
     return meso
 
 
@@ -80,8 +109,8 @@ async def delete_mesocycle(mesocycle_id: UUID, db: AsyncSession = Depends(get_db
     meso = result.scalar_one_or_none()
 
     if not meso:
-        raise HTTPException(status_code=404, detail="Стратегия не найдена")
+        raise LocalizedHTTPException(404, "mesocycle.not_found")
 
     await db.delete(meso)
     await db.commit()
-    return {"status": "success", "message": "Стратегия удалена"}
+    return {"status": "success", "message": tr(getattr(current_user, "_request_language", "en"), "mesocycle.deleted")}

@@ -3,6 +3,12 @@ import logging
 
 from api.schemas.оnboarding import VolumeBudget, MuscleTarget, BudgetMeta, BudgetConstraints
 from api.services.volume_tables import TrainingVolumeTables
+from api.services.volume.landmarks import (
+    SESSION_MAX,
+    SYSTEMIC_CAP_EFF,
+    Landmarks,
+    landmarks_for,
+)
 
 # --- НАСТРОЙКА ЛОГГЕРА ---
 logger = logging.getLogger("volume_calculator")
@@ -13,11 +19,29 @@ if not logger.handlers:
     logger.addHandler(ch)
 # -------------------------
 
-EXPERIENCE_CONSTRAINTS = {
-    "beginner": {"systemic_cap": 70, "session_max": 6},
-    "intermediate": {"systemic_cap": 95, "session_max": 8},
-    "advanced": {"systemic_cap": 120, "session_max": 10}
-}
+# EXPERIENCE_CONSTRAINTS удалён: systemic_cap считал ПРЯМЫЕ подходы, а
+# бюджет с P0-09 живёт в эффективных (measure.INDIRECT_WEIGHT). Оба
+# потолка теперь приходят из landmarks — там же, где лежат границы, под
+# которые они калиброваны.
+
+
+def clamp_target(raw_target: float, lm: Landmarks, cycle_multiplier: float) -> int:
+    """Отмасштабировать сырую цель на длину микроцикла и загнать в диапазон.
+
+    Цель и границы масштабируются ОДНИМ множителем: длинное окно поднимает и
+    законный объём, и потолок, под который он должен помещаться. Раньше
+    множитель применялся только к границам, из-за чего цель, уже лежащая
+    внутри диапазона, не менялась вовсе при смене длины микроцикла.
+
+    Округление ВНИЗ на всех трёх величинах. Для пола это делает требование
+    мягче, для потолка — раньше включает предупреждение; обе стороны
+    консервативны, как и вся таблица landmarks.
+    """
+    scaled = raw_target * cycle_multiplier
+    low = math.floor(lm.mev * cycle_multiplier)
+    high = math.floor(lm.mrv * cycle_multiplier)
+    return int(max(low, min(high, math.floor(scaled))))
+
 
 BASE_VOLUME = {
     "beginner": 10,
@@ -61,7 +85,7 @@ def calculate_volume_budget(
     cycle_multiplier = microcycle_length / 7.0
 
     base_volume_dict = TrainingVolumeTables.get_default_weekly_volume(experience_level)
-    caps = EXPERIENCE_CONSTRAINTS.get(experience_level, EXPERIENCE_CONSTRAINTS["beginner"])
+    session_max = SESSION_MAX.get(experience_level, SESSION_MAX["beginner"])
 
     distribution_type = "specialization" if focus_muscles else "balanced"
 
@@ -91,38 +115,48 @@ def calculate_volume_budget(
         # Сравниваем английский ключ с английским массивом с фронта
         is_focus = system_muscle_key in safe_focus_muscles
 
+        lm = landmarks_for(system_muscle_key, experience_level)
+        if lm is None:
+            # Мышца вне таблицы landmarks: границ нет, судить не по чему.
+            # Молча пропускаем, а не выдумываем диапазон.
+            continue
+
         if base_sets == 0:
-            weekly_targets[system_muscle_key] = MuscleTarget(target_sets=0, min_floor=0, is_focus=is_focus)
+            weekly_targets[system_muscle_key] = MuscleTarget(
+                target_sets=0, min_floor=0, is_focus=is_focus
+            )
             continue
 
         if distribution_type == "balanced":
-            target = base_sets
-            mod_type = "base"
+            raw_target = float(base_sets)
+        elif is_focus:
+            # Фокус-мышца целится в MAV, а не в base * 1.4: прежний
+            # множитель был взят ниоткуда и мог увести цель выше любого
+            # физиологического потолка незамеченным.
+            raw_target = float(lm.mav)
         else:
-            if is_focus:
-                target = base_sets * 1.4  # +40%
-                mod_type = "+40%"
-            else:
-                target = base_sets * 0.85  # -15%
-                mod_type = "-15%"
+            raw_target = base_sets * 0.85
 
-        scaled_target = math.ceil(target * cycle_multiplier)
-        min_floor = math.floor((base_sets * 0.5) * cycle_multiplier)
-        scaled_target = max(scaled_target, min_floor)
+        scaled_target = clamp_target(raw_target, lm, cycle_multiplier)
+        min_floor = math.floor(lm.mev * cycle_multiplier)
 
-        # Выводим подробный лог по каждой мышце
         logger.debug(
-            f"Muscle: {system_muscle_key: <12} | Base: {base_sets: <2} | is_focus: {str(is_focus): <5} | Mod: {mod_type: <5} | Raw Target: {target:.2f} -> Ceil: {scaled_target}")
+            f"Muscle: {system_muscle_key: <12} | Base: {base_sets: <2} | "
+            f"focus: {str(is_focus): <5} | raw {raw_target:.2f} -> {scaled_target} "
+            f"| range [{lm.mev}, {lm.mrv}]"
+        )
 
-        # Сохраняем в JSON под английским ключом
         weekly_targets[system_muscle_key] = MuscleTarget(
             target_sets=scaled_target,
             min_floor=min_floor,
-            is_focus=is_focus
+            is_focus=is_focus,
         )
         total_sets += scaled_target
 
-    systemic_cap = math.ceil(caps["systemic_cap"] * cycle_multiplier)
+    systemic_cap = math.ceil(
+        SYSTEMIC_CAP_EFF.get(experience_level, SYSTEMIC_CAP_EFF["beginner"])
+        * cycle_multiplier
+    )
     logger.info(f"TOTAL SETS BEFORE CAP: {total_sets} | Systemic Cap for '{experience_level}': {systemic_cap}")
 
     if total_sets > systemic_cap:
@@ -160,7 +194,7 @@ def calculate_volume_budget(
         ),
         constraints=BudgetConstraints(
             systemic_cap_per_week=systemic_cap,
-            max_sets_per_session_per_muscle=caps["session_max"]
+            max_sets_per_session_per_muscle=session_max
         ),
         weekly_targets=weekly_targets
     )

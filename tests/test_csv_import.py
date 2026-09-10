@@ -162,6 +162,13 @@ def test_skips_rows_and_reports_them():
     assert "пустое название" in reasons
     assert "пустая дата" in reasons
     assert "не распознана дата" in reasons
+    assert {s.reason_key for s in r.skipped} == {
+        "data.import.row.cardio",
+        "data.import.row.invalid_set_order",
+        "data.import.row.empty_exercise",
+        "data.import.row.empty_date",
+        "data.import.row.invalid_date",
+    }
 
 
 def test_bom_is_stripped():

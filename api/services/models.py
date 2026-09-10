@@ -3,7 +3,7 @@ from datetime import datetime, UTC, date as date_type, time as time_type, date
 from typing import Optional, List, Dict, Any
 from sqlalchemy import (
     Column, Integer, String, ForeignKey, DateTime, Float, Boolean, Text,
-    func, Index, BigInteger, UniqueConstraint, Time, Date, CheckConstraint, Numeric, Enum, UUID
+    func, Index, BigInteger, UniqueConstraint, Time, Date, CheckConstraint, Numeric, Enum, UUID, CHAR, text
 )
 from sqlalchemy.dialects.postgresql import JSONB, ARRAY
 from sqlalchemy.orm import relationship, declarative_base, mapped_column, Mapped
@@ -14,6 +14,160 @@ from api.services.mesocycle_phase import MesocyclePhaseEnum
 from api.services.scheduling import SchedulingMode, WorkoutStatus, MesocyclePhase
 
 Base = declarative_base()
+
+
+class AppReleaseLane(Base):
+    """The CI target ledger for one platform and delivery channel."""
+
+    __tablename__ = "app_release_lanes"
+
+    platform: Mapped[str] = mapped_column(String(16), primary_key=True)
+    channel: Mapped[str] = mapped_column(String(32), primary_key=True)
+    expected_source_commit: Mapped[str] = mapped_column(CHAR(40), nullable=False)
+    expected_ci_run_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("platform = 'android'", name="ck_app_release_lanes_platform"),
+        CheckConstraint(
+            "channel IN ('production-direct', 'production-play')",
+            name="ck_app_release_lanes_channel",
+        ),
+        CheckConstraint(
+            "expected_source_commit::text ~ '^[0-9a-f]{40}$'",
+            name="ck_app_release_lanes_expected_source_commit",
+        ),
+    )
+
+
+class AppRelease(Base):
+    """Immutable published-release metadata, including delivery-specific payloads."""
+
+    __tablename__ = "app_releases"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    platform: Mapped[str] = mapped_column(String(16), nullable=False)
+    channel: Mapped[str] = mapped_column(String(32), nullable=False)
+    delivery_method: Mapped[str] = mapped_column(String(24), nullable=False)
+    version_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    version_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    runtime_version: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    fingerprint: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    release_notes: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="published", server_default="published"
+    )
+    is_mandatory: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    min_supported_version_code: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    artifact_storage_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    artifact_sha256: Mapped[Optional[str]] = mapped_column(CHAR(64), nullable=True)
+    artifact_size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    source_commit: Mapped[str] = mapped_column(CHAR(40), nullable=False)
+    ci_run_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    eas_build_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    eas_update_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    eas_update_group_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    published_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    withdrawn_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    withdrawal_reason: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    mandatory_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    artifact_deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_app_releases_idempotency_key"),
+        UniqueConstraint("eas_update_id", name="uq_app_releases_eas_update_id"),
+        UniqueConstraint("eas_update_group_id", name="uq_app_releases_eas_update_group_id"),
+        CheckConstraint("platform = 'android'", name="ck_app_releases_platform"),
+        CheckConstraint(
+            "channel IN ('production-direct', 'production-play')",
+            name="ck_app_releases_channel",
+        ),
+        CheckConstraint(
+            "delivery_method IN ('direct_apk', 'eas_update', 'google_play')",
+            name="ck_app_releases_delivery_method",
+        ),
+        CheckConstraint("version_code > 0", name="ck_app_releases_version_code_positive"),
+        CheckConstraint(
+            "version_name ~ '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$'",
+            name="ck_app_releases_version_name",
+        ),
+        CheckConstraint(
+            "min_supported_version_code IS NULL OR min_supported_version_code <= version_code",
+            name="ck_app_releases_min_supported_version",
+        ),
+        CheckConstraint(
+            "artifact_sha256 IS NULL OR artifact_sha256::text ~ '^[0-9a-f]{64}$'",
+            name="ck_app_releases_artifact_sha256",
+        ),
+        CheckConstraint(
+            "source_commit::text ~ '^[0-9a-f]{40}$'",
+            name="ck_app_releases_source_commit",
+        ),
+        CheckConstraint(
+            "release_notes ? 'ru' AND release_notes ? 'en' "
+            "AND jsonb_typeof(release_notes) = 'object' "
+            "AND jsonb_typeof(release_notes->'ru') = 'string' "
+            "AND btrim(release_notes->>'ru') <> '' "
+            "AND jsonb_typeof(release_notes->'en') = 'string' "
+            "AND btrim(release_notes->>'en') <> ''",
+            name="ck_app_releases_release_notes",
+        ),
+        CheckConstraint(
+            "(delivery_method = 'direct_apk' AND artifact_storage_key IS NOT NULL "
+            "AND artifact_sha256 IS NOT NULL AND artifact_size_bytes > 0) OR "
+            "(delivery_method = 'eas_update' AND eas_update_group_id IS NOT NULL "
+            "AND runtime_version IS NOT NULL AND artifact_storage_key IS NULL) OR "
+            "(delivery_method = 'google_play' AND artifact_storage_key IS NULL)",
+            name="ck_app_releases_delivery_payload",
+        ),
+        CheckConstraint(
+            "delivery_method = 'direct_apk' OR "
+            "(artifact_sha256 IS NULL AND artifact_size_bytes IS NULL)",
+            name="ck_app_releases_non_apk_artifact_fields",
+        ),
+        CheckConstraint(
+            "delivery_method = 'eas_update' OR eas_update_id IS NULL",
+            name="ck_app_releases_eas_update_id_delivery",
+        ),
+        CheckConstraint(
+            "status IN ('published', 'withdrawn')",
+            name="ck_app_releases_status",
+        ),
+        CheckConstraint(
+            "(status = 'published' AND withdrawn_at IS NULL AND withdrawal_reason IS NULL) OR "
+            "(status = 'withdrawn' AND withdrawn_at IS NOT NULL AND withdrawal_reason IS NOT NULL)",
+            name="ck_app_releases_withdrawal_state",
+        ),
+        Index(
+            "uq_app_releases_direct_version",
+            "platform",
+            "channel",
+            "version_code",
+            unique=True,
+            postgresql_where=text("delivery_method = 'direct_apk'"),
+        ),
+        Index(
+            "ix_app_releases_latest_published",
+            "platform",
+            "channel",
+            text("version_code DESC"),
+            text("published_at DESC"),
+            postgresql_where=text("status = 'published'"),
+        ),
+    )
 
 
 # --- ЯДРО ПОЛЬЗОВАТЕЛЕЙ ---
@@ -115,6 +269,7 @@ class Exercise(Base):
     __tablename__ = 'exercises'
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(200), unique=True, index=True, nullable=False)
+    name_en: Mapped[Optional[str]] = mapped_column(String(200), nullable=True, index=True)
     category: Mapped[str] = mapped_column(String(50), nullable=False)
     fatigue_tier: Mapped[int] = mapped_column(Integer, default=2, server_default='2', nullable=False)
     main_muscle_group: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -122,6 +277,7 @@ class Exercise(Base):
     equipment_needed: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     difficulty: Mapped[str] = mapped_column(String(20), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text)
+    description_en: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     source: Mapped[str] = mapped_column(String(20), default='default')
     # Идемпотентный ключ offline-создания кастомного упражнения (дедуп повтора).
     client_uuid: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
@@ -299,6 +455,18 @@ class WorkoutSession(Base):
     app_user_mesocycle_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("app_user_mesocycles.id", ondelete="SET NULL")
     )
+    # P0-08: снимок фаз живёт в блоке, поэтому резолв effort_tier идёт через него.
+    training_block_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("training_blocks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # P0-09: плановый день, к которому сессия ОТНОСИТСЯ по намерению
+    # пользователя. Фиксируется при старте, когда намерение достоверно
+    # известно. Обратная ссылка UserCalendarDay.actual_workout_session_id —
+    # это ФАКТ, проставляемый при завершении; поля значат разное и нужны оба.
+    calendar_day_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("user_calendar.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
     mesocycle_phase: Mapped[Optional[int]] = mapped_column()
     app_user_microcycle_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("app_user_microcycles.id",
                                                                                       ondelete="SET NULL"),
@@ -368,6 +536,12 @@ class WorkoutSessionExercise(Base):
     # значение не переписывается ни пересчётом, ни merge при синхронизации —
     # иначе evaluate() сравнит факт с целью, которой пользователь не видел.
     prescription: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    # P0-11: что показывалось пользователю ПО ФАКТУ, после внутрисессионной
+    # петли. В отличие от prescription (write-once — «что обещали на
+    # старте») перезаписывается после каждого завершённого подхода.
+    # Разделение обязательно: evaluate() должен сравнивать факт с целью,
+    # которую человек видел, а write-once не даёт эту цель обновить.
+    live_prescription: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     target_sets: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(
@@ -397,6 +571,15 @@ class WorkoutSessionSet(Base):
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     effort_level: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     is_completed: Mapped[bool] = mapped_column(default=True, server_default="true")
+    # P1-14: подход на максимум повторов. Ортогонально set_type намеренно:
+    # set_type описывает РОЛЬ подхода (разминка / рабочий / дроп), а это —
+    # его РЕЖИМ, и дроп-подход тоже бывает до максимума. Значение 'amrap'
+    # в set_type прошло бы молча сквозь фильтры set_type == 'normal' по
+    # всему проекту, и max-reps-подход выпал бы из расчёта рекордов —
+    # ровно наоборот тому, зачем флаг вводится.
+    is_max_reps: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     # Подход с неправдоподобными значениями. Остаётся видимым в истории, но
     # исключается из автопрогрессии, прогноза, бюджета объёма и усталостной
     # модели — один жим «500 кг» иначе отравляет аналитику на месяц вперёд.
@@ -585,6 +768,11 @@ class UserGoal(Base):
     metric_key: Mapped[Optional[str]] = mapped_column(String(30))
     deadline: Mapped[Optional[date_type]] = mapped_column(Date)
     is_completed: Mapped[bool] = mapped_column(default=False, server_default='false')
+    # P0-12: ведущая цель — та, которую обслуживает автопилот. Одна на
+    # пользователя; уникальность держит частичный индекс
+    # uq_user_goals_primary (app/database.py, _SYNC_INDEXES): init_db не
+    # создаёт ограничений для ALTER-колонок.
+    is_primary: Mapped[bool] = mapped_column(default=False, server_default='false')
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     app_user: Mapped["AppUser"] = relationship('AppUser', back_populates='goals')
@@ -610,8 +798,8 @@ class UserRecord(Base):
     __tablename__ = 'user_records'
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     app_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('app_users.id', ondelete='CASCADE'), nullable=False)
-    exercise_id: Mapped[Optional[int]] = mapped_column(ForeignKey('exercises.id'))
-    user_exercise_id: Mapped[Optional[int]] = mapped_column(ForeignKey('user_exercises.id'))
+    exercise_id: Mapped[Optional[int]] = mapped_column(ForeignKey('exercises.id', ondelete='CASCADE'))
+    user_exercise_id: Mapped[Optional[int]] = mapped_column(ForeignKey('user_exercises.id', ondelete='CASCADE'))
     exercise_name: Mapped[str] = mapped_column(String(200), nullable=False)
     record_type: Mapped[str] = mapped_column(nullable=False)  # max_weight, max_reps
     value: Mapped[float] = mapped_column(nullable=False)
@@ -637,6 +825,8 @@ class UserExercisePreference(Base):
     user_exercise: Mapped[Optional["UserExercise"]] = relationship("UserExercise", back_populates="user_preferences")
 
     __table_args__ = (
+        CheckConstraint("preference IN ('favorite', 'disliked')", name='ck_exercise_preference_value'),
+        CheckConstraint('(exercise_id IS NOT NULL) <> (user_exercise_id IS NOT NULL)', name='ck_exercise_preference_target'),
         UniqueConstraint('app_user_id', 'exercise_id', name='unique_user_exercise_pref_ex'),
         UniqueConstraint('app_user_id', 'user_exercise_id', name='unique_user_exercise_pref_user_ex'),
     )
@@ -662,9 +852,12 @@ class UserExerciseNote(Base):
 class UserExerciseProgressionState(Base):
     """Кэш состояния прогрессии по упражнению.
 
-    СТРОГО ПРОИЗВОДНАЯ таблица: всё содержимое восстанавливается функцией
-    progression.state.rebuild_state(). Расхождение чинится пересчётом, а не
-    ручным фиксом; при бампе engine_version состояние не мигрируется.
+    СТРОГО ПРОИЗВОДНАЯ таблица: всё содержимое восстановимо из истории.
+    Восстанавливают её две функции: progression.state.rebuild_state() —
+    всё, кроме records, и progression.records_repository.rebuild_records()
+    — колонку records (см. комментарий у неё: разные источники данных, а
+    не разные стили). Расхождение чинится пересчётом, а не ручным фиксом;
+    при бампе engine_version состояние не мигрируется.
     """
 
     __tablename__ = "user_exercise_progression_state"
@@ -693,6 +886,13 @@ class UserExerciseProgressionState(Base):
     # Предварительное предписание на следующий раз: контекст будущей
     # тренировки неизвестен, поэтому считается по tier_fallback и текущей фазе.
     next_prescription: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+
+    # P1-14: личные рекорды по упражнению. Тоже производная, но НЕ от
+    # rebuild_state(): та работает по окну HISTORY_LIMIT=12 сессий, а
+    # рекорд «за всё время» из окна не выводится — результат двухлетней
+    # давности выпал бы и сработал повторно. Пересчёт — rebuild_records()
+    # по сырым подходам.
+    records: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     recomputed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -925,6 +1125,7 @@ class AppUserMicrocycle(Base):
 
     __table_args__ = (
         CheckConstraint("length_days > 0", name="ck_microcycles_length_positive"),
+        UniqueConstraint("app_user_id", "name", name="uq_app_user_microcycle_name"),
     )
 
 
@@ -958,6 +1159,11 @@ class UserCalendarDay(Base):
     plan_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("workout_plans.id", ondelete="SET NULL"),
                                                    nullable=True)
 
+    # P0-08: координата блока. SET NULL — удаление блока не должно уносить дни.
+    block_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("training_blocks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
     is_rest_day: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     is_blackout: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
@@ -967,4 +1173,319 @@ class UserCalendarDay(Base):
     # Фактически залогированная сессия (появится после завершения тренировки)
     actual_workout_session_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
+    # P0-09: принятые пользователем правки предписания на этот день.
+    # Список {exercise_id, delta_sets, proposal_id}.
+    #
+    # Правка живёт НА ДНЕ, а не в WorkoutPlanExercise, потому что
+    # UserCalendarDay.plan_id указывает на ПЕРЕИСПОЛЬЗУЕМЫЙ шаблон:
+    # SchedulingEngine._score_and_find_best_plan сажает один и тот же план
+    # на все подходящие дни, и правка target_sets в плане изменила бы
+    # каждый такой день навсегда.
+    volume_adjustments: Mapped[Optional[list]] = mapped_column(
+        JSONB, nullable=True
+    )
+
     plan = relationship("WorkoutPlan", lazy="noload")
+
+
+class TrainingBlock(Base):
+    """Материализованный тренировочный блок (P0-08).
+
+    phases — СНИМОК фаз мезоцикла, а не ссылка на шаблон: правка шаблона не
+    переписывает историю, а досрочная разгрузка вставляется сюда, не трогая
+    многоразовый шаблон. Порядок фаз — порядок элементов списка;
+    phase_number внутри элемента — СТАБИЛЬНЫЙ идентификатор, который никогда
+    не перенумеровывается (на него ссылается WorkoutSession.mesocycle_phase
+    уже завершённых сессий).
+    """
+    __tablename__ = "training_blocks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    block_index: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    user_mesocycle_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("app_user_mesocycles.id", ondelete="SET NULL"), nullable=True
+    )
+    # SET NULL, а не CASCADE: DELETE /mesocycles/{id} не должен уносить историю блоков.
+    mesocycle_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("mesocycles.id", ondelete="SET NULL"), nullable=True
+    )
+    phases: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    # Positive proof for persisted human-readable phase labels.  Legacy rows
+    # default to untrusted because ON DELETE may already have erased both
+    # source FKs; authenticated creation sets this explicitly, including for
+    # intentionally generic blocks.
+    phase_snapshot_trusted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+
+    user_microcycle_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("app_user_microcycles.id", ondelete="SET NULL"), nullable=True
+    )
+    microcycle_length: Mapped[int] = mapped_column(Integer, nullable=False)
+    split_blueprint_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    planned_end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    actual_end_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", server_default="active")
+    close_reason: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+
+    entry_state: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    exit_state: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class VolumeWindow(Base):
+    """Снимок ЗАКРЫТОГО окна объёма (P0-09).
+
+    Открытые окна здесь не лежат: они меняются после каждого подхода, и
+    кэшировать нечего. Строка создаётся один раз, при закрытии микроцикла.
+
+    landmarks — СНИМОК границ, действовавших на момент закрытия. Таблица
+    объявлена калибруемой, и после её правки решение, принятое по старым
+    границам, обязано остаться объяснимым: без снимка экран итогов задним
+    числом показал бы превышение, которого в тот момент не было.
+    """
+    __tablename__ = "volume_windows"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("app_users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    block_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("training_blocks.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+
+    window_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    phase_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    start_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+
+    # По мышце: {target, prescribed, performed_direct, performed_indirect}.
+    # Каналы факта раздельно, а не эффективной суммой: отношение к
+    # превышению прямого объёма жёстче, и без состава этого не выразить.
+    muscles: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    adherence: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    landmarks: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class UserExerciseRepOverride(Base):
+    """Персональный диапазон повторов на упражнение (P0-08, структурная правка).
+
+    Приоритет источника: plan_override > user_override > microcycle > fallback.
+    Выше микроцикла, потому что это осознанный ответ пользователя на плато
+    конкретного упражнения; ниже плана, потому что план задаётся под конкретный
+    день и остаётся последним словом.
+
+    Уникальность пары (app_user_id, exercise_id) держится индексом
+    uq_user_exercise_rep_overrides_user_exercise (app/database.py, _SYNC_INDEXES) —
+    init_db не создаёт ограничения на ALTER-колонки, поэтому индекс заведён
+    отдельно, тем же способом, что и uq_periodization_proposals_pending.
+    """
+    __tablename__ = "user_exercise_rep_overrides"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    exercise_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    rep_min: Mapped[int] = mapped_column(Integer, nullable=False)
+    rep_max: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PeriodizationProposal(Base):
+    """Решение движка, ожидающее подтверждения пользователя (P0-08).
+
+    Отдельная таблица, а не поле блока: структурных предложений на границе
+    бывает несколько, они обязаны переживать перезапуск и приезжать на другое
+    устройство, а состояние expired («пользователь ничего не сделал, идём по
+    плану») где-то надо хранить.
+    """
+    __tablename__ = "periodization_proposals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    block_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("training_blocks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(48), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", server_default="pending")
+    client_uuid: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    decided_action: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AppNotification(Base):
+    """Durable event shown in the in-app notification centre.
+
+    The row is the source of truth. Push notifications are only a transport and
+    will reference this entity when that layer is added.
+    """
+
+    __tablename__ = "app_notifications"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("app_users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    entity_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    entity_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    title: Mapped[str] = mapped_column(String(160), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    message_key: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    message_params: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    payload: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    dedupe_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    read_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "app_user_id",
+            "dedupe_key",
+            name="uq_app_notifications_user_dedupe",
+        ),
+        Index(
+            "ix_app_notifications_user_created",
+            "app_user_id",
+            "created_at",
+            "id",
+        ),
+    )
+
+
+class PeriodReport(Base):
+    """Неизменный снапшот отчёта за закрытый период.
+
+    Не пересчитывается ни при правке старой тренировки, ни при выкатке новых
+    правил: иначе история отчётов перестаёт быть историей — вернувшись к
+    июньскому отчёту, человек увидел бы другие цифры. Актуальный пересчёт
+    живёт на вкладке Прогресс, это разные инструменты.
+    """
+
+    __tablename__ = "period_reports"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    period_type: Mapped[str] = mapped_column(String(8), nullable=False)
+    period_start: Mapped[date_type] = mapped_column(Date, nullable=False)
+    period_end: Mapped[date_type] = mapped_column(Date, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    # Версия набора правил на момент генерации. Записывается, но задним
+    # числом ничего не переписывает — по ней видно, какой логикой собран
+    # старый отчёт.
+    rules_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    shape_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )
+    seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "app_user_id", "period_type", "period_start",
+            name="uq_period_reports_user_type_start",
+        ),
+    )
+
+
+class PushDevice(Base):
+    """One physical app installation registered for Expo push delivery."""
+
+    __tablename__ = "push_devices"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    app_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    installation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    expo_push_token: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    platform: Mapped[str] = mapped_column(String(16), nullable=False)
+    timezone_offset_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    push_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    disabled_event_types: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    # P1-06: id каналов Android, сообщённые самим устройством. Параметры
+    # канала неизменяемы после создания, поэтому смена важности требует
+    # НОВОГО id — и сервер не имеет права его хардкодить, иначе обновившись
+    # раньше клиента отправит пуш в несуществующий канал. NULL = сборка до
+    # P1-06, ей шлём LEGACY_CHANNEL_ID.
+    notification_channel_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    quiet_channel_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    disabled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_registered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("app_user_id", "installation_id", name="uq_push_devices_user_installation"),
+    )
+
+
+class PushDelivery(Base):
+    """Durable delivery state for one notification on one device."""
+
+    __tablename__ = "push_deliveries"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    notification_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("app_notifications.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    device_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("push_devices.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending", server_default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    expo_ticket_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )
+    sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    receipt_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("notification_id", "device_id", name="uq_push_delivery_notification_device"),
+    )

@@ -42,6 +42,42 @@ def _previous_reps(ctx: SchemeContext) -> list[int]:
     return []
 
 
+def _last_prescribed_rep_max(ctx: SchemeContext) -> Optional[int]:
+    """Верх диапазона, ПРЕДПИСАННЫЙ на сессию, из которой _previous_reps
+    берёт факты подходов, — та же самая сессия (первая сверху вниз по
+    истории с валидными данными), что и там.
+
+    Находка 1 ревью Задачи 12 (P0-08): персональный сдвиг диапазона повторов
+    меняет ctx.rep_max ОДНОНАПРАВЛЕННО и НАВСЕГДА, между сессиями. Если
+    сравнивать факт ПРОШЛОЙ сессии с диапазоном, который сдвинулся уже
+    ПОСЛЕ неё (ctx.rep_max — это диапазон СЕГОДНЯШНИЙ), вчерашний рядовой
+    подход задним числом читается как «взят потолок»: пользователь сузил
+    диапазон именно потому, что стало тяжело (например 8-12 -> 5-9 после
+    плато), а на следующей тренировке движок видит прошлые 10/10/9 >= 9 и
+    ПОВЫШАЕТ вес — прямо противоположно тому, что означало решение
+    пользователя. Порог обязан браться из истории, а не из текущего
+    контекста — единообразно с _last_session_completed в fixed_increment.py
+    и с evaluate() (state.py), который тоже читает пороги из сохранённого
+    прескрипшена сессии, а не пересчитывает их заново.
+
+    Возвращает None, если у найденной сессии нет валидного предписания с
+    единым явным верхом диапазона (легаси-логи, бутстрап, смешанные/AMRAP
+    подходы без rep_max) — тогда вызывающий код деградирует к ctx.rep_max,
+    как было до персональных сдвигов.
+    """
+    for session in ctx.history.sessions:
+        usable = [s for s in working_sets(session.sets, require_weight=False) if not s.is_anomalous]
+        if not usable:
+            continue
+        if session.prescription is None or not session.prescription.sets:
+            return None
+        rep_maxes = {sp.rep_max for sp in session.prescription.sets if sp.rep_max is not None}
+        if len(rep_maxes) != 1:
+            return None
+        return rep_maxes.pop()
+    return None
+
+
 def _previous_weight(ctx: SchemeContext) -> Optional[float]:
     """Последний рабочий вес. Здесь working_sets() уместна: ищем именно вес,
     и его отсутствие — законный повод пропустить подход при поиске якоря."""
@@ -107,7 +143,12 @@ def plan(ctx: SchemeContext) -> Prescription:
             basis={"anchor_weight": anchor},
         )
 
-    ceiling_reached = all(reps >= ctx.rep_max for reps in previous)
+    # Находка 1: сравниваем факт с потолком, ПРЕДПИСАННЫМ на ту самую
+    # сессию, а не с ctx.rep_max сегодняшнего дня — см. докстринг
+    # _last_prescribed_rep_max выше за подробное объяснение.
+    prior_ceiling = _last_prescribed_rep_max(ctx)
+    ceiling = prior_ceiling if prior_ceiling is not None else ctx.rep_max
+    ceiling_reached = all(reps >= ceiling for reps in previous)
 
     if ceiling_reached and not external:
         # Свой вес без отягощения: расти дальше нечем, говорим об этом прямо.

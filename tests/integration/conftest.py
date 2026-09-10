@@ -17,19 +17,24 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest_asyncio
-from fastapi import Depends
+from fastapi import Depends, Request
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# TEST_DATABASE_URL имеет приоритет; иначе используем обычный DATABASE_URL.
-if os.getenv("TEST_DATABASE_URL"):
-    os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
+# Validate every integration invocation before importing api.main/app.database.
+# There is deliberately no DATABASE_URL fallback and no argv/filename branch.
+from tests.integration.database_test_guard import (  # noqa: E402
+    require_disposable_integration_database,
+)
+
+os.environ["DATABASE_URL"] = require_disposable_integration_database()
 
 from api.main import app  # noqa: E402
 from api.services.app_user_service import (  # noqa: E402
     get_current_app_user,
     get_current_app_user_allow_pending,
+    set_request_language,
 )
 from api.services.models import (  # noqa: E402
     AppUser,
@@ -37,6 +42,7 @@ from api.services.models import (  # noqa: E402
     Exercise,
     Mesocycle,
     MesocyclePhase,
+    UserRecord,
     WorkoutPlan,
     WorkoutPlanExercise,
     WorkoutSession,
@@ -124,6 +130,13 @@ async def test_user():
                 delete(WorkoutSession).where(WorkoutSession.id.in_(workout_ids))
             )
 
+        # user_records.exercise_id → exercises в реальной БД — NO ACTION (модель
+        # объявляет CASCADE, но init_db не умеет ALTER-ить существующие FK —
+        # см. memory/backend-schema-create-all.md), поэтому сносим записи явно,
+        # иначе удаление Exercise падает с ForeignKeyViolationError.
+        await session.execute(
+            delete(UserRecord).where(UserRecord.app_user_id == user_id)
+        )
         await session.execute(
             delete(Exercise).where(Exercise.app_user_id == user_id)
         )
@@ -142,12 +155,17 @@ async def client(test_user: AppUser):
     """
 
     async def _current_user_allow_pending(
+        request: Request,
         db: AsyncSession = Depends(get_db),
     ) -> AppUser:
         # Именно из СЕССИИ ЗАПРОСА: эндпоинты /account мутируют пользователя и
         # коммитят через тот же db. Отсоединённый объект молча не сохранился бы.
         fresh = await db.get(AppUser, test_user.id)
-        return fresh if fresh is not None else test_user
+        app_user = fresh if fresh is not None else test_user
+        # Match the production dependency contract: localized routes consume
+        # both request.state.language and the user-side convenience value.
+        await set_request_language(request, db, app_user)
+        return app_user
 
     async def _current_user(
         app_user: AppUser = Depends(_current_user_allow_pending),
@@ -168,6 +186,71 @@ async def client(test_user: AppUser):
 async def db():
     async with SessionLocal() as session:
         yield session
+
+
+@pytest_asyncio.fixture
+async def active_block(db: AsyncSession, test_user: AppUser):
+    """Минимальный активный блок для тестов перегенерации (P0-09, Задача 6).
+
+    Несёт при себе минимальный активный сплит из двух дней (Push/Pull).
+    Без него SchedulingEngine.generate_block_days видит пустую slots_queue
+    и не кладёт в календарь ни одной строки (см. её ранний `if not
+    slots_queue: return 0`) — тесты, которые перегенерируют календарь
+    поверх этого блока (P0-09, Задача 6, ревью, Находка 3), иначе работали
+    бы над пустым диапазоном и ничего бы не проверяли. Два разных дня, а не
+    один, чтобы сдвиг раскладки при пропуске уцелевшей даты был виден и по
+    day_tag, а не только по счётчику микроцикла.
+    """
+    from datetime import timedelta
+
+    from api.services.day_template import DayTemplateType
+    from api.services.models import (
+        DayBlueprint,
+        DayMuscleTarget,
+        SplitBlueprint,
+        SplitDaySlot,
+        TrainingBlock,
+        UserSplit,
+    )
+    from api.services.volume.repository import utc_today
+
+    block = TrainingBlock(
+        phase_snapshot_trusted=True,
+        app_user_id=test_user.id,
+        block_index=1,
+        phases=[{"phase_number": 1, "name": "medium", "effort_tier": "medium", "length_days": 7}],
+        microcycle_length=7,
+        start_date=utc_today() - timedelta(days=3),
+        planned_end_date=utc_today() + timedelta(days=10),
+        status="active",
+    )
+    db.add(block)
+
+    blueprint = SplitBlueprint(
+        name="Тестовый сплит Push/Pull", author_id=test_user.id, length_days=2, is_system=False,
+    )
+    day_push = DayBlueprint(
+        name="Push", author_id=test_user.id, template_type=DayTemplateType.PUSH, is_system=False,
+    )
+    day_pull = DayBlueprint(
+        name="Pull", author_id=test_user.id, template_type=DayTemplateType.PULL, is_system=False,
+    )
+    db.add_all([blueprint, day_push, day_pull])
+    await db.flush()
+    db.add(DayMuscleTarget(day_id=day_push.id, muscle_group_id="chest"))
+    db.add(DayMuscleTarget(day_id=day_pull.id, muscle_group_id="back"))
+    db.add(SplitDaySlot(blueprint_id=blueprint.id, day_id=day_push.id, day_order=0))
+    db.add(SplitDaySlot(blueprint_id=blueprint.id, day_id=day_pull.id, day_order=1))
+    db.add(
+        UserSplit(
+            app_user_id=test_user.id, blueprint_id=blueprint.id, is_active=True, current_day=1,
+            selected_plans={},
+        )
+    )
+
+    await db.commit()
+    await db.refresh(block)
+    yield block
 
 
 # --- Фикстуры для тестов жизненного цикла движка прогрессии (P0-06, Задача 14) ---

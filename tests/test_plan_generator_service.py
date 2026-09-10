@@ -35,3 +35,16 @@ def test_build_day_passes_validator_hard_cap():
                     SelectionConfig(seed=1))
     total_chest = sum(e.sets for e in day.exercises if e.primary_muscle == "Грудь")
     assert total_chest <= 6
+
+
+def test_build_day_trims_over_cap_instead_of_blocking_generation():
+    pool = [ex(i, "Грудь") for i in range(1, 7)]
+    day = build_day(
+        "push", "Push", {"chest": 8}, pool, None, [], "beginner",
+        SelectionConfig(seed=1, accent_muscles=("chest",)),
+    )
+
+    total_chest = sum(e.sets for e in day.exercises if e.primary_muscle == "Грудь")
+    assert total_chest == 6
+    assert day.coverage["chest"] == {"target": 6, "filled": 6}
+    assert any("урезан" in warning and "6" in warning for warning in day.warnings)

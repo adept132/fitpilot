@@ -3,10 +3,15 @@ import re
 from typing import Dict, List, Tuple
 from difflib import SequenceMatcher
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import and_, or_
 
 from api.services.exercise_utils import get_base_exercise_query
+from api.services.exercise_localization import sort_exercises
 from api.services.models import Exercise, UserExercise
+
+
+MATCH_CANDIDATE_SCAN_LIMIT = 1500
+DEFAULT_MATCH_RESULT_LIMIT = 5
 
 
 class ExerciseMatcher:
@@ -17,7 +22,9 @@ class ExerciseMatcher:
             session: AsyncSession,
             user_id: int,
             exercise_name: str,
-            min_similarity: float = 0.4  # СНИЖЕН по умолчанию для лучшего fuzzy
+            min_similarity: float = 0.4,  # СНИЖЕН по умолчанию для лучшего fuzzy
+            language: str = "ru",
+            candidate_limit: int | None = DEFAULT_MATCH_RESULT_LIMIT,
     ) -> Tuple[Dict, List[Dict]]:
         """
         Находит существующие упражнения или возвращает варианты.
@@ -40,22 +47,28 @@ class ExerciseMatcher:
 
         if all_matches:
             all_matches = list({m['id']: m for m in all_matches}.values())
-            # Сортируем по похожести
-            all_matches.sort(key=lambda x: x.get('similarity', 0), reverse=True)
+            all_matches = sort_exercises(
+                all_matches, language, by_similarity=True
+            )
 
             # УЛУЧШЕННАЯ ЛОГИКА: выбираем лучший, даже если чуть ниже порога
             if all_matches:
                 best_match = all_matches[0]
+                candidates = (
+                    all_matches
+                    if candidate_limit is None
+                    else all_matches[:candidate_limit]
+                )
                 # Если лучший > порога/2, выбираем его (адаптивно понижаем)
                 if best_match['similarity'] >= min_similarity * 0.5:  # Более мягкий threshold
-                    return best_match, all_matches[:5]
+                    return best_match, candidates
                 else:
                     # Если есть варианты выше 0.5, возвращаем топ-1
                     filtered = [m for m in all_matches if m['similarity'] >= 0.5]
                     if filtered:
-                        return filtered[0], all_matches[:5]
+                        return filtered[0], candidates
 
-            return None, all_matches[:5]  # Возвращаем варианты для выбора пользователем
+            return None, candidates  # Возвращаем варианты для выбора пользователем
 
         # 4. Если ничего не нашли, НЕ создаем новое — пусть обрабатывает вызывающий код
         return None, []
@@ -71,27 +84,15 @@ class ExerciseMatcher:
 
         # Один запрос вместо двух
         stmt = get_base_exercise_query(user_id).where(
-            Exercise.name.ilike(f"%{normalized_exercise_name}%")
-        )
+            ExerciseMatcher._exact_name_clause(normalized_exercise_name)
+        ).limit(MATCH_CANDIDATE_SCAN_LIMIT)
         result = await session.execute(stmt)
 
         for exercise in result.scalars().all():
-            similarity = ExerciseMatcher._calculate_similarity(
-                normalized_exercise_name, ExerciseMatcher._normalize_string(exercise.name)
-            )
-            matches.append({
-                'id': exercise.id,
-                'name': exercise.name,
-                'source': 'user' if exercise.source == 'custom' else 'preset',  # Динамическое определение
-                'similarity': similarity,
-                'category': exercise.category,
-                'main_muscle_group': exercise.main_muscle_group,
-                'secondary_muscle_groups': exercise.secondary_muscle_groups,
-                'equipment_needed': exercise.equipment_needed,
-                'difficulty': exercise.difficulty,
-                'image_urls': exercise.image_urls,
-                'image_approx': exercise.image_approx,
-            })
+            matches.append(ExerciseMatcher._serialize_match(
+                exercise,
+                ExerciseMatcher._name_similarity(normalized_exercise_name, exercise),
+            ))
 
         return matches
 
@@ -106,32 +107,25 @@ class ExerciseMatcher:
         matches = []
 
         # Одним запросом забираем и базу, и кастом, без ручного склеивания списков
-        stmt = get_base_exercise_query(user_id).limit(1500)
+        stmt = get_base_exercise_query(user_id).limit(MATCH_CANDIDATE_SCAN_LIMIT)
         result = await session.execute(stmt)
         all_exercises = list(result.scalars().all())
 
         for exercise in all_exercises:
-            normalized_name = ExerciseMatcher._normalize_string(exercise.name)
-
-            if normalized_exercise_name in normalized_name:
-                similarity = 0.9 + (0.1 * len(normalized_exercise_name) / len(normalized_name))
+            candidates = ExerciseMatcher._normalized_names(exercise)
+            containing = [name for name in candidates if normalized_exercise_name in name]
+            if containing:
+                normalized_name = min(containing, key=len)
+                similarity = 0.9 + (
+                    0.1 * len(normalized_exercise_name) / len(normalized_name)
+                )
             else:
-                similarity = ExerciseMatcher._calculate_similarity(normalized_exercise_name, normalized_name)
+                similarity = ExerciseMatcher._name_similarity(
+                    normalized_exercise_name, exercise
+                )
 
             if similarity >= min_similarity * 0.6:
-                matches.append({
-                    'id': exercise.id,
-                    'name': exercise.name,
-                    'source': 'user' if exercise.source == 'custom' else 'preset',
-                    'similarity': similarity,
-                    'category': exercise.category,
-                    'main_muscle_group': exercise.main_muscle_group,
-                    'secondary_muscle_groups': exercise.secondary_muscle_groups,
-                    'equipment_needed': exercise.equipment_needed,
-                    'difficulty': exercise.difficulty,
-                    'image_urls': exercise.image_urls,
-                    'image_approx': exercise.image_approx,
-                })
+                matches.append(ExerciseMatcher._serialize_match(exercise, similarity))
 
         return matches
 
@@ -140,6 +134,55 @@ class ExerciseMatcher:
         """Вычисляет схожесть двух строк от 0 до 1 с нормализацией"""
         # Нормализация внутри уже выполнена в вызывающих методах, но доп. очистка
         return SequenceMatcher(None, str1.lower(), str2.lower()).ratio()
+
+    @staticmethod
+    def _exact_name_clause(normalized_exercise_name: str):
+        pattern = f"%{normalized_exercise_name}%"
+        return or_(
+            Exercise.name.ilike(pattern),
+            and_(
+                Exercise.source == "default",
+                Exercise.name_en.ilike(pattern),
+            ),
+        )
+
+    @staticmethod
+    def _normalized_names(exercise: Exercise) -> list[str]:
+        names = [ExerciseMatcher._normalize_string(exercise.name)]
+        if exercise.source == "default" and exercise.name_en:
+            names.append(ExerciseMatcher._normalize_string(exercise.name_en))
+        return [name for name in names if name]
+
+    @staticmethod
+    def _name_similarity(normalized_input: str, exercise: Exercise) -> float:
+        names = ExerciseMatcher._normalized_names(exercise)
+        return max(
+            (
+                ExerciseMatcher._calculate_similarity(normalized_input, name)
+                for name in names
+            ),
+            default=0.0,
+        )
+
+    @staticmethod
+    def _serialize_match(exercise: Exercise, similarity: float) -> Dict:
+        return {
+            "id": exercise.id,
+            "name": exercise.name,
+            "name_en": exercise.name_en,
+            "description": exercise.description,
+            "description_en": exercise.description_en,
+            "source": exercise.source,
+            "similarity": similarity,
+            "category": exercise.category,
+            "main_muscle_group": exercise.main_muscle_group,
+            "secondary_muscle_groups": exercise.secondary_muscle_groups,
+            "equipment_needed": exercise.equipment_needed,
+            "difficulty": exercise.difficulty,
+            "fatigue_tier": exercise.fatigue_tier,
+            "image_urls": exercise.image_urls,
+            "image_approx": exercise.image_approx,
+        }
 
     @staticmethod
     def _normalize_string(s: str) -> str:

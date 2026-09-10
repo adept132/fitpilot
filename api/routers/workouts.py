@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from api.deps import get_db
+from api.errors import LocalizedHTTPException
 from api.schemas.supersets import CreateSupersetRequest, ReorderWorkoutStructureRequest
 from api.schemas.workouts import WorkoutSessionDetailResponse, AddWorkoutExerciseRequest, AddWorkoutSetResponse, \
     AddWorkoutSetRequest, UpdateWorkoutSetRequest, RepeatWorkoutSetRequest, AutoprogressionResponse
@@ -51,10 +52,7 @@ async def get_active_workout(
     workout = await get_active_workout_for_user(db, current_app_user.id)
 
     if workout is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No active workout",
-        )
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "workout.active_not_found")
 
     return workout
 
@@ -104,10 +102,7 @@ async def get_workout_detail(
     print("FILTERED WORKOUT:", workout)
 
     if workout is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Workout not found",
-        )
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "workout.not_found")
 
     return workout
 
@@ -127,10 +122,7 @@ async def delete_workout(
     workout = result.scalar_one_or_none()
 
     if workout is None or workout.app_user_id != current_app_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Workout not found",
-        )
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "workout.not_found")
 
     await db.delete(workout)
     await db.commit()
@@ -161,26 +153,17 @@ async def add_exercise_to_workout(
     workout = workout_result.scalar_one_or_none()
 
     if workout is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Workout not found",
-        )
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "workout.not_found")
 
     if workout.status != "active":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Workout is not active",
-        )
+        raise LocalizedHTTPException(status.HTTP_400_BAD_REQUEST, "workout.not_active")
 
     exercise_stmt = get_base_exercise_query(current_app_user.id).where(Exercise.id == payload.exercise_id)
     exercise_result = await db.execute(exercise_stmt)
     exercise = exercise_result.scalar_one_or_none()
 
     if exercise is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Exercise not found",
-        )
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "exercise.not_found")
 
     existing_session_exercise = next(
         (item for item in workout.exercises if item.exercise_id == payload.exercise_id),
@@ -188,10 +171,7 @@ async def add_exercise_to_workout(
     )
 
     if existing_session_exercise is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Exercise already added to this workout",
-        )
+        raise LocalizedHTTPException(status.HTTP_409_CONFLICT, "exercise.already_in_workout")
 
     # --- ИСПРАВЛЕННАЯ ЛОГИКА РЕОРДЕРА ---
 
@@ -242,7 +222,8 @@ async def add_exercise_to_workout(
     # Фаза мезоцикла нужна схеме percent_1rm и правилу deload_phase (P0-06 C2) —
     # без неё они мёртвый код на этом пишущем пути, как и было до фикса.
     phase_effort_tier = await progression_repo.resolve_phase_effort_tier(
-        db, workout.app_user_mesocycle_id, workout.mesocycle_phase
+        db, workout.app_user_mesocycle_id, workout.mesocycle_phase,
+        training_block_id=workout.training_block_id,
     )
 
     readiness_verdict = await readiness_repo.verdict_for_checkin(
@@ -321,32 +302,20 @@ async def add_set_to_session_exercise(
     session_exercise = result.scalar_one_or_none()
 
     if session_exercise is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Workout session exercise not found",
-        )
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "exercise.session_not_found")
 
     workout = session_exercise.workout_session
 
     if workout.app_user_id != current_app_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Workout session exercise not found",
-        )
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "exercise.session_not_found")
 
     if workout.status != "active":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Workout is not active",
-        )
+        raise LocalizedHTTPException(status.HTTP_400_BAD_REQUEST, "workout.not_active")
 
     if payload.parent_set_id is not None:
         parent_exists = any(s.id == payload.parent_set_id for s in session_exercise.sets)
         if not parent_exists:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Parent set does not belong to this exercise",
-            )
+            raise LocalizedHTTPException(status.HTTP_400_BAD_REQUEST, "workout.parent_set_mismatch")
 
     next_set_number = len(session_exercise.sets) + 1
 
@@ -372,6 +341,7 @@ async def add_set_to_session_exercise(
         parent_set_id=payload.parent_set_id,
         superset_round=payload.superset_round,
         is_completed=True,
+        is_max_reps=payload.is_max_reps,
         is_anomalous=is_anomalous,
     )
 
@@ -419,16 +389,10 @@ async def get_exercise_autoprogression(
     session_exercise = result.scalar_one_or_none()
 
     if session_exercise is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Workout session exercise not found",
-        )
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "exercise.session_not_found")
 
     if session_exercise.workout_session.app_user_id != current_app_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Workout session exercise not found",
-        )
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "exercise.session_not_found")
 
     profile_result = await db.execute(
         select(AppUserProfile).where(AppUserProfile.app_user_id == current_app_user.id)
@@ -446,9 +410,16 @@ async def get_exercise_autoprogression(
     # сработали. P0-06 C2: резолв фазы вынесен в репозиторий (единая точка
     # для этого read-only пути и всех пишущих), этот эндпоинт был одной из
     # двух точек дублирования join'а — теперь их не осталось.
+    # P0-08, ревью Задачи 8, находка 1: предпросмотр обязан читать тот же
+    # источник фазы, что и пишущие пути (снимок блока приоритетнее шаблона) —
+    # иначе на живом пересчёте (target_reps или ещё не сохранённое
+    # предписание) вставленная разгрузка не срежет вес, хотя на остальных
+    # трёх точках (создание сессии, добавление упражнения, завершение) она
+    # уже срабатывает.
     workout_session = session_exercise.workout_session
     phase_effort_tier = await progression_repo.resolve_phase_effort_tier(
-        db, workout_session.app_user_mesocycle_id, workout_session.mesocycle_phase
+        db, workout_session.app_user_mesocycle_id, workout_session.mesocycle_phase,
+        training_block_id=workout_session.training_block_id,
     )
 
     data = await compute_autoprogression(
@@ -509,25 +480,16 @@ async def update_workout_session_set(
     workout_set = result.scalar_one_or_none()
 
     if workout_set is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Workout set not found",
-        )
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "workout.set_not_found")
 
     session_exercise = workout_set.workout_session_exercise
     workout = session_exercise.workout_session
 
     if workout.app_user_id != current_app_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Workout set not found",
-        )
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "workout.set_not_found")
 
     if workout.status != "active":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Workout is not active",
-        )
+        raise LocalizedHTTPException(status.HTTP_400_BAD_REQUEST, "workout.not_active")
 
     update_data = payload.model_dump(exclude_unset=True)
 
@@ -538,10 +500,7 @@ async def update_workout_session_set(
     if "parent_set_id" in update_data and update_data["parent_set_id"] is not None:
         parent_exists = any(s.id == update_data["parent_set_id"] for s in session_exercise.sets)
         if not parent_exists:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Parent set does not belong to this exercise",
-            )
+            raise LocalizedHTTPException(status.HTTP_400_BAD_REQUEST, "workout.parent_set_mismatch")
 
     for field_name, value in update_data.items():
         setattr(workout_set, field_name, value)
@@ -587,25 +546,16 @@ async def repeat_workout_session_set(
     source_set = result.scalar_one_or_none()
 
     if source_set is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Workout set not found",
-        )
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "workout.set_not_found")
 
     source_session_exercise = source_set.workout_session_exercise
     workout = source_session_exercise.workout_session
 
     if workout.app_user_id != current_app_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Workout set not found",
-        )
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "workout.set_not_found")
 
     if workout.status != "active":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Workout is not active",
-        )
+        raise LocalizedHTTPException(status.HTTP_400_BAD_REQUEST, "workout.not_active")
 
     target_session_exercise = source_session_exercise
 
@@ -622,22 +572,13 @@ async def repeat_workout_session_set(
         target_session_exercise = target_result.scalar_one_or_none()
 
         if target_session_exercise is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Target workout session exercise not found",
-            )
+            raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "workout.target_session_exercise_not_found")
 
         if target_session_exercise.workout_session.app_user_id != current_app_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Target workout session exercise not found",
-            )
+            raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "workout.target_session_exercise_not_found")
 
         if target_session_exercise.workout_session.status != "active":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Workout is not active",
-            )
+            raise LocalizedHTTPException(status.HTTP_400_BAD_REQUEST, "workout.not_active")
 
     next_set_number = len(target_session_exercise.sets) + 1
 
@@ -656,6 +597,9 @@ async def repeat_workout_session_set(
         # заново нельзя — это стёрло бы подтверждение, которое пользователь
         # уже дал по оригиналу.
         is_anomalous=source_set.is_anomalous,
+        # P1-14: режим «на максимум повторов» наследуется так же — повтор
+        # подхода-максимума должен остаться подходом-максимумом.
+        is_max_reps=source_set.is_max_reps,
     )
 
     db.add(repeated_set)
@@ -686,24 +630,15 @@ async def delete_workout_session_exercise(
     session_exercise = result.scalar_one_or_none()
 
     if session_exercise is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Workout session exercise not found",
-        )
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "exercise.session_not_found")
 
     workout = session_exercise.workout_session
 
     if workout.app_user_id != current_app_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Workout session exercise not found",
-        )
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "exercise.session_not_found")
 
     if workout.status != "active":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Workout is not active",
-        )
+        raise LocalizedHTTPException(status.HTTP_400_BAD_REQUEST, "workout.not_active")
 
     deleted_exercise_id = session_exercise.id
 
@@ -744,25 +679,16 @@ async def delete_workout_session_set(
     workout_set = result.scalar_one_or_none()
 
     if workout_set is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Workout set not found",
-        )
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "workout.set_not_found")
 
     session_exercise = workout_set.workout_session_exercise
     workout = session_exercise.workout_session
 
     if workout.app_user_id != current_app_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Workout set not found",
-        )
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "workout.set_not_found")
 
     if workout.status != "active":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Workout is not active",
-        )
+        raise LocalizedHTTPException(status.HTTP_400_BAD_REQUEST, "workout.not_active")
 
     deleted_set_id = workout_set.id
 

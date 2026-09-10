@@ -47,6 +47,7 @@ from api.services.models import (
     WorkoutSession,
     WorkoutSessionExercise,
 )
+from api.services.exercise_localization import display_name
 
 # Excel не распознаёт UTF-8 без BOM и ломает кириллицу в названиях упражнений.
 UTF8_BOM = "﻿"
@@ -87,7 +88,11 @@ async def _load_micro_days(
 
 
 async def collect_export_rows(
-    session: AsyncSession, app_user_id: int, unit: str, tz_name: Optional[str] = None
+    session: AsyncSession,
+    app_user_id: int,
+    unit: str,
+    tz_name: Optional[str] = None,
+    language: str = "ru",
 ) -> List[Dict[str, str]]:
     """Полные строки экспорта (все колонки). Экспортируем только завершённые
     тренировки — активная сессия это не история.
@@ -136,7 +141,9 @@ async def collect_export_rows(
             # id подхода -> его set_number, чтобы выразить дропсет-родителя
             # через Set Order, а не через внутренний id базы.
             set_number_by_id = {s.id: s.set_number for s in ws_ex.sets}
-            exercise_name = ws_ex.exercise.name if ws_ex.exercise else ""
+            exercise_name = (
+                display_name(ws_ex.exercise, language) if ws_ex.exercise else ""
+            )
 
             for s in ws_ex.sets:
                 # Плановые строки, которые пользователь так и не заполнил

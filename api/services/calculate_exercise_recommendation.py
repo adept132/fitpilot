@@ -7,7 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 from api.services.models import (
-    AppUserMesocycle, AppUserMicrocycle, WorkoutPlan, Mesocycle, WorkoutPlanExercise
+    AppUserMesocycle, AppUserMicrocycle, WorkoutPlan, Mesocycle, WorkoutPlanExercise,
+    UserExerciseRepOverride,
 )
 from api.services.progression import params
 from api.services.resolvers import (
@@ -16,6 +17,40 @@ from api.services.resolvers import (
     resolve_rir,
     resolve_rep_range_with_source,
 )
+
+
+async def _load_rep_overrides(
+    session: AsyncSession, app_user_id: int
+) -> dict[int, tuple[int, int]]:
+    """Персональные диапазоны повторов пользователя: exercise_id -> (min, max)
+    (P0-08, структурная правка «сдвиг диапазона повторов»)."""
+    rows = (
+        await session.execute(
+            select(UserExerciseRepOverride).where(
+                UserExerciseRepOverride.app_user_id == app_user_id
+            )
+        )
+    ).scalars().all()
+    return {row.exercise_id: (row.rep_min, row.rep_max) for row in rows}
+
+
+def _apply_user_override(
+    base_min: int,
+    base_max: int,
+    base_source: str,
+    override: Optional[tuple[int, int]],
+) -> tuple[int, int, str]:
+    """Персональное правило перебивает микроцикл/fallback, но не план.
+
+    Порядок применения (см. resolve_rep_range_with_source и
+    _apply_override_reps): микроцикл/fallback -> персональный override ->
+    override_reps плана. Эта функция — средняя ступень; вызывающий код
+    обязан прогнать её результат через _apply_override_reps ПОСЛЕ неё, иначе
+    план перестанет быть последним словом (спека Задачи 12, поправка 3).
+    """
+    if override is None:
+        return base_min, base_max, base_source
+    return override[0], override[1], params.REP_SOURCE_USER
 
 
 def _apply_override_reps(
@@ -96,6 +131,11 @@ async def calculate_exercise_recommendations(
         raw_type = day_info.get("type", "medium")
         day_type = DayTacticalType(raw_type)
 
+    # Персональные диапазоны повторов (P0-08, Задача 12): загружаются один
+    # раз на весь вызов — и план, и одиночное упражнение читают из одного
+    # и того же словаря по exercise_id.
+    rep_overrides = await _load_rep_overrides(session, app_user_id)
+
     compiled_exercises = []
 
     # =====================================================================
@@ -124,6 +164,10 @@ async def calculate_exercise_recommendations(
                 calculated_rir = resolve_rir(fatigue_tier, effort_tier)
                 base_rep_min, base_rep_max, rep_range_source = resolve_rep_range_with_source(
                     fatigue_tier, day_type
+                )
+                base_rep_min, base_rep_max, rep_range_source = _apply_user_override(
+                    base_rep_min, base_rep_max, rep_range_source,
+                    rep_overrides.get(plan_ex.exercise_id),
                 )
 
                 final_rir = plan_ex.override_rir if plan_ex.override_rir is not None else calculated_rir
@@ -157,6 +201,10 @@ async def calculate_exercise_recommendations(
         calculated_rir = resolve_rir(fatigue_tier, effort_tier)
         base_rep_min, base_rep_max, rep_range_source = resolve_rep_range_with_source(
             fatigue_tier, day_type
+        )
+        base_rep_min, base_rep_max, rep_range_source = _apply_user_override(
+            base_rep_min, base_rep_max, rep_range_source,
+            rep_overrides.get(single_exercise_id),
         )
 
         compiled_exercises.append({

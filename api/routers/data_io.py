@@ -3,12 +3,14 @@
 from datetime import date
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db
+from api.errors import LocalizedHTTPException
+from api.i18n import tr
 from api.schemas.data_io import (
     ExerciseSuggestion,
     ImportCommitRequest,
@@ -79,7 +81,13 @@ async def export_csv(
     """
     resolved_unit = await _resolve_export_unit(db, current_app_user.id, unit)
     tz_name = await _user_timezone(db, current_app_user.id)
-    rows = await collect_export_rows(db, current_app_user.id, resolved_unit, tz_name)
+    rows = await collect_export_rows(
+        db,
+        current_app_user.id,
+        resolved_unit,
+        tz_name,
+        language=getattr(current_app_user, "_request_language", "ru"),
+    )
 
     filename = f"eurith-export-{date.today().isoformat()}.csv"
     return StreamingResponse(
@@ -94,11 +102,12 @@ async def export_csv(
 
 def _prepared_csv(csv: str) -> str:
     if not csv or not csv.strip():
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Файл пустой")
+        raise LocalizedHTTPException(status.HTTP_400_BAD_REQUEST, "data.import.empty")
     if len(csv.encode("utf-8")) > MAX_IMPORT_BYTES:
-        raise HTTPException(
+        raise LocalizedHTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            f"Файл больше {MAX_IMPORT_BYTES // (1024 * 1024)} МБ",
+            "data.import.too_large",
+            {"max_mb": MAX_IMPORT_BYTES // (1024 * 1024)},
         )
     # Клиент читает файл текстом; BOM (его пишет Excel и наш экспорт) снимаем тут.
     return csv.lstrip("﻿")
@@ -107,8 +116,8 @@ def _prepared_csv(csv: str) -> str:
 def _parse_or_400(text: str, unit: Optional[str]) -> ParseResult:
     try:
         return parse_csv(text, default_unit=normalize_unit(unit) or UNIT_KG)
-    except CsvParseError as e:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    except CsvParseError:
+        raise LocalizedHTTPException(status.HTTP_400_BAD_REQUEST, "data.import.invalid_csv")
 
 
 @router.post("/import/preview", response_model=ImportPreviewResponse)
@@ -162,7 +171,14 @@ async def import_preview(
         matched_exercises=matched,
         unmatched=unmatched,
         skipped_rows=[
-            SkippedRowOut(line=s.line, reason=s.reason)
+            SkippedRowOut(
+                line=s.line,
+                reason=tr(
+                    getattr(current_app_user, "_request_language", "en"),
+                    s.reason_key,
+                    **s.reason_params,
+                ),
+            )
             for s in parsed.skipped[:MAX_SKIPPED_ROWS_IN_RESPONSE]
         ],
         skipped_rows_total=len(parsed.skipped),

@@ -1,7 +1,8 @@
+import json
 import uuid
 from datetime import timedelta, datetime, time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete, or_
 from sqlalchemy.orm import selectinload
@@ -10,6 +11,8 @@ from uuid import UUID
 from starlette import status
 
 from api.services.app_user_service import get_current_app_user
+from api.errors import LocalizedHTTPException
+from api.i18n import tr
 # Импортируй свои зависимости (пути могут немного отличаться в зависимости от твоего проекта)
 from api.services.models import (
     AppUser, SplitBlueprint, DayBlueprint, SplitDaySlot, UserSplit, DayMuscleTarget, UserCalendarDay, AppUserMesocycle,
@@ -17,15 +20,28 @@ from api.services.models import (
 )
 from api.schemas.splits import SplitBlueprintOut, DayBlueprintOut, ActivateSplitRequest, CreateCustomSplitRequest, \
     UpdateCustomSplitRequest, CreateCustomDayRequest, UpdateCustomDayRequest, SchedulePreviewRequest, \
-    SchedulePreviewResponse, ScheduleLaunchRequest
+    SchedulePreviewResponse, ScheduleLaunchRequest, SplitSuggestionOut
+from api.services.periodization.service import close_block_for_split_change
 from api.services.scheduling_engine import SchedulingEngine
+from api.services.structure.repository import rank_splits
+from api.services.structure.split_catalog import localized_split_name
 from app.database import get_session
 
 router = APIRouter(prefix="/splits", tags=["Splits Workspace"])
 
+def _split_out(split: SplitBlueprint, language: str) -> SplitBlueprintOut:
+    return SplitBlueprintOut.model_validate(split).model_copy(
+        update={
+            "name": localized_split_name(
+                split.name, split.is_system, language
+            )
+        }
+    )
+
 
 @router.get("/blueprints", response_model=List[SplitBlueprintOut])
 async def get_available_splits(
+        request: Request,
         session: AsyncSession = Depends(get_session),
         current_user: AppUser = Depends(get_current_app_user)
 ):
@@ -49,7 +65,53 @@ async def get_available_splits(
     result = await session.execute(stmt)
     splits = result.scalars().all()
 
-    return splits
+    language = getattr(request.state, "language", "en")
+    return [
+        _split_out(split, language)
+        for split in splits
+    ]
+
+
+@router.get("/suggest", response_model=List[SplitSuggestionOut])
+async def suggest_split(
+        request: Request,
+        training_frequency: int | None = None,
+        requirement: str | None = None,
+        session: AsyncSession = Depends(get_session),
+        current_user: AppUser = Depends(get_current_app_user),
+):
+    """Кандидаты сплита под профиль. Меньше трёх — нормальный ответ (§5.2)."""
+    parsed_requirement = None
+    if requirement:
+        try:
+            parsed_requirement = json.loads(requirement)
+        except ValueError:
+            raise LocalizedHTTPException(400, "split.requirement_must_be_object")
+        if not isinstance(parsed_requirement, dict):
+            raise LocalizedHTTPException(400, "split.requirement_must_be_object")
+
+    candidates = await rank_splits(
+        session,
+        current_user.id,
+        training_frequency=training_frequency,
+        requirement=parsed_requirement,
+    )
+
+    return [
+        SplitSuggestionOut(
+            blueprint_id=candidate.id,
+            name=localized_split_name(
+                candidate.name,
+                True,
+                getattr(request.state, "language", "en"),
+            ),
+            length_days=candidate.length_days,
+            training_days=candidate.training_days,
+            sessions_per_week=candidate.sessions_per_week,
+            reason=candidate.reason,
+        )
+        for candidate in candidates
+    ]
 
 
 @router.get("/days", response_model=List[DayBlueprintOut])
@@ -87,7 +149,7 @@ async def activate_split(
     # 1. Проверяем, существует ли такой чертеж
     blueprint = await session.get(SplitBlueprint, payload.blueprint_id)
     if not blueprint:
-        raise HTTPException(status_code=404, detail="Split blueprint not found")
+        raise LocalizedHTTPException(404, "split.blueprint_not_found")
 
     # 2. Деактивируем предыдущий активный сплит (если есть)
     await session.execute(
@@ -106,9 +168,22 @@ async def activate_split(
     )
 
     session.add(new_user_split)
+    await session.flush()
+
+    # P1-03 ч.1, §5.6: микроциклы из пресетов пересобираются под новые слоты.
+    # Правленые руками не трогаем — их раскладка не совпадёт с тем, что даёт
+    # их же профиль, и rebuild_for_active_split их пропустит.
+    from api.services.structure.bootstrap import rebuild_for_active_split
+
+    rebuild_result = await rebuild_for_active_split(session, current_user.id)
+
     await session.commit()
 
-    return {"status": "success", "message": f"Split '{blueprint.name}' activated."}
+    return {
+        "status": "success",
+        "message": tr(getattr(current_user, "_request_language", "en"), "split.activated", name=blueprint.name),
+        "microcycles_rebuilt": rebuild_result["rebuilt"],
+    }
 
 @router.post("/custom")
 async def create_custom_split(
@@ -132,7 +207,7 @@ async def create_custom_split(
     )
 
     if not rest_day:
-        raise HTTPException(status_code=500, detail="Системный день отдыха не найден в БД")
+        raise LocalizedHTTPException(500, "split.system_rest_day_not_found_in_db")
 
     # 2. Создаем "Каркас" (Split Blueprint)
     new_split = SplitBlueprint(
@@ -155,7 +230,7 @@ async def create_custom_split(
         session.add(slot)
 
     await session.commit()
-    return {"status": "success", "split_id": new_split.id, "message": "Сплит успешно сохранен"}
+    return {"status": "success", "split_id": new_split.id, "message": tr(getattr(current_user, "_request_language", "en"), "split.saved")}
 
 
 @router.delete("/{blueprint_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -170,10 +245,10 @@ async def delete_custom_split(
     split = result.scalar_one_or_none()
 
     if not split:
-        raise HTTPException(status_code=404, detail="Сплит не найден")
+        raise LocalizedHTTPException(404, "split.not_found")
 
     if split.is_system or split.author_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Нельзя удалить этот сплит")
+        raise LocalizedHTTPException(403, "split.delete_forbidden")
 
     await session.delete(split)
     await session.commit()
@@ -193,10 +268,10 @@ async def update_custom_split(
     split = result.scalar_one_or_none()
 
     if not split:
-        raise HTTPException(status_code=404, detail="Сплит не найден")
+        raise LocalizedHTTPException(404, "split.not_found")
 
     if split.is_system or split.author_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Нельзя редактировать этот сплит")
+        raise LocalizedHTTPException(403, "split.edit_forbidden")
 
     # 1. Обновляем базовые поля
     if payload.name is not None:
@@ -214,7 +289,7 @@ async def update_custom_split(
                          "отдых" in d.name.lower() or "rest" in d.name.lower() or len(d.muscle_targets) == 0), None)
 
         if not rest_day:
-            raise HTTPException(status_code=500, detail="Системный день отдыха не найден")
+            raise LocalizedHTTPException(500, "split.system_rest_day_not_found")
 
         # Удаляем старые слоты
         await session.execute(delete(SplitDaySlot).where(SplitDaySlot.blueprint_id == split.id))
@@ -229,7 +304,7 @@ async def update_custom_split(
             session.add(slot)
 
     await session.commit()
-    return {"status": "success", "message": "Сплит обновлен"}
+    return {"status": "success", "message": tr(getattr(current_user, "_request_language", "en"), "split.updated")}
 
 
 @router.post("/days/custom")
@@ -258,7 +333,7 @@ async def create_custom_day(
         ))
 
     await session.commit()
-    return {"status": "success", "day_id": new_day.id, "message": "День успешно создан"}
+    return {"status": "success", "day_id": new_day.id, "message": tr(getattr(current_user, "_request_language", "en"), "split.day_created")}
 
 
 @router.delete("/days/{day_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -273,10 +348,10 @@ async def delete_custom_day(
     day = result.scalar_one_or_none()
 
     if not day:
-        raise HTTPException(status_code=404, detail="День не найден")
+        raise LocalizedHTTPException(404, "split.day_not_found")
 
     if day.is_system or day.author_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Нельзя удалить этот день")
+        raise LocalizedHTTPException(403, "split.day_delete_forbidden")
 
     await session.delete(day)
     await session.commit()
@@ -296,10 +371,10 @@ async def update_custom_day(
     day = result.scalar_one_or_none()
 
     if not day:
-        raise HTTPException(status_code=404, detail="День не найден")
+        raise LocalizedHTTPException(404, "split.day_not_found")
 
     if day.is_system or day.author_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Нельзя редактировать этот день")
+        raise LocalizedHTTPException(403, "split.day_edit_forbidden")
 
     # Обновляем имя, если пришло
     if payload.name is not None:
@@ -312,7 +387,7 @@ async def update_custom_day(
             session.add(DayMuscleTarget(day_id=day.id, muscle_group_id=muscle))
 
     await session.commit()
-    return {"status": "success", "message": "День обновлен"}
+    return {"status": "success", "message": tr(getattr(current_user, "_request_language", "en"), "split.day_updated")}
 
 
 @router.post("/launch", status_code=status.HTTP_200_OK)
@@ -333,7 +408,7 @@ async def launch_split(
     blueprint = result.scalar_one_or_none()
 
     if not blueprint:
-        raise HTTPException(status_code=404, detail="Сплит не найден")
+        raise LocalizedHTTPException(404, "split.not_found")
 
     # 2. Деактивируем все предыдущие активные сплиты пользователя
     deactivate_query = (
@@ -365,12 +440,35 @@ async def launch_split(
     )
     session.add(new_user_split)
 
-    # 5. Очищаем будущее расписание в UserCalendarDay
+    # The active split is already changed in this transaction, so rebuild the
+    # untouched profile microcycles before either committing or asking the
+    # scheduling engine to consume them.  flush is required because the
+    # shared service discovers the active split with a SELECT.
+    await session.flush()
+    from api.services.structure.bootstrap import rebuild_for_active_split
+
+    await rebuild_for_active_split(session, current_user.id)
+
+    # 5. Очищаем будущее расписание в UserCalendarDay.
+    # P0-09: request.start_date приходит ОТ ПОЛЬЗОВАТЕЛЯ и может лежать в
+    # прошлом — без фильтра по статусу смена сплита стирала бы историю.
     delete_stmt = delete(UserCalendarDay).where(
         UserCalendarDay.app_user_id == current_user.id,
-        UserCalendarDay.target_date >= request.start_date
+        UserCalendarDay.target_date >= request.start_date,
+        UserCalendarDay.status == "planned",
     )
     await session.execute(delete_stmt)
+
+    # P0-08, Задача 14: сплит сменился — координата активного блока (день
+    # недели, структура сплита) больше не соответствует реальности. Блок
+    # закрывается ЗДЕСЬ, МЕЖДУ удалением будущих дней и разворачиванием
+    # расписания ниже (шаг 7): ensure_active_block внутри
+    # launch_and_unroll_plan обязана увидеть уже НОВЫЙ блок, стартующий с
+    # даты нового сплита, а не старый, у которого координата уже уехала.
+    # Нет активного блока (периодизация не настроена) — функция ничего не
+    # делает, старый путь работает как раньше.
+    await close_block_for_split_change(session, current_user.id, request.start_date)
+
     await session.commit()
 
     # 6. ПРОВЕРЯЕМ ОПЦИОНАЛЬНЫЙ МЕЗОЦИКЛ
@@ -394,15 +492,18 @@ async def launch_split(
             preview_length_days=90
         )
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Ошибка генерации расписания: {str(e)}")
+        raise LocalizedHTTPException(
+            400, "split.schedule_generation_failed", {"reason": str(e)}
+        )
 
     return {
         "status": "success",
-        "message": f"Сплит '{blueprint.name}' успешно активирован и развернут в календарь!"
+        "message": tr(getattr(current_user, "_request_language", "en"), "split.launched", name=blueprint.name)
     }
 
 @router.get("/active")
 async def get_active_split(
+    request: Request,
     session: AsyncSession = Depends(get_session),
     current_user = Depends(get_current_app_user)
 ):
@@ -429,7 +530,11 @@ async def get_active_split(
     return {
         "id": active_split.id,
         "blueprint_id": active_split.blueprint_id,
-        "blueprint_name": active_split.blueprint.name,
+        "blueprint_name": localized_split_name(
+            active_split.blueprint.name,
+            active_split.blueprint.is_system,
+            getattr(request.state, "language", "en"),
+        ),
         # Отдаем дату старта в виде строки YYYY-MM-DD
         "start_date": active_split.start_date.strftime("%Y-%m-%d"),
         "current_day": active_split.current_day,
@@ -438,6 +543,7 @@ async def get_active_split(
 
 @router.get("/{blueprint_id}", response_model=SplitBlueprintOut)
 async def get_custom_split_details(
+        request: Request,
         blueprint_id: UUID,
         session: AsyncSession = Depends(get_session),
         current_user: AppUser = Depends(get_current_app_user)
@@ -459,9 +565,9 @@ async def get_custom_split_details(
     split = result.scalar_one_or_none()
 
     if not split:
-        raise HTTPException(status_code=404, detail="Сплит не найден")
+        raise LocalizedHTTPException(404, "split.not_found")
 
-    return split
+    return _split_out(split, getattr(request.state, "language", "en"))
 
 
 @router.post("/preview", response_model=SchedulePreviewResponse)
@@ -490,7 +596,7 @@ async def generate_schedule_preview(
     split = result.scalar_one_or_none()
 
     if not split or not split.slots:
-        raise HTTPException(status_code=404, detail="Сплит пуст или не найден")
+        raise LocalizedHTTPException(404, "split.empty_or_not_found")
 
     # Сортируем слоты по порядку day_order
     slots_queue = sorted(split.slots, key=lambda s: s.day_order)

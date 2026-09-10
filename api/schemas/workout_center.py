@@ -4,6 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from api.schemas.periodization import BlockCoordinateRead
 from api.schemas.plan import WorkoutCenterPlanRead
 
 
@@ -58,6 +59,10 @@ class WorkoutCenterContextRead(BaseModel):
     volume_targets: dict | None = None
 
     active_workout: WorkoutCenterActiveWorkoutRead | None
+
+    # P0-08, Задача 13: координата активного блока едет вместе с контекстом,
+    # чтобы клиент не делал второй запрос ради одной строки на экране.
+    active_block: Optional[BlockCoordinateRead] = None
 
 
 class UpdateSelectedSplitPayload(BaseModel):

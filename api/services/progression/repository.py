@@ -68,7 +68,9 @@ def _phase_effort_tier_stmt(
     ранее он был продублирован в _load_deload_map и в
     workouts.py::get_exercise_autoprogression); обе точки теперь используют
     эту функцию — напрямую (_load_deload_map, батчем) или через
-    resolve_phase_effort_tier (одна пара, все пишущие пути).
+    resolve_phase_effort_tier. Это про сам JOIN, а не про то, что все
+    потребители resolve_phase_effort_tier уже перешли на снимок блока —
+    вызывающий код обязан отдельно передать training_block_id (P0-08).
     """
     stmt = (
         select(
@@ -89,28 +91,76 @@ def _phase_effort_tier_stmt(
 
 async def _load_deload_map(
     session: AsyncSession, workouts: Sequence[WorkoutSession]
-) -> dict[tuple[int, int], str]:
-    """effort_tier фазы мезоцикла для каждой сессии истории — ОДНИМ запросом.
+) -> dict[int, str]:
+    """effort_tier фазы для каждой сессии истории (ключ — WorkoutSession.id).
 
-    Батчим одним доп. запросом по всем сессиям истории сразу — иначе на
-    каждую из HISTORY_LIMIT сессий пришлось бы делать свой join (N+1
-    запросов на каждую загрузку истории).
+    P0-08: снимок блока приоритетнее шаблона — той же причине, что и в
+    resolve_phase_effort_tier. Сессия, проведённая во вставленную (не
+    входящую в шаблон) фазу разгрузки, хранит training_block_id; join по
+    паре (app_user_mesocycle_id, phase_number) с шаблонным MesocyclePhase
+    для такой фазы не находит строку вовсе (в шаблоне её нет), и без этого
+    фолбэка is_deload молча остался бы False — rebuild_state засчитал бы
+    честную разгрузку в счёт застоя.
+
+    Ключ результата — WorkoutSession.id, а не пара (app_user_mesocycle_id,
+    phase_number): у сессий со снимком блока номер фазы не обязан однозначно
+    резолвиться через шаблон (вставленных фаз в шаблоне нет), а разные
+    сессии той же пары могут иметь разные training_block_id (блок мог
+    измениться между тренировками) — только per-сессионный ключ это не путает.
+
+    Батчим два доп. запроса на всю историю сразу (один по блокам, один по
+    шаблону) — иначе на каждую из HISTORY_LIMIT сессий пришлось бы делать
+    свой join/select (N+1 запросов на каждую загрузку истории).
     """
-    pairs = {
-        (w.app_user_mesocycle_id, w.mesocycle_phase)
-        for w in workouts
-        if w.app_user_mesocycle_id is not None and w.mesocycle_phase is not None
-    }
-    if not pairs:
+    if not workouts:
         return {}
 
-    mesocycle_user_ids = {p[0] for p in pairs}
-    stmt = _phase_effort_tier_stmt(mesocycle_user_ids)
-    rows = (await session.execute(stmt)).all()
-    return {
-        (app_user_mesocycle_id, phase_number): effort_tier
-        for app_user_mesocycle_id, phase_number, effort_tier in rows
+    from api.services.models import TrainingBlock
+    from api.services.periodization.phases import from_json, tier_for
+
+    block_ids = {w.training_block_id for w in workouts if w.training_block_id is not None}
+    blocks_by_id: dict[int, TrainingBlock] = {}
+    if block_ids:
+        rows = (
+            await session.execute(
+                select(TrainingBlock).where(TrainingBlock.id.in_(block_ids))
+            )
+        ).scalars().all()
+        blocks_by_id = {b.id: b for b in rows}
+
+    # Шаблон нужен только тем сессиям, у которых нет блока (или блок не
+    # нашёлся, например уже удалён) — для остальных достаточно снимка.
+    template_pairs = {
+        (w.app_user_mesocycle_id, w.mesocycle_phase)
+        for w in workouts
+        if w.app_user_mesocycle_id is not None
+        and w.mesocycle_phase is not None
+        and (w.training_block_id is None or w.training_block_id not in blocks_by_id)
     }
+    template_map: dict[tuple[int, int], str] = {}
+    if template_pairs:
+        mesocycle_user_ids = {p[0] for p in template_pairs}
+        stmt = _phase_effort_tier_stmt(mesocycle_user_ids)
+        rows = (await session.execute(stmt)).all()
+        template_map = {
+            (app_user_mesocycle_id, phase_number): effort_tier
+            for app_user_mesocycle_id, phase_number, effort_tier in rows
+        }
+
+    result: dict[int, str] = {}
+    for w in workouts:
+        tier: Optional[str] = None
+        if (
+            w.training_block_id is not None
+            and w.mesocycle_phase is not None
+            and w.training_block_id in blocks_by_id
+        ):
+            tier = tier_for(from_json(blocks_by_id[w.training_block_id].phases), w.mesocycle_phase)
+        if tier is None and w.app_user_mesocycle_id is not None and w.mesocycle_phase is not None:
+            tier = template_map.get((w.app_user_mesocycle_id, w.mesocycle_phase))
+        if tier is not None:
+            result[w.id] = tier
+    return result
 
 
 async def resolve_phase_effort_tier(
@@ -118,8 +168,9 @@ async def resolve_phase_effort_tier(
     app_user_mesocycle_id: Optional[int],
     mesocycle_phase: Optional[int],
     default: str = "medium",
+    training_block_id: Optional[int] = None,
 ) -> str:
-    """effort_tier ТЕКУЩЕЙ фазы мезоцикла по (app_user_mesocycle_id, phase_number).
+    """effort_tier ТЕКУЩЕЙ фазы. Снимок блока приоритетнее шаблона (P0-08).
 
     Единая точка резолва фазы для всех пишущих путей движка (P0-06 C2):
     добавление упражнения, завершение сессии, создание сессии из плана.
@@ -128,9 +179,31 @@ async def resolve_phase_effort_tier(
     слой 2 resolve_scheme (силовая фаза -> percent_1rm) — мёртвый код,
     несмотря на то что read-only /autoprogression считает по настоящей фазе.
 
+    Приоритет обязателен: досрочная разгрузка живёт ТОЛЬКО в снимке блока и в
+    шаблоне отсутствует. Читая шаблон, резолвер вернул бы прежний tier, правило
+    deload_phase не сработало бы, а percent_1rm взяла бы не ту строку
+    PERCENT_TABLE — то есть вес продолжил бы расти в неделю разгрузки.
+
+    Фолбэк на шаблон сохраняет всю историю: у сессий, созданных до P0-08,
+    training_block_id пуст, и путь остаётся прежним.
+
     default="medium" — тот же дефолт, что был у build_context(phase_effort_tier)
     и раньше жил в вызывающем коде по всей кодовой базе; здесь он один.
     """
+    if training_block_id is not None and mesocycle_phase is not None:
+        from api.services.models import TrainingBlock
+        from api.services.periodization.phases import from_json, tier_for
+
+        block = (
+            await session.execute(
+                select(TrainingBlock).where(TrainingBlock.id == training_block_id)
+            )
+        ).scalars().first()
+        if block is not None:
+            tier = tier_for(from_json(block.phases), mesocycle_phase)
+            if tier is not None:
+                return tier
+
     if app_user_mesocycle_id is None or mesocycle_phase is None:
         return default
     stmt = _phase_effort_tier_stmt([app_user_mesocycle_id], phase_number=mesocycle_phase)
@@ -188,23 +261,28 @@ async def load_history(
             if s.is_completed and s.parent_set_id is None
         )
 
-        # P0-06 C3: se.prescription — JSONB, записанный write-once, без
-        # схемы на границе ДО этого фикса (см. SyncPrescriptionSnapshot в
-        # api/schemas/sync.py — валидация теперь есть на входе синка, но
-        # это не защищает от строк, уже осевших в БД раньше, от прямых
-        # правок в консоли и т.п.). from_dict() читает обязательные ключи
-        # без .get() и падает KeyError на первом же мусоре — один такой
-        # session_exercise делает загрузку истории (а с ней —
-        # добавление упражнения, завершение тренировки, автопрогрессию)
-        # невозможной для ВСЕХ сессий с этим упражнением сразу, и write-once
-        # не даёт это исправить перезаписью. Разбор — не молчаливое glotanie:
-        # решение — деградировать до "у сессии нет предписания", это тот же
-        # путь, что и легитимный se.prescription is None (движок уйдёт в
-        # бутстрап e1rm_factor), а не 500 на каждый запрос с этим упражнением.
+        # P0-11: показанная цель важнее обещанной. live_prescription
+        # пишется клиентом после каждого подхода и содержит ровно то, что
+        # человек видел; исходное prescription остаётся планом на старте
+        # (write-once). Разбор обоих — по одному пути, включая деградацию
+        # на мусоре: см. комментарий про P0-06 C3 над try ниже.
+        raw = se.live_prescription or se.prescription
+
+        # P0-06 C3: raw — JSONB, записанный write-once, без схемы на границе
+        # ДО этого фикса (см. SyncPrescriptionSnapshot в api/schemas/sync.py
+        # — валидация теперь есть на входе синка, но это не защищает от
+        # строк, уже осевших в БД раньше, от прямых правок в консоли и
+        # т.п.). from_dict() читает обязательные ключи без .get() и падает
+        # KeyError на первом же мусоре — один такой session_exercise делает
+        # загрузку истории (а с ней — добавление упражнения, завершение
+        # тренировки, автопрогрессию) невозможной для ВСЕХ сессий с этим
+        # упражнением сразу, и write-once не даёт это исправить перезаписью.
+        # Разбор — не молчаливое глотание: решение — деградировать до "у
+        # сессии нет предписания", это тот же путь, что и легитимный
+        # raw is None (движок уйдёт в бутстрап e1rm_factor), а не 500 на
+        # каждый запрос с этим упражнением.
         try:
-            prescription = (
-                Prescription.from_dict(se.prescription) if se.prescription else None
-            )
+            prescription = Prescription.from_dict(raw) if raw else None
         except (KeyError, TypeError, ValueError):
             prescription = None
 
@@ -221,6 +299,8 @@ async def load_history(
         # снижение по чужому промаху, а _has_prescription_history() решит,
         # что бутстрап уже пройден). Деградируем так же, как при
         # неразбираемом JSON выше: считаем, что у сессии нет предписания.
+        # Проверка общая для prescription и live_prescription — иначе live
+        # стал бы обходной дорогой для чужой цели в обход этого же блокера.
         #
         # Обратная совместимость: у ВСЕХ предписаний, сохранённых до этого
         # фикса, метки в basis нет вовсе. Отсутствие метки — это НЕ признак
@@ -232,9 +312,7 @@ async def load_history(
             if owner_exercise_id is not None and owner_exercise_id != exercise_id:
                 prescription = None
 
-        effort_tier = deload_map.get(
-            (workout.app_user_mesocycle_id, workout.mesocycle_phase)
-        )
+        effort_tier = deload_map.get(workout.id)
         sessions.append(
             SessionFact(
                 session_id=workout.id,

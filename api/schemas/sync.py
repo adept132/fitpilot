@@ -36,6 +36,14 @@ class SyncSetSnapshot(BaseModel):
     parent_client_uuid: str | None = None
     superset_round: int | None = None
     is_completed: bool = True
+    # P1-14: подход на максимум повторов — режим, ортогональный set_type.
+    # НЕ bool = False: ревью, находка 1 — старый снимок (легаси-клиент или
+    # клиент, который поле не знает) отправлял тело БЕЗ этого ключа, и
+    # False-по-умолчанию безусловно перезаписывал уже выставленный флаг на
+    # каждом синке. None отличим от явного false — см. присвоение в
+    # _apply_snapshot (api/routers/sync.py), которое трогает поле только
+    # когда оно реально пришло.
+    is_max_reps: bool | None = None
     # Клиент выставляет true, когда пользователь подтвердил подозрительное значение.
     anomaly_confirmed: bool = False
     deleted: bool = False
@@ -102,6 +110,11 @@ class SyncExerciseSnapshot(BaseModel):
     # P0-06 C3: типизировано SyncPrescriptionSnapshot вместо сырого dict —
     # мусор отвергается на границе с понятной 422, а не долетает до JSONB.
     prescription: SyncPrescriptionSnapshot | None = None
+    # P0-11. НЕ write-once, в отличие от prescription выше: это показанная
+    # по факту цель, которую внутрисессионная петля обновляет после
+    # каждого подхода. Значение производное — чистая функция от
+    # (предписание, факты, шаг), — поэтому last-write-wins безопасен.
+    live_prescription: SyncPrescriptionSnapshot | None = None
     deleted: bool = False
     updated_at: datetime | None = None
     sets: list[SyncSetSnapshot] = []
@@ -192,6 +205,10 @@ class SyncChangesResponse(BaseModel):
     # P0-07: вес прошлой сессии по упражнениям. Устройству он нужен, чтобы
     # применить субъективный потолок офлайн — без якоря ограничивать нечего.
     last_top_weights: dict[str, float] = {}
+    # P1-14: личные рекорды по упражнениям. Едут из той же выборки
+    # state_rows, что prescriptions и last_top_weights, — лишнего
+    # запроса не появляется. Клиент считает по ним живой рекорд офлайн.
+    exercise_records: dict[str, dict] = {}
     # Курсор для следующего запроса. Всегда серверное время — локальные часы
     # устройства не участвуют, иначе расхождение часов теряет изменения.
     server_time: datetime

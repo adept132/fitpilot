@@ -1,12 +1,40 @@
 from datetime import datetime, timezone
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_current_firebase_claims, get_db
-from api.services.models import AppUser
+from api.errors import LocalizedHTTPException
+from api.i18n import resolve_language
+from api.services.models import AppUser, AppUserProfile
+
+
+async def _ensure_app_user_profile(
+        db: AsyncSession,
+        app_user: AppUser,
+) -> None:
+    """Keep every authenticated AppUser backed by a domain profile.
+
+    Locking the parent row serializes simultaneous first requests for an old
+    account that is missing its profile. This avoids relying on a caught
+    IntegrityError, which would roll back the rest of the request transaction.
+    """
+    await db.execute(
+        select(AppUser.id)
+        .where(AppUser.id == app_user.id)
+        .with_for_update()
+    )
+    profile = (
+        await db.execute(
+            select(AppUserProfile).where(
+                AppUserProfile.app_user_id == app_user.id
+            )
+        )
+    ).scalar_one_or_none()
+    if profile is None:
+        db.add(AppUserProfile(app_user_id=app_user.id))
 
 
 async def get_or_create_app_user(
@@ -43,16 +71,8 @@ async def get_or_create_app_user(
                 )
             ).scalars().first()
             if conflict is not None:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail={
-                        "error": "email_already_linked",
-                        "message": (
-                            "На этот email в Firebase заведено несколько учётных "
-                            "записей. Обратитесь в поддержку — иначе история "
-                            "тренировок окажется разделённой между ними."
-                        ),
-                    },
+                raise LocalizedHTTPException(
+                    status.HTTP_409_CONFLICT, "auth.email_already_linked"
                 )
 
         app_user = AppUser(
@@ -64,6 +84,10 @@ async def get_or_create_app_user(
             last_seen_at=datetime.now(timezone.utc),
         )
         db.add(app_user)
+        # AppUser and its required domain profile must become visible in one
+        # transaction. Otherwise the first Google-authenticated requests can
+        # observe app_users without app_user_profiles and receive a 404.
+        app_user.profile = AppUserProfile()
         try:
             await db.commit()
         except IntegrityError:
@@ -76,9 +100,11 @@ async def get_or_create_app_user(
             ).scalars().first()
             if app_user is None:
                 raise
+            # Fall through: an older server or pre-existing row may have won
+            # the AppUser race without creating the corresponding profile.
+        else:
+            await db.refresh(app_user)
             return app_user
-        await db.refresh(app_user)
-        return app_user
 
     # 2. Сценарий: СУЩЕСТВУЮЩИЙ ПОЛЬЗОВАТЕЛЬ
 
@@ -96,11 +122,15 @@ async def get_or_create_app_user(
     # Обновляем время последней активности
     app_user.last_seen_at = datetime.now(timezone.utc)
 
+    # Repair accounts created before the profile invariant was introduced.
+    await _ensure_app_user_profile(db, app_user)
+
     await db.commit()
     await db.refresh(app_user)
     return app_user
 
 async def get_current_app_user_allow_pending(
+    request: Request,
     firebase_claims: dict = Depends(get_current_firebase_claims),
     db: AsyncSession = Depends(get_db),
 ) -> AppUser:
@@ -109,7 +139,27 @@ async def get_current_app_user_allow_pending(
     Нужен эндпоинтам /account: пока заявка активна, обычный доступ закрыт, но
     посмотреть статус и передумать пользователь обязан мочь.
     """
-    return await get_or_create_app_user(db=db, firebase_claims=firebase_claims)
+    app_user = await get_or_create_app_user(db=db, firebase_claims=firebase_claims)
+    await set_request_language(request, db, app_user)
+    return app_user
+
+
+async def set_request_language(
+    request: Request, db: AsyncSession, app_user: AppUser
+) -> None:
+    """Record the approved profile-first locale for downstream response rendering."""
+    profile_settings = (
+        await db.execute(
+            select(AppUserProfile.settings).where(
+                AppUserProfile.app_user_id == app_user.id
+            )
+        )
+    ).scalar_one_or_none()
+    language = resolve_language(
+        request.headers.get("Accept-Language"), profile_settings
+    )
+    request.state.language = language
+    app_user._request_language = language
 
 
 async def get_current_app_user(

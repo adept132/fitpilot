@@ -12,7 +12,8 @@ from api.services.models import (
     SplitDaySlot,
     DayBlueprint,
     WorkoutPlan,
-    UserCalendarDay, AppUserMicrocycle
+    UserCalendarDay, AppUserMicrocycle,
+    UserSplit,
 )
 
 
@@ -56,7 +57,14 @@ class SchedulingEngine:
             elif plan.micro_tag == "adaptive":
                 score += 0.5
 
-            if score > max_score:
+            # Equal-score plans are versions of the same day prescription in
+            # practice. Prefer the newest one so confirming a regenerated plan
+            # immediately rebinds the calendar to the just-created version
+            # instead of keeping an older generated draft.
+            if score > max_score or (
+                score == max_score
+                and (best_plan_id is None or plan.id > best_plan_id)
+            ):
                 max_score = score
                 best_plan_id = plan.id
 
@@ -92,6 +100,153 @@ class SchedulingEngine:
         return updated
 
     @staticmethod
+    async def generate_block_days(
+            session: AsyncSession,
+            app_user_id: int,
+            block,
+            from_date: date,
+            until_date: date,
+    ) -> int:
+        """Записать дни календаря для блока, беря фазу ИЗ СНИМКА блока.
+
+        Единственный источник meso_tag: раньше их было три (модульная формула
+        в генераторе, зажим в превью и ручной current_phase), и они расходились
+        начиная с границы первого блока.
+
+        Дни с target_date < from_date не трогаются вовсе — вызывающая сторона
+        обязана передавать from_date не раньше «завтра» при перегенерации.
+        """
+        from api.services.periodization.position import position
+        from api.services.periodization.repository import block_state
+
+        state = block_state(block)
+
+        blueprint = None
+        slots_queue: List[SplitDaySlot] = []
+        active_split = (await session.execute(
+            select(UserSplit).where(
+                UserSplit.app_user_id == app_user_id,
+                UserSplit.is_active == True  # noqa: E712
+            )
+        )).scalar_one_or_none()
+
+        if active_split:
+            blueprint = (await session.execute(
+                select(SplitBlueprint)
+                .where(SplitBlueprint.id == active_split.blueprint_id)
+                .options(
+                    selectinload(SplitBlueprint.slots)
+                    .selectinload(SplitDaySlot.day)
+                    .selectinload(DayBlueprint.muscle_targets)
+                )
+            )).scalar_one_or_none()
+            if blueprint and blueprint.slots:
+                slots_queue = sorted(blueprint.slots, key=lambda s: s.day_order)
+
+        if not slots_queue:
+            return 0
+
+        blackout_weekdays = []
+        if active_split.selected_plans and "blackout_weekdays" in active_split.selected_plans:
+            blackout_weekdays = active_split.selected_plans["blackout_weekdays"]
+
+        user_micro = (await session.execute(
+            select(AppUserMicrocycle).where(
+                AppUserMicrocycle.app_user_id == app_user_id,
+                AppUserMicrocycle.is_active == True  # noqa: E712
+            )
+        )).scalar_one_or_none()
+        days_mapping = user_micro.days_mapping if user_micro else {}
+        micro_length = user_micro.length_days if user_micro else len(slots_queue)
+
+        plans = list((await session.execute(
+            select(WorkoutPlan).where(WorkoutPlan.app_user_id == app_user_id)
+        )).scalars().all())
+
+        # P0-09: дни, пережившие выборочную перегенерацию (_wipe_future_calendar
+        # оставляет дни с фактом/принятой правкой), уже занимают часть диапазона
+        # [from_date, until_date]. Ниже эти даты пропускаются при материализации,
+        # НО не выводятся из-под учёта счётчиков (total_workout_days_passed,
+        # позиция в сплите) — иначе раскладка сплита разъехалась бы для всех
+        # дней ПОСЛЕ пропущенной даты. Опрос сделан один раз до цикла, а не
+        # индивидуальным SELECT на каждую дату.
+        existing_dates = set((await session.execute(
+            select(UserCalendarDay.target_date).where(
+                UserCalendarDay.app_user_id == app_user_id,
+                UserCalendarDay.target_date >= from_date,
+                UserCalendarDay.target_date <= until_date,
+            )
+        )).scalars().all())
+
+        # Счётчик отработанных дней сплита ведём от НАЧАЛА блока, иначе при
+        # перегенерации с середины сплит начнётся заново с первого дня.
+        current_date = block.start_date
+        total_workout_days_passed = 0
+        created = 0
+
+        while current_date <= until_date:
+            weekday = current_date.weekday()
+            slot = slots_queue[total_workout_days_passed % len(slots_queue)]
+            day_bp = slot.day
+            micro_day_num = (total_workout_days_passed % micro_length) + 1
+
+            targets = [m.muscle_group_id for m in day_bp.muscle_targets] if day_bp.muscle_targets else []
+            is_rest_in_split = day_bp.template_type in ["active_rest", "rest"] or len(targets) == 0
+            is_banned = weekday in blackout_weekdays
+
+            pos = position(state, current_date)
+            micro_tag_calc = days_mapping.get(str(micro_day_num), {}).get("type", "adaptive")
+
+            if is_banned:
+                is_rest_day = True
+                if is_rest_in_split:
+                    total_workout_days_passed += 1
+            else:
+                is_rest_day = is_rest_in_split
+                # P0-08 ревью Задачи 7, Находка 4 (Minor): счётчик продвигается
+                # для ЛЮБОГО не-блэкаутного дня, включая день отдыха внутри
+                # сплита — так же, как ниже в launch_and_unroll_plan. Старая
+                # карусельная ветка ensure_horizon продвигает счётчик только
+                # для НЕ-отдыха; расхождение унаследовано из старого кода (не
+                # этой задачей) и сознательно не трогается здесь.
+                total_workout_days_passed += 1
+
+            # P0-09: current_date not in existing_dates — единственное
+            # дополнительное условие. Оно ТОЛЬКО подавляет вставку строки;
+            # ветки выше (weekday/slot/pos/total_workout_days_passed) уже
+            # отработали в этой итерации безусловно, так что пропуск даты
+            # здесь не сдвигает раскладку сплита на последующих днях.
+            if current_date >= from_date and current_date not in existing_dates:
+                plan_id_to_save = None
+                if not is_rest_day:
+                    plan_id_to_save = SchedulingEngine._score_and_find_best_plan(
+                        plans=plans, target_day_name=day_bp.name,
+                        meso_tag=pos.effort_tier, micro_tag=micro_tag_calc,
+                    )
+                session.add(UserCalendarDay(
+                    app_user_id=app_user_id,
+                    target_date=current_date,
+                    block_id=block.id,
+                    user_mesocycle_id=block.user_mesocycle_id,
+                    mesocycle_phase_number=pos.phase_number,
+                    user_microcycle_id=block.user_microcycle_id,
+                    microcycle_day_number=micro_day_num,
+                    day_tag=day_bp.name,
+                    micro_tag=micro_tag_calc,
+                    meso_tag=pos.effort_tier,
+                    plan_id=plan_id_to_save,
+                    is_rest_day=is_rest_day,
+                    is_blackout=is_banned,
+                    status="planned",
+                ))
+                created += 1
+
+            current_date += timedelta(days=1)
+
+        await session.commit()
+        return created
+
+    @staticmethod
     async def launch_and_unroll_plan(
             session: AsyncSession,
             app_user_id: int,
@@ -117,8 +272,58 @@ class SchedulingEngine:
         if not blueprint or not blueprint.slots:
             raise ValueError("Сплит пуст или не найден")
 
+        # P0-08 ревью Задачи 7, Находка 2: если периодизация настроена,
+        # единственный источник фазы для календаря — снимок активного блока
+        # (как и в ensure_horizon/generate_block_days), а не живой шаблон
+        # мезоцикла, который читает старый цикл ниже. Без этой ветки
+        # POST /splits/.../launch пересобирал бы до 90 дней календаря старым
+        # путём и не проставлял бы block_id вовсе — ровно та рассинхронизация
+        # между launch и ensure_horizon, ради устранения которой затевалась
+        # вся задача. Если блока нет (периодизация не настроена) — ниже
+        # работает прежний код без изменений.
+        #
+        # Порядок вызовов, который сложится в Задаче 14 (закрытие блока при
+        # смене сплита ПЕРЕД вызовом этой функции), здесь ничего не меняет:
+        # ensure_active_block просто увидит уже актуальный на момент вызова
+        # блок — старый или новый, без разницы.
+        from api.services.periodization.repository import ensure_active_block
+
+        # P0-08, повторное ревью Задачи 7, Находка 3: "пора ли закрывать
+        # текущий блок" обязано решаться по РЕАЛЬНОМУ сегодня, а не по
+        # клиентскому start_date запуска сплита. start_date не валидируется
+        # и может быть в будущем (пользователь планирует запуск наперёд) —
+        # если передать её сюда как today, ещё живой текущий блок закрылся
+        # бы досрочно и задним числом: exit_state посчитался бы по неполным
+        # данным, а новый блок получил бы start_date раньше настоящего
+        # сегодня. Диапазон генерации дней ниже (from_date=start_date,
+        # until_date=block.planned_end_date) по-прежнему определяется
+        # клиентским start_date — меняется только вход в решение о переходе.
+        block = await ensure_active_block(session, app_user_id, date.today())
+        if block is not None:
+            await SchedulingEngine.generate_block_days(
+                session, app_user_id, block,
+                from_date=start_date,
+                until_date=block.planned_end_date,
+            )
+            return
+
         slots_queue = sorted(blueprint.slots, key=lambda s: s.day_order)
         split_length = len(slots_queue)
+
+        # P0-09: та же дыра с дублирующейся строкой, что была в
+        # generate_block_days (см. её комментарий выше), открыта и здесь —
+        # эта ветка живёт, когда у пользователя не настроена периодизация
+        # (ensure_active_block вернула None выше), и splits.py всё равно
+        # спускает сюда даты, уже занятые уцелевшими днями (attach_session_to_day
+        # пишет status="completed" независимо от периодизации). Опрос сделан
+        # один раз до цикла, как и там.
+        existing_dates = set((await session.execute(
+            select(UserCalendarDay.target_date).where(
+                UserCalendarDay.app_user_id == app_user_id,
+                UserCalendarDay.target_date >= start_date,
+                UserCalendarDay.target_date <= start_date + timedelta(days=preview_length_days - 1),
+            )
+        )).scalars().all())
 
         # 2. Микроцикл (Настройки тяжести дней)
         micro_stmt = (
@@ -210,22 +415,31 @@ class SchedulingEngine:
 
                 total_workout_days_passed += 1  # День сплита отработан
 
-            cal_day = UserCalendarDay(
-                app_user_id=app_user_id,
-                target_date=current_date,
-                user_mesocycle_id=user_mesocycle_id if user_mesocycle_id else None,
-                mesocycle_phase_number=phase_number,
-                user_microcycle_id=user_micro.id if user_micro else None,
-                microcycle_day_number=micro_day_num,  # <--- ПИШЕМ РЕАЛЬНЫЙ ДЕНЬ МИКРОЦИКЛА
-                day_tag=day_bp.name,
-                micro_tag=micro_tag_calc,
-                meso_tag=meso_tag_calc,
-                plan_id=plan_id_to_save,
-                is_rest_day=is_rest_day,
-                is_blackout=is_banned,
-                status="planned"
-            )
-            session.add(cal_day)
+            # P0-09: current_date not in existing_dates — единственное
+            # дополнительное условие, зеркалит generate_block_days. Все
+            # вычисления и счётчики выше (weekday/slot/pos/
+            # total_workout_days_passed) уже отработали безусловно в этой
+            # итерации, так что пропуск вставки здесь не сдвигает раскладку
+            # сплита на последующих днях. НЕ continue — иначе current_date
+            # не продвинулся бы и цикл завис.
+            if current_date not in existing_dates:
+                cal_day = UserCalendarDay(
+                    app_user_id=app_user_id,
+                    target_date=current_date,
+                    user_mesocycle_id=user_mesocycle_id if user_mesocycle_id else None,
+                    mesocycle_phase_number=phase_number,
+                    user_microcycle_id=user_micro.id if user_micro else None,
+                    microcycle_day_number=micro_day_num,  # <--- ПИШЕМ РЕАЛЬНЫЙ ДЕНЬ МИКРОЦИКЛА
+                    day_tag=day_bp.name,
+                    micro_tag=micro_tag_calc,
+                    meso_tag=meso_tag_calc,
+                    plan_id=plan_id_to_save,
+                    is_rest_day=is_rest_day,
+                    is_blackout=is_banned,
+                    status="planned"
+                )
+                session.add(cal_day)
+
             current_date += timedelta(days=1)
 
         await session.commit()
@@ -255,6 +469,20 @@ class SchedulingEngine:
 
         # Если впереди еще есть запас (больше 30 дней), экономим ресурсы и ничего не делаем
         if (max_date - today).days >= 30:
+            return
+
+        # P0-08: если у пользователя есть активный блок, горизонт достраивается
+        # ИЗ СНИМКА БЛОКА. Старая карусельная ветка ниже остаётся для тех, у
+        # кого периодизация не настроена (блок в этом случае не создаётся).
+        from api.services.periodization.repository import ensure_active_block
+
+        block = await ensure_active_block(session, app_user_id, today)
+        if block is not None:
+            await SchedulingEngine.generate_block_days(
+                session, app_user_id, block,
+                from_date=max_date + timedelta(days=1),
+                until_date=min(block.planned_end_date, today + timedelta(days=horizon_days)),
+            )
             return
 
         # 2. Ищем стартовую точку и настройки в активном UserSplit

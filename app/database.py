@@ -8,16 +8,12 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
+from app.config import required_env
 from api.services.models import Base
 
 load_dotenv()
 
-LOCAL_DATABASE_URL = "postgresql+asyncpg://postgres:fitpilotbd132@localhost:5432/fitpilot_bot"
-
-DATABASE_URL = os.getenv("DATABASE_URL") or ""
-# Пустой/чужой драйвер (например синхронный psycopg2-URL) -> локальная разработка.
-if "asyncpg" not in DATABASE_URL:
-    DATABASE_URL = LOCAL_DATABASE_URL
+DATABASE_URL = required_env("DATABASE_URL")
 
 _url = make_url(DATABASE_URL)
 _host = _url.host or ""
@@ -148,6 +144,87 @@ _SYNC_INDEXES = [
         "uq_wss_exercise_client_uuid",
         'CREATE UNIQUE INDEX IF NOT EXISTS uq_wss_exercise_client_uuid '
         'ON workout_session_sets (workout_session_exercise_id, client_uuid) WHERE client_uuid IS NOT NULL',
+    ),
+    (
+        "uq_training_blocks_user_index",
+        'CREATE UNIQUE INDEX IF NOT EXISTS uq_training_blocks_user_index '
+        'ON training_blocks (app_user_id, block_index)',
+    ),
+    (
+        # P0-08, Задача 9, ревью, Находка 2: _materialize (periodization/service.py)
+        # читает pending-предложения и вставляет новые нетранзакционно —
+        # два конкурентных пересчёта (мобильный клиент на старте дёргает
+        # контекст дня и контекст периодизации одновременно) оба проходят
+        # чтение до чужого коммита и оба вставляют одинаковую строку. Индекс
+        # ловит эту гонку на уровне БД — конкурент падает на IntegrityError,
+        # которую _materialize обрабатывает как "предложение уже создано
+        # соседним запросом".
+        #
+        # Ключ индекса совпадает по смыслу с ключом дедупликации из Находки 1:
+        # COALESCE(payload->>'exercise_id', '') различает structural-предложения
+        # по упражнению (иначе индекс запретил бы второе структурное
+        # предложение по ДРУГОМУ упражнению того же блока), а для
+        # early_deload/postpone_deload/block_boundary payload обычно не несёт
+        # exercise_id — COALESCE даёт им общий '', и по (block_id, kind, '')
+        # может существовать не более одной pending-строки, ровно как и
+        # требует дедупликация по одному kind без reason_code.
+        "uq_periodization_proposals_pending",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_periodization_proposals_pending "
+        "ON periodization_proposals (block_id, kind, COALESCE((payload->>'exercise_id'), '')) "
+        "WHERE status = 'pending'",
+    ),
+    (
+        # P0-12, Задача 4: ведущая цель — та единственная, которую обслуживает
+        # автопилот. Структурные рычаги (сплит, частота тренировок) не делятся
+        # между двумя целями сразу, поэтому ведущей может быть не более одной
+        # цели на пользователя. Уникальность держит частичный индекс, а не
+        # ограничение на колонке: init_db при старте ALTER-ит недостающие
+        # колонки, но ограничений к ним не добавляет. Снятие флага с прежней
+        # ведущей должно происходить в той же транзакции, что установка новой
+        # (api/routers/goals.py, update_goal) — иначе этот индекс отвергнет
+        # вставку второй ведущей.
+        "uq_user_goals_primary",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_user_goals_primary "
+        "ON user_goals (app_user_id) WHERE is_primary",
+    ),
+    (
+        # P0-08, Задача 12: структурная правка «сдвиг диапазона повторов»
+        # (periodization/service.py, действие shift_reps) сначала читает
+        # существующий override, потом решает вставить новую строку или
+        # обновить найденную. Без уникальности пары (app_user_id, exercise_id)
+        # два конкурентных apply_decision по РАЗНЫМ pending-предложениям на
+        # одно и то же упражнение (гонка того же рода, что и у
+        # uq_periodization_proposals_pending выше) оба увидят "override ещё
+        # нет" и оба вставят СВОЮ строку — на выходе два override на одну
+        # пару пользователь+упражнение, и какой из них увидит движок
+        # рекомендаций (_load_rep_overrides), зависит от порядка чтения.
+        # Индекс ловит это на уровне БД; service.py обрабатывает конфликт как
+        # "конкурент уже применил сдвиг" (см. её докстринг у shift_reps).
+        "uq_user_exercise_rep_overrides_user_exercise",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_user_exercise_rep_overrides_user_exercise "
+        "ON user_exercise_rep_overrides (app_user_id, exercise_id)",
+    ),
+    (
+        # P0-09 I6 (Important): close_window (volume/repository.py) читает
+        # существующий снимок через scalar_one_or_none() и, если строки нет,
+        # вставляет новую — читает-потом-пишет без блокировки, ровно тот же
+        # класс гонки, что и у uq_periodization_proposals_pending выше.
+        # /workout-center/context и /periodization/context дёргаются с
+        # клиента одновременно на старте приложения — та самая гонка,
+        # которая мотивировала оба индекса рядом. Без уникальности гонка
+        # создаёт ВТОРУЮ строку на тот же (app_user_id, block_id,
+        # window_index); после этого scalar_one_or_none() при КАЖДОМ
+        # следующем вызове ловит MultipleResultsFound, guarded() глотает
+        # исключение, и весь контур объёма молча умирает НАВСЕГДА для этого
+        # пользователя — не разовая гонка, а перманентный отказ.
+        # COALESCE(block_id, 0) — block_id nullable у легаси-календаря
+        # (до-P0-08 дни без блока, см. докстринг Window/_window_starts),
+        # а обычный UNIQUE трактует каждый NULL как отличный от любого
+        # другого NULL и не поймал бы дубль у ДВУХ легаси-окон с одинаковым
+        # window_index.
+        "uq_volume_windows_user_block_index",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_volume_windows_user_block_index "
+        "ON volume_windows (app_user_id, COALESCE(block_id, 0), window_index)",
     ),
 ]
 

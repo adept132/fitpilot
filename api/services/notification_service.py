@@ -1,0 +1,335 @@
+"""Persistence and domain-event projection for the notification centre."""
+
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta, timezone
+from typing import Any
+
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from api.i18n import TRANSLATIONS, SupportedLanguage, tr
+from api.services.models import (
+    AppNotification,
+    BodyMeasurement,
+    PeriodizationProposal,
+    PushDelivery,
+    PushDevice,
+    UserAnthropometry,
+    UserCalendarDay,
+    UserGoal,
+)
+
+
+# Goal deadlines are materialized at most three days ahead today. A ten-year
+# ceiling still accepts imported/future-compatible rows while preventing
+# unbounded persisted numbers from becoming user-visible copy.
+MAX_GOAL_DEADLINE_DAYS = 3650
+
+_PARAMETERLESS_NOTIFICATION_KEYS = frozenset(
+    {
+        "notification.periodization_proposal",
+        "notification.training_day_without_plan",
+        "notification.measurements_due",
+        "notification.sync_conflict",
+        "notification.period_report.week",
+        "notification.period_report.month",
+        "notification.period_report.year",
+    }
+)
+
+
+def normalize_notification_params(
+    message_key: str, raw_params: object
+) -> dict[str, Any] | None:
+    """Return only parameters explicitly safe for the semantic message key."""
+
+    params = {} if raw_params is None else raw_params
+    if not isinstance(params, dict):
+        return None
+
+    if message_key == "notification.goal_deadline":
+        if set(params) != {"days"}:
+            return None
+        days = params["days"]
+        if type(days) is not int or not 0 <= days <= MAX_GOAL_DEADLINE_DAYS:
+            return None
+        return {"days": days}
+
+    if message_key == "notification.goal_deadline_today":
+        if set(params) != {"days"} or type(params["days"]) is not int:
+            return None
+        return {"days": 0} if params["days"] == 0 else None
+
+    if message_key in _PARAMETERLESS_NOTIFICATION_KEYS:
+        return {} if not params else None
+
+    return None
+
+
+async def create_notification(
+    db: AsyncSession,
+    *,
+    app_user_id: int,
+    event_type: str,
+    title: str,
+    body: str,
+    dedupe_key: str,
+    entity_type: str | None = None,
+    entity_id: str | int | None = None,
+    payload: dict[str, Any] | None = None,
+    message_key: str | None = None,
+    message_params: dict[str, Any] | None = None,
+) -> AppNotification:
+    """Create exactly one durable event for a user and semantic dedupe key."""
+
+    values = {
+        "app_user_id": app_user_id,
+        "event_type": event_type,
+        "entity_type": entity_type,
+        "entity_id": None if entity_id is None else str(entity_id),
+        "title": title,
+        "body": body,
+        "message_key": message_key,
+        "message_params": message_params,
+        "payload": payload or {},
+        "dedupe_key": dedupe_key,
+    }
+    statement = (
+        insert(AppNotification)
+        .values(**values)
+        .on_conflict_do_nothing(
+            index_elements=[AppNotification.app_user_id, AppNotification.dedupe_key]
+        )
+        .returning(AppNotification.id)
+    )
+    notification_id = (await db.execute(statement)).scalar_one_or_none()
+    if notification_id is None:
+        notification_id = (
+            await db.execute(
+                select(AppNotification.id).where(
+                    AppNotification.app_user_id == app_user_id,
+                    AppNotification.dedupe_key == dedupe_key,
+                )
+            )
+        ).scalar_one()
+    notification = (
+        await db.execute(
+            select(AppNotification).where(AppNotification.id == notification_id)
+        )
+    ).scalar_one()
+    active_device_ids = (
+        await db.execute(
+            select(PushDevice.id).where(
+                PushDevice.app_user_id == app_user_id,
+                PushDevice.push_enabled.is_(True),
+                PushDevice.disabled_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    for device_id in active_device_ids:
+        await db.execute(
+            insert(PushDelivery)
+            .values(notification_id=notification.id, device_id=device_id)
+            .on_conflict_do_nothing(
+                index_elements=[PushDelivery.notification_id, PushDelivery.device_id]
+            )
+        )
+    return notification
+
+
+def render_notification(
+    row: AppNotification, language: SupportedLanguage
+) -> tuple[str, str]:
+    """Render semantic copy without mutating the durable notification row."""
+
+    message_key = getattr(row, "message_key", None)
+    if not message_key:
+        return row.title, row.body
+
+    title_key = f"{message_key}.title"
+    body_key = f"{message_key}.body"
+    if title_key not in TRANSLATIONS["ru"] or body_key not in TRANSLATIONS["ru"]:
+        return row.title, row.body
+
+    params = normalize_notification_params(
+        message_key, getattr(row, "message_params", None)
+    )
+    if params is None:
+        return row.title, row.body
+    try:
+        return tr(language, title_key, **params), tr(language, body_key, **params)
+    except (KeyError, ValueError):
+        return row.title, row.body
+
+
+async def materialize_domain_notifications(
+    db: AsyncSession,
+    app_user_id: int,
+    today: date,
+) -> None:
+    """Project current actionable domain state into durable, deduplicated events."""
+
+    proposals = (
+        await db.execute(
+            select(PeriodizationProposal).where(
+                PeriodizationProposal.app_user_id == app_user_id,
+                PeriodizationProposal.status == "pending",
+            )
+        )
+    ).scalars().all()
+    for proposal in proposals:
+        await create_notification(
+            db,
+            app_user_id=app_user_id,
+            event_type="periodization_proposal",
+            entity_type="periodization_proposal",
+            entity_id=proposal.id,
+            title="План можно адаптировать",
+            body="Появилось предложение по адаптации тренировочного плана.",
+            message_key="notification.periodization_proposal",
+            message_params={},
+            payload={
+                "route": "/periodization",
+                "proposalId": proposal.id,
+                "proposalKind": proposal.kind,
+                "blockId": proposal.block_id,
+            },
+            dedupe_key=f"periodization_proposal:{proposal.id}",
+        )
+
+    unplanned_day = (
+        await db.execute(
+            select(UserCalendarDay).where(
+                UserCalendarDay.app_user_id == app_user_id,
+                UserCalendarDay.target_date == today,
+                UserCalendarDay.is_rest_day.is_(False),
+                UserCalendarDay.is_blackout.is_(False),
+                UserCalendarDay.plan_id.is_(None),
+                UserCalendarDay.status == "planned",
+            )
+        )
+    ).scalars().first()
+    if unplanned_day is not None:
+        await create_notification(
+            db,
+            app_user_id=app_user_id,
+            event_type="training_day_without_plan",
+            entity_type="calendar_day",
+            entity_id=unplanned_day.id,
+            title="На сегодня нет плана",
+            body="Выберите план из библиотеки или создайте его в генераторе.",
+            message_key="notification.training_day_without_plan",
+            message_params={},
+            payload={
+                "route": "/plan-generator",
+                "calendarDayId": unplanned_day.id,
+                "targetDate": today.isoformat(),
+            },
+            dedupe_key=f"training_day_without_plan:{today.isoformat()}",
+        )
+
+    deadline_limit = today + timedelta(days=3)
+    goals = (
+        await db.execute(
+            select(UserGoal).where(
+                UserGoal.app_user_id == app_user_id,
+                UserGoal.is_completed.is_(False),
+                UserGoal.deadline.is_not(None),
+                UserGoal.deadline >= today,
+                UserGoal.deadline <= deadline_limit,
+            )
+        )
+    ).scalars().all()
+    for goal in goals:
+        days_left = (goal.deadline - today).days
+        body = (
+            "Срок цели наступает сегодня. Проверьте прогресс."
+            if days_left == 0
+            else f"До срока цели осталось {days_left} дн. Проверьте прогресс."
+        )
+        message_key = (
+            "notification.goal_deadline_today"
+            if days_left == 0
+            else "notification.goal_deadline"
+        )
+        await create_notification(
+            db,
+            app_user_id=app_user_id,
+            event_type="goal_deadline",
+            entity_type="goal",
+            entity_id=goal.id,
+            title="Приближается срок цели",
+            body=body,
+            message_key=message_key,
+            message_params={"days": days_left},
+            payload={"route": "/progress", "goalId": goal.id},
+            dedupe_key=f"goal_deadline:{goal.id}:{goal.deadline.isoformat()}",
+        )
+
+    last_body_measurement = (
+        await db.execute(
+            select(func.max(BodyMeasurement.recorded_at)).where(
+                BodyMeasurement.app_user_id == app_user_id
+            )
+        )
+    ).scalar_one_or_none()
+    last_anthropometry = (
+        await db.execute(
+            select(func.max(UserAnthropometry.recorded_at)).where(
+                UserAnthropometry.app_user_id == app_user_id
+            )
+        )
+    ).scalar_one_or_none()
+    timestamps = [value for value in (last_body_measurement, last_anthropometry) if value]
+    latest_measurement = max(timestamps) if timestamps else None
+    if latest_measurement is not None:
+        if latest_measurement.tzinfo is None:
+            latest_measurement = latest_measurement.replace(tzinfo=timezone.utc)
+        age = datetime.now(timezone.utc) - latest_measurement
+        if age >= timedelta(days=14):
+            source_date = latest_measurement.date().isoformat()
+            await create_notification(
+                db,
+                app_user_id=app_user_id,
+                event_type="measurements_due",
+                entity_type="body_measurements",
+                title="Пора обновить замеры",
+                body="Свежие замеры сделают динамику и прогнозы точнее.",
+                message_key="notification.measurements_due",
+                message_params={},
+                payload={"route": "/progress/body-composition"},
+                dedupe_key=f"measurements_due:{source_date}",
+            )
+
+    # P1-06: отчёты материализуются здесь же, чтобы появляться у всех, а не
+    # только у тех, кто дошёл до экрана отчётов.
+    from api.services.reports.service import ensure_reports
+
+    await ensure_reports(db, app_user_id, today)
+
+
+async def unread_count(db: AsyncSession, app_user_id: int) -> int:
+    return int(
+        (
+            await db.execute(
+                select(func.count(AppNotification.id)).where(
+                    AppNotification.app_user_id == app_user_id,
+                    AppNotification.read_at.is_(None),
+                )
+            )
+        ).scalar_one()
+    )
+
+
+async def mark_all_read(db: AsyncSession, app_user_id: int) -> int:
+    result = await db.execute(
+        update(AppNotification)
+        .where(
+            AppNotification.app_user_id == app_user_id,
+            AppNotification.read_at.is_(None),
+        )
+        .values(read_at=datetime.now(timezone.utc))
+    )
+    return int(result.rowcount or 0)

@@ -80,3 +80,12 @@ class ScheduleLaunchRequest(BaseModel):
     blueprint_id: UUID
     start_date: date
     blackout_weekdays: List[int] = Field(default_factory=list)
+
+
+class SplitSuggestionOut(BaseModel):
+    blueprint_id: UUID
+    name: str
+    length_days: int
+    training_days: int
+    sessions_per_week: float
+    reason: str

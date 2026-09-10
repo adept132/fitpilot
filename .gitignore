@@ -38,6 +38,10 @@ scripts/.cache/
 # скриптом scripts/prune_embedder_vocab.py и в историю не едет.
 api/data/embedder_full/
 
+# Локальный persistent volume Центра обновлений; никогда не хранится в Git.
+/.release-storage/
+/releases/
+
 # Сгенерированные ingest_exercise_images.py страницы ручного ревью картинок.
 scripts/review.html
 scripts/review-propagate.html

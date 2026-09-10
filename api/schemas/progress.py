@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal, Optional, List
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class HistorySetResponse(BaseModel):
@@ -20,6 +20,7 @@ class ExerciseHistoryPointResponse(BaseModel): # У тебя она может �
 class ExerciseFullHistoryResponse(BaseModel):
     exercise_id: int
     name: str
+    localized_names: dict[str, str] = Field(default_factory=dict)
     category: str
     main_muscle_group: str
     history: List[ExerciseHistoryPointResponse]
@@ -45,6 +46,7 @@ class ForecastPoint(BaseModel):
 class ExerciseForecastResponse(BaseModel):
     exercise_id: int
     name: str
+    localized_names: dict[str, str] = Field(default_factory=dict)
     has_data: bool
     current_e1rm: Optional[float] = None       # кг (канон)
     last_date: Optional[str] = None
@@ -112,3 +114,16 @@ class DisciplineResponse(BaseModel):
     weeks: int
     days: List[DisciplineDay]
     density: DisciplineDensity
+
+
+class ProgressAchievement(BaseModel):
+    id: str
+    exercise_id: int
+    exercise_name: str
+    localized_names: dict[str, str] = Field(default_factory=dict)
+    e1rm: float
+    previous_e1rm: float | None = None
+    weight: float
+    reps: int
+    achieved_at: datetime
+    workout_id: int

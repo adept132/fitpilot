@@ -1,13 +1,16 @@
 from contextlib import asynccontextmanager
+import asyncio
+import os
 from pathlib import Path
 
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import init_db
 from api.deps import get_db
+from api.errors import LocalizedHTTPException, localized_http_exception_handler
 from api.routers.splits import router as splits_router
 from api.routers.exercises import router as exercises_router
 from api.routers.auth import router as auth_router
@@ -26,6 +29,11 @@ from api.routers.body import router as body_router
 from api.routers.sync import router as sync_router
 from api.routers.account import router as account_router
 from api.routers.readiness import router as readiness_router
+from api.routers.periodization import router as periodization_router
+from api.routers.notifications import router as notifications_router
+from api.routers.reports import router as reports_router
+from api.routers.releases import router as releases_router
+from api.routers.internal_releases import router as internal_releases_router, webhook_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -33,7 +41,19 @@ async def lifespan(app: FastAPI):
     # и достраиваем недостающие столбцы.
     await init_db()
     await _purge_expired_accounts()
-    yield
+    from api.services.push_service import push_worker
+    push_stop = asyncio.Event()
+    push_task = (
+        asyncio.create_task(push_worker(push_stop))
+        if os.getenv("PYTEST_CURRENT_TEST") is None
+        else None
+    )
+    try:
+        yield
+    finally:
+        push_stop.set()
+        if push_task is not None:
+            await push_task
 
 
 async def _purge_expired_accounts():
@@ -56,6 +76,10 @@ async def _purge_expired_accounts():
 
 
 app = FastAPI(title="Eurith API", lifespan=lifespan)
+app.add_exception_handler(
+    LocalizedHTTPException,
+    localized_http_exception_handler,
+)
 
 # Статика изображений техники (free-exercise-db) — отдаём с бэкенда, чтобы в рантайме
 # не ходить в GitHub. Файлы кладёт scripts/ingest_exercise_images.py в media/exercises/.
@@ -82,6 +106,12 @@ app.include_router(body_router)
 app.include_router(sync_router)
 app.include_router(account_router)
 app.include_router(readiness_router)
+app.include_router(periodization_router)
+app.include_router(notifications_router)
+app.include_router(reports_router)
+app.include_router(releases_router)
+app.include_router(webhook_router, include_in_schema=False)
+app.include_router(internal_releases_router, include_in_schema=False)
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check(db: AsyncSession = Depends(get_db)):
@@ -91,4 +121,4 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return {"status": "ok", "database": "connected"}
     except Exception as e:
         # Если база лежит, возвращаем 503 Service Unavailable
-        raise HTTPException(status_code=503, detail="Database connection failed")
+        raise LocalizedHTTPException(503, "system.database_unavailable")

@@ -24,6 +24,9 @@ class GoalUpdate(BaseModel):
     target_reps: Optional[int] = Field(default=None, ge=1, le=100)
     deadline: Optional[date] = None
     is_completed: Optional[bool] = None
+    # P0-12: назначение ведущей цели. Снятие флага с прежней ведущей
+    # происходит в той же транзакции (api/routers/goals.py).
+    is_primary: Optional[bool] = None
 
 
 class GoalStatus(BaseModel):
@@ -46,8 +49,66 @@ class GoalResponse(BaseModel):
     unit: Optional[str] = None
     exercise_id: Optional[int] = None
     exercise_name: Optional[str] = None
+    localized_names: dict[str, str] = Field(default_factory=dict)
     target_reps: Optional[int] = None
     metric_key: Optional[str] = None
     deadline: Optional[str] = None
     is_completed: bool
+    is_primary: bool = False
     status: GoalStatus
+
+
+# --- Контекст экрана автопилота цели (P0-12, Задача 11) ---
+
+class GoalEta(BaseModel):
+    nominal: Optional[str] = None
+    calibrated: Optional[str] = None
+    factor: Optional[float] = None
+    horizon: str = "materialized"
+    calibration_available: bool = False
+
+
+class GoalRates(BaseModel):
+    required: float = 0.0
+    plan: float = 0.0
+    ceiling: float = 0.0
+
+
+class GoalMilestone(BaseModel):
+    """Точка недельной оси «план против факта» (P0-12, §6.2).
+
+    Ровно одно из двух значений заполнено: expected_e1rm — веха симуляции
+    (только будущее), actual_e1rm — факт из истории лифта (только прошлое
+    строго до сегодня). Поле, которое для этой половины оси не может быть
+    заполнено никогда, остаётся null, а не подделывается нулём (см.
+    api/services/goal/service.py::_timeline_milestones).
+    """
+    week_start: str
+    expected_e1rm: Optional[float] = None
+    actual_e1rm: Optional[float] = None
+
+
+class GoalPlanAhead(BaseModel):
+    target_lift_sessions: int = 0
+    sets_per_window: int = 0
+    effort: Optional[str] = None
+    next_session_date: Optional[str] = None
+
+
+class GoalLastApplied(BaseModel):
+    proposal_id: int
+    applied_at: Optional[str] = None
+    can_undo: bool = False
+    undo_blocked_reason: Optional[str] = None
+
+
+class GoalAutopilotRead(BaseModel):
+    available: bool = False
+    # Причина, по которой автопилот молчит: показывается пользователю as is.
+    unavailable_reason: Optional[str] = None
+    eta: GoalEta = GoalEta()
+    rates: GoalRates = GoalRates()
+    milestones: list[GoalMilestone] = []
+    plan_ahead: GoalPlanAhead = GoalPlanAhead()
+    proposal: Optional[dict] = None
+    last_applied: Optional[GoalLastApplied] = None

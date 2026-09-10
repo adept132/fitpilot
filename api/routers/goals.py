@@ -2,13 +2,14 @@
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, status
+from sqlalchemy import select, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from api.deps import get_db
-from api.schemas.goals import GoalCreate, GoalResponse, GoalStatus, GoalUpdate
+from api.errors import LocalizedHTTPException
+from api.schemas.goals import GoalAutopilotRead, GoalCreate, GoalResponse, GoalStatus, GoalUpdate
 from api.services.app_user_service import get_current_app_user
 from api.services.goal_service import (
     GOAL_MEASUREMENT,
@@ -16,6 +17,7 @@ from api.services.goal_service import (
     compute_goal_status,
 )
 from api.services.models import AppUser, AppUserProfile, Exercise, UserGoal
+from api.services.exercise_localization import localized_names
 
 router = APIRouter(prefix="/goals", tags=["goals"])
 
@@ -35,18 +37,20 @@ async def _status_for(db: AsyncSession, goal: UserGoal, profile) -> GoalStatus:
     return GoalStatus(**data)
 
 
-def _to_response(goal: UserGoal, exercise_name: Optional[str], status_obj: GoalStatus) -> GoalResponse:
+def _to_response(goal: UserGoal, exercise: Optional[Exercise], status_obj: GoalStatus) -> GoalResponse:
     return GoalResponse(
         id=goal.id,
         goal_type=goal.goal_type,
         target_value=float(goal.target_value),
         unit=goal.unit,
         exercise_id=goal.exercise_id,
-        exercise_name=exercise_name,
+        exercise_name=exercise.name if exercise else None,
+        localized_names=localized_names(exercise) if exercise else {},
         target_reps=goal.target_reps,
         metric_key=goal.metric_key,
         deadline=goal.deadline.isoformat() if goal.deadline else None,
         is_completed=goal.is_completed,
+        is_primary=goal.is_primary,
         status=status_obj,
     )
 
@@ -58,9 +62,9 @@ async def create_goal(
     current_user: AppUser = Depends(get_current_app_user),
 ):
     if payload.goal_type == GOAL_STRENGTH and not payload.exercise_id:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Силовая цель требует exercise_id")
+        raise LocalizedHTTPException(status.HTTP_400_BAD_REQUEST, "goal.strength_exercise_required")
     if payload.goal_type == GOAL_MEASUREMENT and not payload.metric_key:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Цель-замер требует metric_key")
+        raise LocalizedHTTPException(status.HTTP_400_BAD_REQUEST, "goal.measurement_metric_required")
 
     # Идемпотентность offline-повтора: цель с этим client_uuid уже создана.
     if payload.client_uuid:
@@ -86,11 +90,25 @@ async def create_goal(
     )
     db.add(goal)
     await db.commit()
+
+    # P0-12: создание цели — изменились срок, целевое значение или признак
+    # ведущей, автопилот пересчитывает предложение немедленно.
+    # refresh_goal_proposals коммитит СЕБЯ САМА на каждом пути записи (см. её
+    # докстринг, финальное ревью Important 9) — второго commit() здесь не
+    # нужно и не нужен после этого вызова.
+    from api.services.goal.service import refresh_goal_proposals
+    from api.services.volume.repository import guarded, utc_today
+
+    await guarded(
+        db, "обновление автопилота цели",
+        refresh_goal_proposals(db, current_user.id, utc_today()),
+    )
+
     await db.refresh(goal)
 
     profile = await _profile(db, current_user.id)
-    exercise_name = await _exercise_name(db, goal.exercise_id)
-    return _to_response(goal, exercise_name, await _status_for(db, goal, profile))
+    exercise = await _exercise(db, goal.exercise_id)
+    return _to_response(goal, exercise, await _status_for(db, goal, profile))
 
 
 @router.get("", response_model=List[GoalResponse])
@@ -113,8 +131,7 @@ async def list_goals(
 
     out: List[GoalResponse] = []
     for goal in goals:
-        name = goal.exercise.name if goal.exercise else None
-        out.append(_to_response(goal, name, await _status_for(db, goal, profile)))
+        out.append(_to_response(goal, goal.exercise, await _status_for(db, goal, profile)))
     return out
 
 
@@ -135,13 +152,51 @@ async def update_goal(
         goal.deadline = payload.deadline
     if payload.is_completed is not None:
         goal.is_completed = payload.is_completed
+    if payload.is_primary is not None:
+        if payload.is_primary:
+            if goal.goal_type != GOAL_STRENGTH:
+                raise LocalizedHTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "goal.primary_strength_only",
+                )
+            if goal.deadline is None:
+                raise LocalizedHTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "goal.primary_deadline_required",
+                )
+            # Снимаем флаг с прежней ведущей в этой же транзакции — иначе
+            # частичный уникальный индекс отвергнет вставку второй.
+            await db.execute(
+                sa_update(UserGoal)
+                .where(
+                    UserGoal.app_user_id == current_user.id,
+                    UserGoal.is_primary == True,  # noqa: E712
+                    UserGoal.id != goal.id,
+                )
+                .values(is_primary=False)
+            )
+        goal.is_primary = payload.is_primary
 
     await db.commit()
+
+    # P0-12: правка цели — изменились срок, целевое значение или признак
+    # ведущей, автопилот пересчитывает предложение немедленно.
+    # refresh_goal_proposals коммитит СЕБЯ САМА на каждом пути записи (см. её
+    # докстринг, финальное ревью Important 9) — второго commit() здесь не
+    # нужно и не нужен после этого вызова.
+    from api.services.goal.service import refresh_goal_proposals
+    from api.services.volume.repository import guarded, utc_today
+
+    await guarded(
+        db, "обновление автопилота цели",
+        refresh_goal_proposals(db, current_user.id, utc_today()),
+    )
+
     await db.refresh(goal)
 
     profile = await _profile(db, current_user.id)
-    name = await _exercise_name(db, goal.exercise_id)
-    return _to_response(goal, name, await _status_for(db, goal, profile))
+    exercise = await _exercise(db, goal.exercise_id)
+    return _to_response(goal, exercise, await _status_for(db, goal, profile))
 
 
 @router.delete("/{goal_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -155,6 +210,22 @@ async def delete_goal(
     await db.commit()
 
 
+@router.get("/{goal_id}/autopilot", response_model=GoalAutopilotRead)
+async def get_goal_autopilot(
+    goal_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: AppUser = Depends(get_current_app_user),
+):
+    """Контекст экрана автопилота цели (P0-12, Задача 11): обе даты ETA,
+    темпы, вехи, план на будущих неделях, активное предложение и состояние
+    отмены последнего применённого."""
+    from api.services.goal.service import build_context
+    from api.services.volume.repository import utc_today
+
+    goal = await _owned_goal(db, goal_id, current_user.id)
+    return GoalAutopilotRead(**await build_context(db, current_user.id, goal, utc_today()))
+
+
 async def _owned_goal(db: AsyncSession, goal_id: int, app_user_id: int) -> UserGoal:
     goal = (await db.execute(
         select(UserGoal).where(
@@ -162,13 +233,13 @@ async def _owned_goal(db: AsyncSession, goal_id: int, app_user_id: int) -> UserG
         )
     )).scalar_one_or_none()
     if goal is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Цель не найдена")
+        raise LocalizedHTTPException(status.HTTP_404_NOT_FOUND, "goal.not_found")
     return goal
 
 
-async def _exercise_name(db: AsyncSession, exercise_id: Optional[int]) -> Optional[str]:
+async def _exercise(db: AsyncSession, exercise_id: Optional[int]) -> Optional[Exercise]:
     if exercise_id is None:
         return None
     return (await db.execute(
-        select(Exercise.name).where(Exercise.id == exercise_id)
+        select(Exercise).where(Exercise.id == exercise_id)
     )).scalar_one_or_none()

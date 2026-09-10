@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from api.deps import get_db
+from api.i18n import SupportedLanguage, tr
 from api.schemas.sync import (
     SyncChangesResponse,
     SyncConflictResponse,
@@ -24,12 +25,18 @@ from api.services.anomaly_stats import load_exercise_stats
 from api.services.app_user_service import get_current_app_user
 from api.services.models import (
     AppUser,
+    AppUserProfile,
     SyncTombstone,
     UserExerciseProgressionState,
     WorkoutSession,
     WorkoutSessionExercise,
     WorkoutSessionSet,
 )
+from api.services.notification_service import create_notification
+from api.services.progression import repository as progression_repo
+from api.services.progression.engine import plan_exercise
+from api.services.progression.records_repository import rebuild_records
+from api.services.progression.resolve import override_for
 from api.services.readiness import repository as readiness_repo
 from api.services.readiness.types import CheckinSignals
 
@@ -89,20 +96,26 @@ async def sync_workout(
     (см. init_db) остаются жёсткой гарантией.
     """
     app_user_id = app_user.id
+    language = getattr(app_user, "_request_language", "en")
     try:
-        return await _apply_snapshot(db, app_user_id, payload)
+        return await _apply_snapshot(
+            db, app_user_id, payload, language=language
+        )
     except IntegrityError:
         # Гонка проскочила мимо advisory-лока (например, запросы ушли в разные
         # соединения через внешний пулер). Уникальный индекс отработал — второй
         # проход уже найдёт строку, созданную конкурентом, и обновит её.
         await db.rollback()
-        return await _apply_snapshot(db, app_user_id, payload)
+        return await _apply_snapshot(
+            db, app_user_id, payload, language=language
+        )
 
 
 async def _apply_snapshot(
     db: AsyncSession,
     app_user_id: int,
     payload: SyncWorkoutSnapshot,
+    language: SupportedLanguage = "en",
 ) -> SyncWorkoutResponse:
     # 0. Сериализуем конкурентные синки ОДНОЙ тренировки: лок держится до конца
     # транзакции, поэтому второй пуш дождётся коммита первого и увидит его строку
@@ -157,6 +170,24 @@ async def _apply_snapshot(
         workout_id = workout.id
         await db.rollback()  # снимаем advisory-лок, ничего не записав
         detail = await _load_detail(db, workout_id)
+        await create_notification(
+            db,
+            app_user_id=app_user_id,
+            event_type="sync_conflict",
+            entity_type="workout",
+            entity_id=workout_id,
+            title=tr(language, "sync.notification.conflict.title"),
+            body=tr(language, "sync.notification.conflict.body"),
+            message_key="notification.sync_conflict",
+            message_params={},
+            payload={
+                "route": "/workout",
+                "workoutId": workout_id,
+                "serverVersion": current_version,
+            },
+            dedupe_key=f"sync_conflict:{workout_id}:{current_version}",
+        )
+        await db.commit()
         conflict = SyncConflictResponse(
             sync_version=current_version,
             workout=WorkoutSessionDetailResponse.model_validate(detail),
@@ -257,6 +288,12 @@ async def _apply_snapshot(
         # в JSONB кладём готовый dict через model_dump, а не сырой payload.
         if not exercise.prescription and ex_snap.prescription:
             exercise.prescription = ex_snap.prescription.model_dump()
+        # P0-11: живая цель перезаписывается всегда — она производная и
+        # обязана отражать последний известный факт. Ветка `if not ...`,
+        # что стоит выше у prescription, здесь была бы багом: цель
+        # первого подхода застыла бы навсегда.
+        if ex_snap.live_prescription:
+            exercise.live_prescription = ex_snap.live_prescription.model_dump()
         await db.flush()
         id_map[ex_snap.client_uuid] = exercise.id
 
@@ -303,6 +340,11 @@ async def _apply_snapshot(
             workout_set.notes = set_snap.notes
             workout_set.superset_round = set_snap.superset_round
             workout_set.is_completed = set_snap.is_completed
+            # Ревью, находка 1: только когда поле реально пришло в снимке —
+            # None (легаси-клиент/частичный снимок) не должен стирать
+            # уже выставленный флаг записью False поверх него.
+            if set_snap.is_max_reps is not None:
+                workout_set.is_max_reps = set_snap.is_max_reps
             workout_set.parent_set_id = None  # разрешим во втором проходе
 
             # Синк только помечает аномалию — не поднимаем HTTPException ни при
@@ -334,6 +376,123 @@ async def _apply_snapshot(
     # 5. Новая версия — её клиент сохранит и пришлёт как base_version.
     workout.sync_version = (workout.sync_version or 0) + 1
     new_version = workout.sync_version
+
+    # P0-09 C1: календарь запоминает факт и здесь тоже. Реальный путь
+    # завершения тренировки идёт ЧЕРЕЗ ЭТУ РУЧКУ (офлайн-репозиторий
+    # клиента шлёт снимок сюда, а не в устаревший /workouts/{id}/finish —
+    # см. её докстринг), поэтому привязка к дню календаря без этого хука
+    # никогда не срабатывала на боевом пути: mark_missed_days тем временем
+    # исправно помечал те же дни пропущенными на следующий обход контекста.
+    # guarded() изолирует падение в SAVEPOINT по тем же причинам, что и на
+    # дублирующем (но живом) месте в workout_center.finish_workout.
+    if workout.status == "finished":
+        from api.services.volume.repository import attach_session_to_day, guarded
+
+        await guarded(
+            db,
+            "привязка синхронизированной сессии к дню календаря",
+            attach_session_to_day(db, app_user_id, workout),
+        )
+
+        # P1-14: реальный путь завершения тренировки идёт через эту ручку
+        # (см. комментарий выше про календарь), поэтому пересчёт состояния
+        # прогрессии и рекордов обязан жить здесь же. refresh_state в
+        # workout_center.finish_workout остаётся нетронутым: ручка легаси,
+        # но живая, и разводить два поведения незачем.
+        #
+        # workout.exercises здесь брать НЕЛЬЗЯ напрямую: для новой тренировки
+        # (is_new=True) эта коллекция никогда не была прогружена selectinload'ом
+        # (см. комментарий у loaded_exercises выше), а дочерние строки этого
+        # запроса добавлены через сырой FK (workout_session_id=...), а не через
+        # relationship — back_populates их в коллекцию не подмешивает. Доступ
+        # к workout.exercises в этой точке — ленивая загрузка вне
+        # greenlet-контекста (MissingGreenlet). Перечитываем тренировку тем же
+        # набором selectinload, что и _load_detail: автофлаш AsyncSession перед
+        # execute() уже сделал видимыми все правки этого запроса.
+        #
+        # Ревью (Finding 1): реселект + профиль + резолв фазы раньше шли
+        # бэрами (без guarded()) — падение любого из них рвало бы весь
+        # sync_workout мимо except IntegrityError, и db.commit() ниже не
+        # выполнялся бы — тренировку теряли. Собираем их в один inner-корутину
+        # и оборачиваем в один guarded(): без этих входов пересчёт прогрессии
+        # всё равно невозможен, значит и падать они должны как один узел.
+        async def _load_inputs():
+            # populate_existing=True обязателен: без него select() при повторном
+            # синке уже существующей тренировки вернёт ТОТ ЖЕ объект из identity
+            # map, а его коллекция exercises уже прогружена строкой выше
+            # (loaded_exercises = list(workout.exercises) для is_new=False) —
+            # и SQLAlchemy не перепрогружает уже загруженную relationship-коллекцию
+            # молча. Упражнения, добавленные этим же синком через сырой FK
+            # (WorkoutSessionExercise(workout_session_id=...) в db.add() выше, а
+            # не через relationship), в стухшей коллекции не появятся — рекорды
+            # и прогрессия для них молча не пересчитаются.
+            refreshed = (
+                await db.execute(
+                    select(WorkoutSession)
+                    .where(WorkoutSession.id == workout.id)
+                    .options(*_detail_options())
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one()
+
+            # Входы движка добываются ровно так же, как в workout_center.py:709-721
+            # (отдельного хелпера там нет — это инлайн, и разводить два способа
+            # получения одних и тех же полей незачем).
+            profile = (await db.execute(
+                select(AppUserProfile).where(AppUserProfile.app_user_id == app_user_id)
+            )).scalars().first()
+            experience_level = profile.experience_level if profile else None
+            settings = profile.settings if profile else None
+
+            # Фаза мезоцикла одна на всю сессию — резолвим ОДИН раз до цикла,
+            # иначе к уже существующему N+1 по load_history добавится ещё один.
+            phase_effort_tier = await progression_repo.resolve_phase_effort_tier(
+                db, workout.app_user_mesocycle_id, workout.mesocycle_phase,
+                training_block_id=workout.training_block_id,
+            )
+            return refreshed, experience_level, settings, phase_effort_tier
+
+        inputs = await guarded(
+            db,
+            "загрузка входов пересчёта прогрессии",
+            _load_inputs(),
+        )
+
+        if inputs is not None:
+            refreshed, experience_level, settings, phase_effort_tier = inputs
+            exercise_ids = [se.exercise_id for se in refreshed.exercises]
+
+            await guarded(
+                db,
+                "пересчёт личных рекордов",
+                rebuild_records(db, app_user_id, exercise_ids),
+            )
+
+            # Гранулярность — по упражнению (осознанное решение): одно кривое
+            # упражнение (например, build_context упал на битой истории) не
+            # должно останавливать пересчёт остальных. se=se — обязательное
+            # значение по умолчанию: без него замыкание ловит переменную
+            # цикла по ссылке, и все итерации отработали бы над последним se.
+            for se in refreshed.exercises:
+                async def _refresh_one(se=se):
+                    ctx = await progression_repo.build_context(
+                        db, se, app_user_id, experience_level, settings,
+                        phase_effort_tier=phase_effort_tier,
+                    )
+                    nxt = plan_exercise(
+                        ctx,
+                        override=override_for(settings, se.exercise_id),
+                        provisional=True,
+                    )
+                    await progression_repo.refresh_state(
+                        db, app_user_id, se.exercise_id, nxt
+                    )
+
+                await guarded(
+                    db,
+                    "пересчёт состояния прогрессии",
+                    _refresh_one(se=se),
+                )
 
     await db.commit()
     workout_id = workout.id
@@ -490,12 +649,18 @@ async def sync_changes(
     # Предварительные предписания по всем упражнениям пользователя. Их немного
     # (по одному на упражнение с историей), и они нужны целиком: локальный
     # кэш обслуживает добавление любого упражнения офлайн.
+    # Дизъюнкция, а не только next_prescription: упражнение с рекордами, но
+    # без предписания (например, только что рассчитанными rebuild_records),
+    # иначе выпало бы из выборки и потеряло бы свои рекорды в дельте.
     state_rows = (
         (
             await db.execute(
                 select(UserExerciseProgressionState).where(
                     UserExerciseProgressionState.app_user_id == app_user_id,
-                    UserExerciseProgressionState.next_prescription.isnot(None),
+                    or_(
+                        UserExerciseProgressionState.next_prescription.isnot(None),
+                        UserExerciseProgressionState.records.isnot(None),
+                    ),
                 )
             )
         )
@@ -503,7 +668,9 @@ async def sync_changes(
         .all()
     )
     prescriptions = {
-        str(row.exercise_id): row.next_prescription for row in state_rows
+        str(row.exercise_id): row.next_prescription
+        for row in state_rows
+        if row.next_prescription is not None
     }
     # P0-07 §9.2: якорь для офлайн-потолка. Едет рядом с предписанием и
     # из той же выборки — лишнего запроса не появляется.
@@ -511,6 +678,12 @@ async def sync_changes(
         str(row.exercise_id): float(row.last_top_weight)
         for row in state_rows
         if row.last_top_weight is not None
+    }
+    # P1-14: личные рекорды. Та же выборка state_rows, лишнего запроса нет.
+    exercise_records = {
+        str(row.exercise_id): row.records
+        for row in state_rows
+        if row.records is not None
     }
 
     return SyncChangesResponse(
@@ -528,6 +701,7 @@ async def sync_changes(
         ],
         prescriptions=prescriptions,
         last_top_weights=last_top_weights,
+        exercise_records=exercise_records,
         server_time=cursor,
         has_more=has_more,
     )

@@ -1,0 +1,778 @@
+{
+  "76": {
+    "name": "Cable Shrug",
+    "description": "Stand tall and shrug the shoulders straight up against cable resistance."
+  },
+  "77": {
+    "name": "Barbell Shrug",
+    "description": "Hold the bar with straight arms and raise the shoulders without rolling them."
+  },
+  "78": {
+    "name": "Dumbbell Shrug",
+    "description": "Hold dumbbells at the sides and lift the shoulders under control."
+  },
+  "79": {
+    "name": "Standing Dumbbell Upright Row",
+    "description": "Pull the dumbbells toward the upper chest while keeping the elbows high."
+  },
+  "80": {
+    "name": "Barbell Upright Row",
+    "description": "Pull the bar close to the body toward the upper chest with high elbows."
+  },
+  "81": {
+    "name": "Cable Lateral Raise",
+    "description": "Raise one arm out to the side against cable resistance without shrugging."
+  },
+  "82": {
+    "name": "Machine Lateral Raise",
+    "description": "Raise the machine pads out to the sides while keeping the torso still."
+  },
+  "83": {
+    "name": "Dumbbell Lateral Raise",
+    "description": "Raise the dumbbells out to shoulder height with softly bent elbows."
+  },
+  "84": {
+    "name": "Standing Military Press",
+    "description": "Press the bar overhead from shoulder level while keeping the trunk braced."
+  },
+  "85": {
+    "name": "Seated Barbell Military Press",
+    "description": "Press the bar overhead from a seated, supported position."
+  },
+  "86": {
+    "name": "Dumbbell Shoulder Press",
+    "description": "Press the dumbbells overhead and lower them to shoulder level with control."
+  },
+  "87": {
+    "name": "Machine Shoulder Press",
+    "description": "Press the machine handles overhead while keeping the back supported."
+  },
+  "88": {
+    "name": "Reverse Pec Deck Fly",
+    "description": "Open the arms against the pads to train the rear shoulders and upper back."
+  },
+  "89": {
+    "name": "Seated Bent-Over Rear Delt Raise",
+    "description": "Hinge forward while seated and raise the dumbbells out to the sides."
+  },
+  "90": {
+    "name": "Barbell Bench Press",
+    "description": "Lower the bar to the chest and press it up from a stable bench position."
+  },
+  "91": {
+    "name": "Incline Dumbbell Press",
+    "description": "Press dumbbells above the upper chest on an inclined bench."
+  },
+  "92": {
+    "name": "Pec Deck Fly",
+    "description": "Bring the machine arms together in front of the chest without rounding forward."
+  },
+  "93": {
+    "name": "Machine Chest Press",
+    "description": "Press the machine handles forward while keeping the shoulders supported."
+  },
+  "94": {
+    "name": "Cable Crossover",
+    "description": "Bring the cable handles together in front of the chest with a soft elbow bend."
+  },
+  "95": {
+    "name": "Dumbbell Bench Press",
+    "description": "Press dumbbells above the chest from a flat bench with controlled depth."
+  },
+  "96": {
+    "name": "Incline Barbell Bench Press",
+    "description": "Lower the bar toward the upper chest and press from an inclined bench."
+  },
+  "97": {
+    "name": "Dumbbell Fly",
+    "description": "Open the dumbbells in a wide arc and bring them together above the chest."
+  },
+  "98": {
+    "name": "Incline Dumbbell Fly",
+    "description": "Perform a controlled dumbbell fly on an inclined bench."
+  },
+  "99": {
+    "name": "Smith Machine Bench Press",
+    "description": "Press the Smith machine bar from the chest on a flat bench."
+  },
+  "100": {
+    "name": "Smith Machine Incline Bench Press",
+    "description": "Press the Smith machine bar from the upper chest on an inclined bench."
+  },
+  "101": {
+    "name": "Incline Machine Chest Press",
+    "description": "Press the machine handles forward and upward to target the upper chest."
+  },
+  "102": {
+    "name": "Decline Barbell Bench Press",
+    "description": "Lower the bar to the lower chest and press from a declined bench."
+  },
+  "103": {
+    "name": "Push-Up",
+    "description": "Lower the braced body toward the floor and press back to straight arms."
+  },
+  "104": {
+    "name": "Bent-Arm Dumbbell Pullover",
+    "description": "Lower one dumbbell behind the head with bent elbows and pull it over the chest."
+  },
+  "105": {
+    "name": "Pull-Up",
+    "description": "Pull the chest toward the bar from a full, controlled hang."
+  },
+  "106": {
+    "name": "Wide-Grip Lat Pulldown",
+    "description": "Pull the wide bar toward the upper chest while keeping the torso stable."
+  },
+  "107": {
+    "name": "Close-Grip V-Bar Pulldown",
+    "description": "Pull the V-bar toward the chest with the elbows driving down."
+  },
+  "108": {
+    "name": "Chin-Up",
+    "description": "Pull up with an underhand grip until the chin clears the bar."
+  },
+  "109": {
+    "name": "Behind-the-Neck Wide-Grip Pulldown",
+    "description": "Pull the wide bar carefully behind the head only through a comfortable range."
+  },
+  "110": {
+    "name": "Rope Straight-Arm Pulldown",
+    "description": "Keep the arms nearly straight and pull the rope from overhead toward the thighs."
+  },
+  "111": {
+    "name": "Single-Arm Hammer Pulldown",
+    "description": "Pull one lever down toward the ribs while keeping the torso supported."
+  },
+  "112": {
+    "name": "Two-Arm Hammer Pulldown",
+    "description": "Pull both machine levers toward the ribs with the chest supported."
+  },
+  "113": {
+    "name": "Hammer Curl",
+    "description": "Curl the dumbbells with neutral palms while keeping the upper arms still."
+  },
+  "114": {
+    "name": "Preacher Curl",
+    "description": "Curl the weight while the upper arms stay supported on the preacher pad."
+  },
+  "115": {
+    "name": "Dumbbell Hammer Preacher Curl",
+    "description": "Use a neutral grip to curl dumbbells from the preacher pad."
+  },
+  "116": {
+    "name": "Barbell Curl",
+    "description": "Curl the bar toward the shoulders without swinging the torso."
+  },
+  "117": {
+    "name": "Incline Dumbbell Curl",
+    "description": "Curl dumbbells from an inclined bench while keeping the upper arms behind the torso."
+  },
+  "118": {
+    "name": "Standing Cable Curl",
+    "description": "Curl the cable handle toward the shoulders with the elbows fixed."
+  },
+  "119": {
+    "name": "Concentration Curl",
+    "description": "Brace the upper arm against the thigh and curl the dumbbell slowly."
+  },
+  "120": {
+    "name": "Dumbbell Biceps Curl",
+    "description": "Curl the dumbbells toward the shoulders without moving the upper arms."
+  },
+  "121": {
+    "name": "Seated Dumbbell Curl",
+    "description": "Curl dumbbells from a seated position while keeping the torso upright."
+  },
+  "122": {
+    "name": "Zottman Curl",
+    "description": "Curl with palms up, rotate at the top, and lower with palms down."
+  },
+  "123": {
+    "name": "Overhead Straight-Bar Cable Triceps Extension",
+    "description": "Extend the elbows overhead using a straight cable attachment."
+  },
+  "124": {
+    "name": "Overhead Rope Triceps Extension",
+    "description": "Extend the elbows overhead and separate the rope at full extension."
+  },
+  "125": {
+    "name": "Single-Arm Cable Triceps Extension",
+    "description": "Straighten one elbow against cable resistance without moving the upper arm."
+  },
+  "126": {
+    "name": "Standing Dumbbell Overhead Triceps Extension",
+    "description": "Lower a dumbbell behind the head and extend the elbows overhead."
+  },
+  "127": {
+    "name": "Triceps Pushdown",
+    "description": "Push the cable attachment down until the elbows are straight."
+  },
+  "128": {
+    "name": "EZ-Bar Skull Crusher",
+    "description": "Lower the EZ-bar toward the forehead by bending only the elbows."
+  },
+  "129": {
+    "name": "Lying Dumbbell Triceps Extension",
+    "description": "Lower the dumbbells beside the head and extend the elbows."
+  },
+  "130": {
+    "name": "Chest Dip",
+    "description": "Lean slightly forward, lower between the bars, and press back up."
+  },
+  "131": {
+    "name": "Seated Palms-Up Dumbbell Wrist Curl",
+    "description": "Curl the wrists upward with the forearms supported and palms facing up."
+  },
+  "132": {
+    "name": "Seated Palms-Down Dumbbell Wrist Curl",
+    "description": "Raise the backs of the hands with the forearms supported and palms down."
+  },
+  "133": {
+    "name": "Ab Crunch Machine",
+    "description": "Curl the rib cage toward the pelvis against the machine resistance."
+  },
+  "134": {
+    "name": "Decline Crunch",
+    "description": "Curl the upper back off a declined bench without pulling on the neck."
+  },
+  "135": {
+    "name": "Seated Cable Row",
+    "description": "Pull the handle toward the torso while keeping the spine stable."
+  },
+  "136": {
+    "name": "Bent-Over Barbell Row",
+    "description": "Hinge at the hips and row the bar toward the lower ribs."
+  },
+  "137": {
+    "name": "Machine Glute Bridge",
+    "description": "Drive the hips up against the machine pad and squeeze the glutes."
+  },
+  "138": {
+    "name": "Hip Abductor Machine",
+    "description": "Press the knees outward against the pads without rocking the torso."
+  },
+  "139": {
+    "name": "Leg Extension",
+    "description": "Extend the knees against the machine pad and lower under control."
+  },
+  "140": {
+    "name": "Hack Squat",
+    "description": "Lower on the hack squat platform and drive through the feet to stand."
+  },
+  "141": {
+    "name": "Smith Machine Squat",
+    "description": "Squat under the guided bar while keeping the feet firmly planted."
+  },
+  "142": {
+    "name": "Hip Adductor Machine",
+    "description": "Bring the knees together against the pads without bouncing."
+  },
+  "143": {
+    "name": "Glute-Ham Raise",
+    "description": "Lower the torso from the knees and pull back up with the hamstrings."
+  },
+  "144": {
+    "name": "Lying Leg Curl",
+    "description": "Curl the machine pad toward the glutes while keeping the hips down."
+  },
+  "145": {
+    "name": "Seated Calf Raise",
+    "description": "Raise the heels against the thigh pad and lower through a full range."
+  },
+  "146": {
+    "name": "Cable Wrist Curl",
+    "description": "Curl the wrists against cable resistance while keeping the forearms still."
+  },
+  "147": {
+    "name": "Palms-Down Wrist Curl Over a Bench",
+    "description": "Raise the backs of the hands while the forearms rest across a bench."
+  },
+  "148": {
+    "name": "Palms-Up Barbell Wrist Curl Over a Bench",
+    "description": "Curl the bar with the wrists while the forearms rest across a bench."
+  },
+  "149": {
+    "name": "Oblique Crunch",
+    "description": "Curl the torso diagonally to bring the ribs toward the opposite hip."
+  },
+  "150": {
+    "name": "Hanging Leg Raise",
+    "description": "Raise the legs from a controlled hang without swinging."
+  },
+  "151": {
+    "name": "Lying Bench Leg Raise",
+    "description": "Raise the legs from a flat bench while keeping the lower back controlled."
+  },
+  "152": {
+    "name": "Crunch",
+    "description": "Curl the rib cage toward the pelvis while keeping the lower back grounded."
+  },
+  "153": {
+    "name": "Decline Sit-Up",
+    "description": "Raise the torso from a declined bench with the abdomen braced."
+  },
+  "154": {
+    "name": "Cable Crunch",
+    "description": "Kneel and curl the torso down against cable resistance."
+  },
+  "155": {
+    "name": "Chest-Supported T-Bar Row",
+    "description": "Row the T-bar toward the chest while keeping the torso supported."
+  },
+  "156": {
+    "name": "One-Arm Dumbbell Row",
+    "description": "Brace the body and row one dumbbell toward the hip."
+  },
+  "157": {
+    "name": "Bent-Over Two-Dumbbell Row",
+    "description": "Hinge at the hips and row both dumbbells toward the ribs."
+  },
+  "158": {
+    "name": "Single-Leg Cable Kickback",
+    "description": "Drive one leg back against cable resistance without arching the lower back."
+  },
+  "159": {
+    "name": "Machine Glute Kickback",
+    "description": "Press one leg back against the machine pad and squeeze the glute."
+  },
+  "160": {
+    "name": "Barbell Hip Thrust",
+    "description": "Drive the hips up with the upper back supported and the bar across the hips."
+  },
+  "161": {
+    "name": "Smith Machine Hip Thrust",
+    "description": "Drive the guided bar upward with the upper back supported."
+  },
+  "162": {
+    "name": "Leg Press",
+    "description": "Lower the platform under control and press through the whole foot."
+  },
+  "163": {
+    "name": "Barbell Squat",
+    "description": "Squat with the bar securely positioned and drive up through the feet."
+  },
+  "164": {
+    "name": "Dumbbell Lunge",
+    "description": "Step into a lunge with dumbbells at the sides and push back to standing."
+  },
+  "165": {
+    "name": "Smith Machine Lunge",
+    "description": "Lunge under the guided bar while keeping the front foot firmly planted."
+  },
+  "166": {
+    "name": "Smith Machine Single-Leg Split Squat",
+    "description": "Perform a split squat under the guided bar with emphasis on the front leg."
+  },
+  "167": {
+    "name": "Seated Leg Curl",
+    "description": "Curl the machine pad down and back while keeping the hips seated."
+  },
+  "168": {
+    "name": "Romanian Deadlift",
+    "description": "Hinge at the hips with a soft knee bend and keep the weight close."
+  },
+  "169": {
+    "name": "Conventional Deadlift",
+    "description": "Lift the bar from the floor with a braced trunk and balanced foot pressure."
+  },
+  "170": {
+    "name": "Stiff-Leg Dumbbell Deadlift",
+    "description": "Hinge forward with nearly straight legs while keeping the dumbbells close."
+  },
+  "171": {
+    "name": "Sumo Deadlift",
+    "description": "Lift from a wide stance with the knees tracking over the toes."
+  },
+  "172": {
+    "name": "Calf Press on Leg Press",
+    "description": "Press the platform through the balls of the feet using ankle movement only."
+  },
+  "173": {
+    "name": "Standing Calf Raise",
+    "description": "Rise onto the balls of the feet and lower the heels under control."
+  },
+  "174": {
+    "name": "Alternating Kettlebell Floor Press",
+    "description": "Starting position: lie on the floor with two kettlebells held above the chest. Movement: lower one kettlebell to the chest while the other stays locked out, then press it back up. Return: alternate sides with control."
+  },
+  "175": {
+    "name": "Kettlebell Renegade Row",
+    "description": "Starting position: hold a wide-foot plank on two kettlebells, keeping the body in one straight line. Movement: brace one bell on the floor and row the other toward the waist, drawing the elbow back. Return: lower it under control and alternate sides without twisting the hips."
+  },
+  "176": {
+    "name": "Bench-Supported Barbell Rollout",
+    "description": "Starting position: kneel on a bench and hold a loaded barbell on the floor with straight arms and a braced core. Movement: roll the bar forward as the hips extend, without letting the low back sag. Return: pull the bar back with the abdominals from a comfortable stretched position."
+  },
+  "177": {
+    "name": "Seated Barbell Calf Raise",
+    "description": "Starting position: sit on a bench with the balls of the feet on a block and a barbell secured across the thighs above the knees. Movement: raise the heels as high as possible. Return: pause at the top, then lower the heels slowly into a full calf stretch."
+  },
+  "178": {
+    "name": "Behind-the-Back Barbell Shrug",
+    "description": "Starting position: stand tall holding a barbell behind the body with straight arms. Movement: raise the shoulders toward the ears without bending the elbows. Return: lower the shoulders slowly and under control."
+  },
+  "179": {
+    "name": "Barbell Side Bend",
+    "description": "Starting position: stand with a barbell across the upper back, as for a squat. Movement: keep the back straight and bend at the waist to one side while the rest of the body stays still. Return: come upright and repeat to the other side."
+  },
+  "180": {
+    "name": "Barbell Side Squat",
+    "description": "Starting position: stand wide with a barbell across the upper back and turn the working foot outward. Movement: sit toward the working leg by bending its hip and knee while the other leg stays only slightly bent. Return: drive through the working leg and repeat on the other side."
+  },
+  "181": {
+    "name": "Body-Up Push-Up",
+    "description": "Starting position: hold a forearm plank with the torso rigid and straight. Movement: press from the forearms onto the hands into a high plank without letting the hips sag or rise. Return: lower one forearm and then the other back to the floor."
+  },
+  "182": {
+    "name": "Lying Hip Raise",
+    "description": "Starting position: lie on the back with straight legs and arms by the sides. Movement: draw the knees in, extend the legs upward, then curl the pelvis to lift the glutes from the floor. Return: lower the pelvis and legs slowly to the start."
+  },
+  "183": {
+    "name": "Bradford Press",
+    "description": "Starting position: sit with a barbell at shoulder level in a wide overhand grip. Movement: press overhead, lower carefully behind the head only through a comfortable range, then press overhead again. Return: lower to the front of the shoulders and alternate front and back lowers."
+  },
+  "184": {
+    "name": "Cable Crossover Deadlift",
+    "description": "Starting position: stand between low cable pulleys, hinge down to the handles with a neutral back and lifted chest. Movement: drive through the heels to extend the knees and hips while the handles hang by the sides. Return: hinge and bend the knees to lower back into the squat."
+  },
+  "185": {
+    "name": "Standing Cable Hip Adduction",
+    "description": "Starting position: stand side-on to a low cable with an ankle cuff on the near leg and hold the frame for balance. Movement: draw the working leg across the body in front of the standing leg. Return: return the leg slowly toward the cable and then change sides."
+  },
+  "186": {
+    "name": "Incline Cable Overhead Triceps Extension",
+    "description": "Starting position: lie on an incline bench facing away from a high cable and hold a straight handle overhead with the elbows close to the torso. Movement: keep the upper arms still and extend the elbows with the triceps. Return: bend the elbows slowly under control."
+  },
+  "187": {
+    "name": "Standing Cable Judo Chop",
+    "description": "Starting position: stand side-on to a low cable in a wide stance and hold the rope with both hands over the shoulder away from the pulley. Movement: rotate and crunch the torso forward and down, pulling the rope diagonally toward the floor. Return: return slowly, then change sides."
+  },
+  "188": {
+    "name": "Lying Low-Cable Triceps Extension",
+    "description": "Starting position: lie on a flat bench and hold a low-cable straight handle above the chest with straight arms. Movement: keep the upper arms still and bend the elbows until the handle approaches the forehead. Return: extend the elbows with the triceps while controlling the cable throughout."
+  },
+  "189": {
+    "name": "Cable Preacher Curl",
+    "description": "Starting position: sit at a preacher bench facing a low cable, with the upper arms firmly on the pad and a straight handle in hand. Movement: curl the handle toward the shoulders without lifting the elbows. Return: lower it slowly until the arms are straight."
+  },
+  "190": {
+    "name": "Standing Cable Rear-Delt Fly",
+    "description": "Starting position: set the cables high and hold the left cable with the right hand and the right cable with the left hand. Movement: open the straight arms back and out to the sides. Return: pause, then bring the handles back under control."
+  },
+  "191": {
+    "name": "Low-Cable Reverse Crunch",
+    "description": "Starting position: lie facing a low cable with ankle cuffs attached, hips and knees at 90 degrees. Movement: draw the knees toward the torso and curl the pelvis off the floor. Return: lower the pelvis slowly while keeping abdominal tension."
+  },
+  "192": {
+    "name": "Calf-Machine Shrug",
+    "description": "Starting position: stand in a calf machine with the pads over the shoulders and the torso upright. Movement: lift the shoulders toward the ears without using the arms. Return: pause briefly, then lower the shoulders slowly."
+  },
+  "193": {
+    "name": "Close-Grip EZ-Bar Bench Press",
+    "description": "Starting position: lie on a flat bench holding an EZ bar over the chest with a close grip and elbows tucked. Movement: lower the bar slowly to the lower chest while keeping the elbows close. Return: press it back up by extending the elbows with the triceps."
+  },
+  "194": {
+    "name": "Decline Close-Grip Press and Skull Crusher",
+    "description": "Starting position: secure the legs on a decline bench and hold a barbell above the chest with a close grip; use a spotter for a safe lift-off. Movement: perform a close-grip press, then keep the upper arms still and lower the bar in an arc toward the forehead. Return: extend the triceps back overhead and alternate the two movements."
+  },
+  "195": {
+    "name": "Decline Oblique Crunch",
+    "description": "Starting position: secure the legs on a decline bench with one hand behind the head. Movement: curl the torso up while rotating so the opposite elbow approaches the knee. Return: lower slowly, complete one side, then switch sides."
+  },
+  "196": {
+    "name": "Feet-Elevated Push-Up",
+    "description": "Starting position: hold a high plank with the feet on a bench or box and the body in a straight line. Movement: lower the chest toward the floor by bending the elbows. Return: press back up through the chest and keep the body aligned."
+  },
+  "197": {
+    "name": "Decline Reverse Crunch",
+    "description": "Starting position: lie on a decline bench, hold its top edge, and keep the legs together and nearly straight. Movement: draw the legs toward the torso while curling the pelvis and lifting the hips from the bench. Return: lower the legs slowly without losing abdominal tension."
+  },
+  "198": {
+    "name": "Barbell Hip Thrust",
+    "description": "Starting position: sit on the floor with the upper back against a bench and a padded barbell across the hips. Movement: drive through the feet and extend the hips until supported by the shoulder blades and feet, squeezing the glutes. Return: lower the hips slowly."
+  },
+  "199": {
+    "name": "Barbell Lunge",
+    "description": "Starting position: safely unrack a barbell onto the upper back, stand tall, and step away from the rack. Movement: step forward and lower into a lunge with an upright torso; keep the front knee from traveling past the toes. Return: drive through the front heel and repeat on the other leg."
+  },
+  "200": {
+    "name": "Rear-Delt Barbell Row",
+    "description": "Starting position: hinge forward with a wide overhand barbell grip, neutral back, and elbows out so the body and arms form a T. Movement: row the bar toward the upper chest, using the rear delts rather than the biceps. Return: lower the bar slowly to the start."
+  },
+  "201": {
+    "name": "Barbell Step-Up",
+    "description": "Starting position: stand before a box or bench with a barbell across the upper back. Movement: step onto the platform and extend the working hip and knee, driving mainly through that heel. Return: step down under control and repeat on the other leg."
+  },
+  "202": {
+    "name": "One-Arm T-Bar Row",
+    "description": "Starting position: securely anchor one end of a loaded barbell, hinge forward, and hold the sleeve behind the plates with one hand. Movement: row the bar vertically toward the lower chest while keeping the torso still. Return: lower it slowly without letting the plates touch the floor, then change arms."
+  },
+  "203": {
+    "name": "Close-Grip Dumbbell Push-Up",
+    "description": "Starting position: hold a high plank with both hands around a vertical dumbbell, elbows tucked, and the body rigid. Movement: lower the body while keeping the back and legs straight and the hips level. Return: press up through the triceps to straight arms."
+  },
+  "204": {
+    "name": "Standing Close-Grip Barbell Curl",
+    "description": "Starting position: stand tall with a close underhand barbell grip and the elbows fixed by the sides. Movement: curl the bar toward the shoulders without moving the upper arms. Return: lower it slowly under control."
+  },
+  "205": {
+    "name": "Cuban Press",
+    "description": "Starting position: hold only light dumbbells in the scarecrow position, with the upper arms parallel to the floor and the forearms hanging down. Movement: externally rotate until the forearms are vertical, then press the dumbbells overhead. Return: reverse the press and rotation slowly with a light, pain-free load."
+  },
+  "206": {
+    "name": "Alternating Dumbbell Curl",
+    "description": "Starting position: stand with a dumbbell in each hand and the elbows close to the torso. Movement: curl one dumbbell toward the shoulder while supinating so the palm faces forward and up, keeping the upper arm still. Return: lower it slowly while rotating the palm back toward the thigh, then alternate arms."
+  },
+  "207": {
+    "name": "Neutral-Grip Dumbbell Bench Press",
+    "description": "Starting position: lie on a flat bench with dumbbells above the chest and palms facing each other. Movement: lower the dumbbells beside the chest under control. Return: press them up while keeping the wrists neutral and the shoulders stable."
+  },
+  "208": {
+    "name": "Side-Lying One-Arm Rear-Delt Raise",
+    "description": "Starting position: lie on the side on a bench with a light dumbbell in the upper hand and a slight elbow bend. Movement: raise the arm out to the side using the rear deltoid without rolling the torso. Return: lower the dumbbell slowly."
+  },
+  "209": {
+    "name": "Incline Prone Rear-Delt Raise",
+    "description": "Starting position: lie chest-down on a low incline bench with dumbbells hanging below the shoulders and a slight elbow bend. Movement: raise the arms out until the elbows reach shoulder height. Return: lower the dumbbells slowly without swinging."
+  },
+  "210": {
+    "name": "One-Arm Dumbbell Shoulder Press",
+    "description": "Starting position: stand or sit upright with one dumbbell at shoulder height and the palm facing forward. Movement: press the dumbbell overhead to a straight arm. Return: pause, lower it slowly to the shoulder, then change arms."
+  },
+  "211": {
+    "name": "One-Arm Overhead Dumbbell Triceps Extension",
+    "description": "Starting position: hold one dumbbell overhead with the upper arm beside the head. Movement: bend only the elbow to lower the dumbbell behind the head. Return: extend the elbow with the triceps while keeping the upper arm still, then change arms."
+  },
+  "212": {
+    "name": "One-Arm Dumbbell Upright Row",
+    "description": "Starting position: stand tall holding a dumbbell in front of the thigh with a neutral back. Movement: pull it close to the body toward chin height, leading with the elbow. Return: lower it slowly and use a comfortable, pain-free range."
+  },
+  "213": {
+    "name": "Prone Incline Dumbbell Curl",
+    "description": "Starting position: lie chest-down on an incline bench with dumbbells hanging below the shoulders, palms forward, and elbows by the sides. Movement: curl the dumbbells while keeping the upper arms still. Return: lower until the arms are fully straight."
+  },
+  "214": {
+    "name": "Plate Front Raise",
+    "description": "Starting position: stand tall holding a weight plate at its sides with nearly straight arms. Movement: raise the plate in front to just above shoulder height without swinging or further bending the elbows. Return: lower it slowly while keeping the torso still."
+  },
+  "215": {
+    "name": "Gironda Sternum Chin-Up",
+    "description": "Starting position: hang from a bar with an underhand shoulder-width grip, chest lifted, and torso leaning back. Movement: pull the sternum toward the bar while maintaining the arched position and keeping the head back. Return: lower slowly under control."
+  },
+  "216": {
+    "name": "Neutral-Grip Incline Dumbbell Press",
+    "description": "Starting position: lie on an incline bench with dumbbells at shoulder level and palms facing each other. Movement: lower the dumbbells beside the upper chest under control. Return: press them up through the chest, pause, then lower slowly; set the weights down carefully after the set."
+  },
+  "217": {
+    "name": "Incline Barbell Skull Crusher",
+    "description": "Starting position: lie on a 45-75 degree incline bench holding a barbell overhead with the upper arms close to the head. Movement: bend only the elbows to lower the bar in an arc behind the head. Return: extend the triceps to bring the bar back overhead."
+  },
+  "218": {
+    "name": "Incline Prone Dumbbell Row, Elbows Out",
+    "description": "Starting position: lie chest-down on a 30-degree incline bench with dumbbells hanging below and elbows slightly flared. Movement: row the dumbbells up with the elbows out until the upper arms align with the back. Return: lower them slowly into the stretch."
+  },
+  "219": {
+    "name": "Incline Cable Chest Press",
+    "description": "Starting position: sit on an incline bench between cables with the handles at chest level, chest lifted and shoulder blades set. Movement: press the handles straight forward by extending the elbows. Return: pause, then return slowly while maintaining cable tension."
+  },
+  "220": {
+    "name": "Lying Heel Touch",
+    "description": "Starting position: lie on the back with knees bent, feet on the floor, and arms by the sides. Movement: slightly curl up and reach to the right heel, then return. Return: reach to the left heel; touching both heels counts as one repetition."
+  },
+  "221": {
+    "name": "Alternating Standing Cable Press",
+    "description": "Starting position: stand between low cables with handles raised to shoulder height and palms forward. Movement: press one handle vertically overhead while keeping the chest lifted and head neutral. Return: lower it with control and immediately alternate sides."
+  },
+  "222": {
+    "name": "Dumbbell Around-the-World",
+    "description": "Starting position: lie on a flat bench with dumbbells beside the thighs, palms up, and a slight bend in the elbows. Movement: sweep the dumbbells in a wide arc from the thighs to behind the head, keeping the arms parallel to the floor. Return: reverse the arc slowly back to the thighs."
+  },
+  "223": {
+    "name": "Barbell Roll-In Pike",
+    "description": "Starting position: hold a high plank on a lightly loaded Olympic barbell. Movement: keep a natural back position, lift the hips, and roll the bar toward the feet with straight arms and a braced core. Return: roll the bar forward slowly back to the plank."
+  },
+  "224": {
+    "name": "Barbell Glute Bridge",
+    "description": "Starting position: lie on the floor with knees bent and a padded barbell across the hips. Movement: drive through the heels and extend the hips vertically until the upper back and heels support the body. Return: squeeze the glutes at the top, then lower slowly."
+  },
+  "225": {
+    "name": "Guillotine Neck Press",
+    "description": "Starting position: lie on a flat bench and hold a barbell over the neck with a medium grip. Movement: lower the bar slowly to just above the neck using a controlled, pain-free range. Return: press it back up through the chest; use a spotter because this variation carries elevated risk."
+  },
+  "226": {
+    "name": "Barbell Hack Squat",
+    "description": "Starting position: stand holding a barbell behind the body with straight arms and a neutral back. Movement: squat down while keeping the chest up and the back straight. Return: drive through the heels to stand and repeat under control."
+  },
+  "227": {
+    "name": "Head-Supported Bent-Over Dumbbell Fly",
+    "description": "Starting position: hinge in front of an incline bench with the forehead supported, back neutral, and dumbbells hanging beneath the shoulders. Movement: raise the nearly straight arms out to the sides without swinging or pulling them backward. Return: pause, then lower slowly."
+  },
+  "228": {
+    "name": "Seated Machine Chest Press",
+    "description": "Starting position: sit in the chest-press machine with the handles at chest level, elbows bent, chest lifted, and shoulder blades set. Movement: press the handles straight forward. Return: pause at lockout and return slowly while keeping tension; the movement may also be performed unilaterally where supported."
+  },
+  "229": {
+    "name": "Incline Cable Pullover",
+    "description": "Starting position: lie on an incline bench facing away from a high cable, holding a straight handle near the thighs with straight arms. Movement: raise the handle in an arc overhead under control while keeping the shoulders stable. Return: use the lats to bring the handle back toward the thighs and pause in the contracted position."
+  },
+  "230": {
+    "name": "Cable Shoulder Internal Rotation",
+    "description": "Starting position: sit side-on to a low cable with the near elbow fixed to the side at 90 degrees. Movement: rotate the forearm across the abdomen while keeping it parallel to the floor. Return: rotate slowly back to the cable and then change arms."
+  },
+  "231": {
+    "name": "One-Arm Reverse-Grip Cable Triceps Pressdown",
+    "description": "Starting position: face a high cable, hold a D-handle with an underhand grip, and keep the upper arm fixed at the side. Movement: extend the elbow to press the handle down. Return: raise it slowly while keeping the shoulder still, then change arms."
+  },
+  "232": {
+    "name": "Seated Cable Rope High Row",
+    "description": "Starting position: sit at a low-row station with a rope handle, straight back, arms extended, and elbows flared. Movement: pull the rope toward the upper chest just below the neck while keeping the elbows high. Return: extend the arms slowly and allow only a slight shoulder reach."
+  },
+  "233": {
+    "name": "Cable Russian Twist",
+    "description": "Starting position: lie with the upper back across a stability ball, hips high, and hold a mid-height cable handle above the chest with both hands. Movement: brace the abs and rotate the torso a quarter turn away from the cable. Return: rotate back slowly under tension, then change sides."
+  },
+  "234": {
+    "name": "Seated Cable Lateral Raise",
+    "description": "Starting position: sit on a bench between two low cables, lean forward with the chest on the thighs, and cross-grip the handles under the knees. Movement: raise the arms out and up until the upper arms are parallel to the floor, keeping a fixed slight elbow bend. Return: lower slowly."
+  },
+  "235": {
+    "name": "Dumbbell Handle Calf Raise",
+    "description": "Starting position: hold a stable support and place one foot on the handle of a round-ended dumbbell, allowing the heel to stretch. Movement: rise as high as possible onto the ball of the foot, rolling the dumbbell only in a controlled manner. Return: lower the heel slowly and change legs."
+  },
+  "236": {
+    "name": "Close-Grip Barbell Bench Press",
+    "description": "Starting position: lie on a flat bench with a barbell over the chest, hands just inside shoulder width, and elbows close to the torso. Movement: lower the bar to the lower chest under control. Return: press it back up by extending the elbows with the triceps."
+  },
+  "237": {
+    "name": "Close-Grip Dumbbell Bench Press",
+    "description": "Starting position: lie on a flat bench holding dumbbells together above the chest with neutral grips and elbows tucked. Movement: lower the dumbbells while keeping them close together and the shoulders stable. Return: press them back up through the triceps and chest."
+  },
+  "238": {
+    "name": "Close-Grip EZ-Bar Curl",
+    "description": "Starting position: stand tall holding an EZ bar on its inner bends with an underhand grip and elbows by the sides. Movement: curl the bar toward the shoulders without moving the upper arms. Return: lower it slowly through a controlled range."
+  },
+  "239": {
+    "name": "Cross-Body Hammer Curl",
+    "description": "Starting position: stand with dumbbells at the sides and palms facing inward. Movement: curl one dumbbell diagonally across the torso toward the opposite shoulder while keeping the elbow close. Return: lower slowly and alternate arms."
+  },
+  "240": {
+    "name": "Decline EZ-Bar Skull Crusher",
+    "description": "Starting position: secure the legs on a decline bench and hold an EZ bar above the chest with the upper arms still. Movement: bend the elbows to lower the bar toward the forehead in a controlled arc. Return: extend the elbows with the triceps; use a safe load and a spotter when needed."
+  },
+  "241": {
+    "name": "Incline Prone Dumbbell Row, Elbows In",
+    "description": "Starting position: lie chest-down on an incline bench with dumbbells hanging below the shoulders and elbows close to the torso. Movement: row the dumbbells toward the hips while keeping the chest on the pad. Return: lower them slowly to a full stretch without swinging."
+  },
+  "242": {
+    "name": "Dumbbell Scaption Raise",
+    "description": "Starting position: stand with light dumbbells at the sides in a neutral, thumbs-up grip. Movement: raise the arms in the scapular plane, about 30 degrees forward of the sides, to shoulder height while keeping the thumbs up. Return: lower slowly in the same neutral grip; keep the load light and use a pain-free range."
+  },
+  "243": {
+    "name": "Dumbbell Step-Up",
+    "description": "Starting position: stand before a sturdy box or bench holding dumbbells at the sides. Movement: step onto the platform and extend the working hip and knee by driving through that heel. Return: step down under control and repeat on the other leg."
+  },
+  "244": {
+    "name": "Classic EZ-Bar Curl",
+    "description": "Starting position: stand tall holding an EZ bar on the outer bends with the elbows close to the torso. Movement: curl the bar until the biceps fully contract without moving the upper arms. Return: pause briefly, then lower the bar slowly."
+  },
+  "245": {
+    "name": "Ab Wheel Rollout",
+    "description": "Starting position: kneel with both hands on an ab wheel placed in front of the knees. Movement: roll forward into a straight body line as far as the core can control without touching the floor. Return: pull the wheel back with the abdominals while keeping the core braced."
+  },
+  "246": {
+    "name": "Arnold Press",
+    "description": "Starting position: sit with back support and hold dumbbells at the upper chest with palms facing the body. Movement: press overhead while rotating the palms forward. Return: lower the dumbbells while rotating the palms back toward the body."
+  },
+  "247": {
+    "name": "Resistance Band Pull-Apart",
+    "description": "Starting position: stand tall holding a resistance band with straight arms in front of the chest. Movement: pull the hands apart until the band reaches the chest, squeezing the shoulder blades and drawing the shoulders back. Return: return slowly under tension."
+  },
+  "248": {
+    "name": "Barbell Walking Lunge",
+    "description": "Starting position: stand with a barbell across the upper back and feet hip-width apart. Movement: take a long step forward and lower until the rear knee nearly touches the floor, keeping the front knee behind the toes. Return: drive through the front heel and continue by lunging with the other leg."
+  },
+  "249": {
+    "name": "Bench Dip",
+    "description": "Starting position: face away from a bench with hands on its edge, arms straight, legs extended, and heels on the floor. Movement: lower the body by bending the elbows to just below 90 degrees, keeping them close and pointing back. Return: press back up with the triceps."
+  },
+  "250": {
+    "name": "Barbell Pullover",
+    "description": "Starting position: lie on a flat bench holding a barbell above the chest with a fixed slight elbow bend. Movement: lower the bar in an arc behind the head until the chest and back stretch comfortably. Return: pull it back along the same arc to above the chest."
+  },
+  "251": {
+    "name": "Barbell Box Squat",
+    "description": "Starting position: set a box in a power rack, unrack a barbell onto the upper back, and stand with a braced back. Movement: sit back and down until fully seated on the box, knees tracking out; never bounce off the box. Return: drive through the heels to stand."
+  },
+  "252": {
+    "name": "Cable Rope Curl",
+    "description": "Starting position: face a low cable holding the rope with neutral grips and elbows fixed to the sides. Movement: curl the rope until the forearms approach the biceps, moving only at the elbows. Return: pause, then lower the rope slowly."
+  },
+  "253": {
+    "name": "High-Cable Fly",
+    "description": "Starting position: stand between high cables holding D-handles with the chest lifted and arms out in a T, keeping a slight elbow bend. Movement: sweep the handles down and together in front of the hips. Return: pause, then open the arms slowly under control."
+  },
+  "254": {
+    "name": "Overhead Cable Rope Triceps Extension",
+    "description": "Starting position: hold a rope from a low cable overhead with neutral grips, elbows close to the head, and upper arms vertical. Movement: bend the elbows to lower the rope behind the head. Return: extend the elbows with the triceps while keeping the upper arms still."
+  },
+  "255": {
+    "name": "Barbell Clean and Jerk",
+    "description": "Starting position: stand close to the bar with a neutral back, chest lifted, hips down, and a secure overhand or hook grip. Movement: pull from the floor, explosively extend, then drop under into a deep front squat, turning the elbows through to receive the bar in the front rack; stand fully before the jerk. Dip and drive, receive the bar locked out overhead in a split stance, then recover to a stable standing position before lowering under control."
+  },
+  "256": {
+    "name": "Barbell Clean and Press",
+    "description": "Starting position: stand with the bar close to the shins, feet shoulder-width apart, back neutral, and shoulders slightly ahead of the bar. Movement: pull explosively, drop under into a squat clean, turn the elbows through to the front rack, and absorb the catch through the knees and hips; stand fully before pressing overhead. Return: lower the bar to the chest and then to the floor under control."
+  },
+  "257": {
+    "name": "Cross-Body Crunch",
+    "description": "Starting position: lie on the back with knees bent, feet flat, and hands lightly behind the head. Movement: lift one shoulder blade and bring the opposite knee toward it, aiming the elbow toward the knee without pulling on the neck. Return: lower slowly and alternate sides."
+  },
+  "258": {
+    "name": "Decline Dumbbell Bench Press",
+    "description": "Starting position: secure the legs on a decline bench and hold dumbbells above the chest with palms forward. Movement: lower the dumbbells beside the torso under control, keeping the forearms perpendicular to the floor. Return: press up through the chest and lower with a slower eccentric."
+  },
+  "259": {
+    "name": "Decline Dumbbell Fly",
+    "description": "Starting position: secure the legs on a decline bench and hold dumbbells above the chest with nearly straight arms and palms facing each other. Movement: open the arms in a wide arc until the chest stretches, keeping a slight elbow bend to protect the joints. Return: sweep the arms back together through the chest."
+  },
+  "260": {
+    "name": "Barbell Drag Curl",
+    "description": "Starting position: hold a barbell with an underhand grip, elbows close to the torso and slightly behind it. Movement: curl the bar upward while dragging it along the body and letting the elbows travel back without shrugging. Return: lower the bar slowly while maintaining contact with the torso."
+  },
+  "261": {
+    "name": "Dumbbell Floor Press",
+    "description": "Starting position: lie on the floor with dumbbells held above the body. Movement: lower until the upper arms touch the floor; keep the elbows closer for more triceps emphasis or wider for more chest emphasis. Return: pause, then press the dumbbells to straight arms."
+  },
+  "262": {
+    "name": "Cable Shoulder External Rotation",
+    "description": "Starting position: stand side-on to a cable at elbow height with the working arm farther from the pulley, elbow fixed to the side at 90 degrees. Movement: rotate the forearm away from the cable while keeping the elbow pinned. Return: return slowly through a comfortable range."
+  },
+  "263": {
+    "name": "Cable Face Pull",
+    "description": "Starting position: face a high cable with a rope or two D-handles. Movement: pull the handles toward the face while separating the ends and keeping the upper arms parallel to the floor. Return: extend the arms slowly under control."
+  },
+  "264": {
+    "name": "Lying Low-Cable Fly",
+    "description": "Starting position: lie on a flat bench between low cables with D-handles, palms up, a slight elbow bend, and the feet planted. Movement: sweep the arms in a wide arc until the handles meet above the chest. Return: lower the arms slowly while preserving the elbow angle."
+  },
+  "265": {
+    "name": "Barbell Floor Press",
+    "description": "Starting position: lie on the floor in a power rack with the barbell over the chest and shoulder blades set. Movement: lower the bar to the lower chest or upper abdomen until the upper arms touch the floor; pause without bouncing. Return: press up quickly while keeping wrists, forearms, and elbows aligned."
+  },
+  "266": {
+    "name": "Front Squat",
+    "description": "Starting position: support a barbell on the front deltoids with a clean grip, elbows high, chest lifted, and feet about shoulder-width apart. Movement: squat between the legs while the knees track with the toes. Return: drive through the heels or mid-foot to stand, keeping the elbows high."
+  },
+  "267": {
+    "name": "Goblet Squat",
+    "description": "Starting position: stand tall holding a kettlebell by the horns close to the chest. Movement: squat down between the legs with the chest up and back straight; use the elbows to gently guide the knees out at the bottom. Return: stand up under control."
+  },
+  "268": {
+    "name": "Barbell Good Morning",
+    "description": "Starting position: hold a barbell across the upper back, brace the back, keep the knees slightly bent, and step clear of the rack. Movement: hinge at the hips until the torso is nearly parallel to the floor, maintaining a neutral spine. Return: extend the hips with the glutes and hamstrings to stand."
+  },
+  "269": {
+    "name": "Hyperextension",
+    "description": "Starting position: lie face-down on a hyperextension bench with the ankles secured and the upper pad supporting the thighs while the hips can bend freely. Movement: lower the torso with a straight back only to a comfortable hamstring stretch; never round the spine. Return: raise to a straight line without hyperextending or using momentum."
+  }
+}

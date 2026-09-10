@@ -8,8 +8,12 @@ from sqlalchemy.orm import selectinload
 
 from api.services import equipment
 from api.services.exercise_utils import get_base_exercise_query
-from api.services.models import Exercise, WorkoutSession, WorkoutSessionExercise
+from api.services.models import Exercise, WorkoutSession, WorkoutSessionExercise, UserExercisePreference
 from api.services.exercise_matcher import ExerciseMatcher
+from api.services.exercise_localization import localized_names, sort_exercises
+
+
+EXERCISE_SEARCH_RESULT_LIMIT = 5
 
 
 def normalize_exercise_type(value: Optional[str]) -> Optional[str]:
@@ -56,6 +60,41 @@ def matches_equipment_filter(equipment_needed, equipment_filter: str | None) -> 
 
 class ExerciseSearchService:
     @staticmethod
+    async def preference_map(session: AsyncSession, user_id: int) -> dict[int, str]:
+        result = await session.execute(
+            select(UserExercisePreference.exercise_id, UserExercisePreference.preference).where(
+                UserExercisePreference.app_user_id == user_id,
+                UserExercisePreference.exercise_id.is_not(None),
+            )
+        )
+        return {exercise_id: preference for exercise_id, preference in result.all()}
+
+    @staticmethod
+    def sort_and_mark_preferences(
+        items,
+        preferences: dict[int, str],
+        language: str = "ru",
+        *,
+        by_similarity: bool = False,
+    ):
+        """Decorate results, then apply the shared final ordering contract."""
+        marked = []
+        for item in items:
+            exercise_id = item.get("id") if isinstance(item, dict) else item.id
+            preference = preferences.get(exercise_id)
+            if isinstance(item, dict):
+                item = {**item, "preference": preference}
+            else:
+                setattr(item, "_user_preference", preference)
+            marked.append(item)
+        return sort_exercises(
+            marked,
+            language,
+            preferences=preferences,
+            by_similarity=by_similarity,
+        )
+
+    @staticmethod
     async def _get_recent_exercise_ids(
         session: AsyncSession,
         app_user_id: int,
@@ -88,6 +127,7 @@ class ExerciseSearchService:
         equipment: Optional[str] = None,
         recent: bool = False,
         source: Optional[str] = None,
+        language: str = "ru",
     ):
         normalized_type = normalize_exercise_type(type)
         recent_ids: set[int] | None = None
@@ -106,6 +146,8 @@ class ExerciseSearchService:
                 session=session,
                 user_id=user_id,
                 exercise_name=q,
+                language=language,
+                candidate_limit=None,
             )
 
             filtered = matches
@@ -142,7 +184,14 @@ class ExerciseSearchService:
                     if item.get("source") in (source, "user")
                 ]
 
-            return filtered
+            preferences = await ExerciseSearchService.preference_map(session, user_id)
+            ordered = ExerciseSearchService.sort_and_mark_preferences(
+                filtered,
+                preferences,
+                language,
+                by_similarity=True,
+            )
+            return ordered[:EXERCISE_SEARCH_RESULT_LIMIT]
 
         stmt = (
             get_base_exercise_query(user_id)
@@ -198,7 +247,10 @@ class ExerciseSearchService:
                 if item.source == source
             ]
 
-        return filtered_items
+        preferences = await ExerciseSearchService.preference_map(session, user_id)
+        return ExerciseSearchService.sort_and_mark_preferences(
+            filtered_items, preferences, language
+        )
 
     @staticmethod
     async def get_muscle_groups(
@@ -317,6 +369,7 @@ class ExerciseSearchService:
             {
                 "exercise_id": item.exercise_id,
                 "name": item.exercise.name if item.exercise else "Без названия",
+                "localized_names": localized_names(item.exercise) if item.exercise else {},
                 "main_muscle_group": item.exercise.main_muscle_group if item.exercise else None,
                 "category": item.exercise.category if item.exercise else None,
             }
@@ -420,6 +473,7 @@ class ExerciseSearchService:
         return {
             "exercise_id": exercise.id,
             "name": exercise.name,
+            "localized_names": localized_names(exercise),
             "category": exercise.category or "base",
             "main_muscle_group": exercise.main_muscle_group or "Не указано",
             "history": history_points
