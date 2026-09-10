@@ -145,14 +145,8 @@ def _download_headers(release: AppRelease) -> tuple[dict[str, str], int] | None:
     )
 
 
-@router.api_route(
-    "/app-releases/{release_id}/download",
-    name="download_release",
-    methods=["GET", "HEAD"],
-)
-async def download_release(
-    release_id: UUID,
-    db: AsyncSession = Depends(get_db),
+async def _download_release_handoff(
+    release_id: UUID, db: AsyncSession
 ) -> StreamingResponse:
     """Hand a validated internal location to the artifact-serving proxy."""
 
@@ -184,3 +178,27 @@ async def download_release(
     assert isinstance(storage_key, str)  # path validation above guarantees this.
     headers["X-Accel-Redirect"] = f"/_release_files/{storage_key}"
     return StreamingResponse(iter(()), status_code=status.HTTP_200_OK, headers=headers)
+
+
+@router.get(
+    "/app-releases/{release_id}/download",
+    name="download_release",
+    operation_id="download_release",
+)
+async def download_release(
+    release_id: UUID,
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    return await _download_release_handoff(release_id, db)
+
+
+@router.head(
+    "/app-releases/{release_id}/download",
+    name="head_download_release",
+    include_in_schema=False,
+)
+async def head_download_release(
+    release_id: UUID,
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    return await _download_release_handoff(release_id, db)

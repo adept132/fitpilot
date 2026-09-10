@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import types
+import warnings
 from importlib import import_module
 from types import SimpleNamespace
 from uuid import uuid4
@@ -331,7 +332,31 @@ def _router_module():
 def test_release_routes_are_registered_once():
     paths = [route.path for route in app.routes]
     assert paths.count("/app-releases/android/latest") == 1
-    assert paths.count("/app-releases/{release_id}/download") == 1
+    download_routes = [
+        route
+        for route in app.routes
+        if route.path == "/app-releases/{release_id}/download"
+    ]
+    assert len(download_routes) == 2
+    assert {next(iter(route.methods)) for route in download_routes} == {"GET", "HEAD"}
+
+
+def test_download_openapi_exposes_one_stable_get_without_duplicate_warning():
+    app.openapi_schema = None
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        first = app.openapi()
+    app.openapi_schema = None
+    with warnings.catch_warnings(record=True) as caught_again:
+        warnings.simplefilter("always")
+        second = app.openapi()
+
+    path = "/app-releases/{release_id}/download"
+    assert set(first["paths"][path]) == {"get"}
+    assert first["paths"][path]["get"]["operationId"] == "download_release"
+    assert second["paths"][path]["get"]["operationId"] == "download_release"
+    messages = [str(item.message) for item in [*caught, *caught_again]]
+    assert not [message for message in messages if "download_release" in message]
 
 
 def test_latest_is_public_and_no_store(monkeypatch):
