@@ -1,0 +1,31 @@
+services:
+  api:
+    env_file:
+      - /etc/eurith/api-release.env
+    group_add:
+      - "${RELEASE_SHARED_GID:?set in /etc/eurith/release-deploy.env}"
+    volumes:
+      - /opt/eurith/releases:/var/lib/eurith/releases:rw
+    expose:
+      - "8000"
+
+  caddy:
+    image: caddy:2.11.4
+    restart: unless-stopped
+    depends_on:
+      - api
+    group_add:
+      - "${RELEASE_SHARED_GID:?set in /etc/eurith/release-deploy.env}"
+    volumes:
+      - ./backend/deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /opt/eurith/releases/android/sha256:/srv/eurith/releases/android/sha256:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+
+volumes:
+  caddy_data: {}
+  caddy_config: {}

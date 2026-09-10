@@ -1,0 +1,66 @@
+{$EURITH_SITE_ADDRESS:https://api.eurith.app} {
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>headers>Authorization delete
+				request>headers>X-Hub-Signature-256 delete
+				request>headers>X-Accel-Redirect delete
+			}
+		}
+	}
+
+	# Direct requests can never cross the internal file boundary.
+	route {
+		@internal_release_files path /_release_files/*
+		respond @internal_release_files 404
+	}
+
+	# The multipart allowance belongs only to the exact protected APK endpoint.
+	route {
+		@direct_apk_publish {
+			method POST
+			path /internal/app-releases/android/direct-apk
+		}
+		request_body @direct_apk_publish {
+			max_size 256MiB
+		}
+		reverse_proxy @direct_apk_publish {$EURITH_UPSTREAM:api:8000} {
+			header_down -X-Accel-Redirect
+		}
+	}
+
+	# Ordinary API proxy and the only response handoff boundary.
+	route {
+		reverse_proxy {$EURITH_UPSTREAM:api:8000} {
+			# Security-sensitive conjunction: both status and exact prefix must match.
+			@release_handoff {
+				status 200
+				header X-Accel-Redirect /_release_files/*
+			}
+			handle_response @release_handoff {
+				copy_response_headers {
+					include Content-Type
+					include Content-Disposition
+					include ETag
+					include Digest
+				}
+				rewrite * {rp.header.X-Accel-Redirect}
+				uri strip_prefix /_release_files
+				root * {$RELEASE_FILE_ROOT:/srv/eurith/releases}
+				file_server
+			}
+
+			@malformed_handoff {
+				header X-Accel-Redirect *
+			}
+			handle_response @malformed_handoff {
+				header -X-Accel-Redirect
+				respond "" 502
+			}
+
+			# Never expose an unexpected internal selection header downstream.
+			header_down -X-Accel-Redirect
+		}
+	}
