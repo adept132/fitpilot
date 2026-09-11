@@ -158,8 +158,13 @@ if [[ ! -e "$STORAGE_ROOT" ]]; then
   storage_state=created
 fi
 
+for directory in "$STORAGE_ROOT" "$STAGING_DIR" "$(dirname -- "$FINAL_DIR")" "$FINAL_DIR"; do
+  [[ -d "$directory" && ! -L "$directory" ]] || die storage_tree_invalid
+  assert_mode_owner_group "$directory" 2770 "$BASE_API_UID" "$GROUP_GID"
+done
+
 compose=(docker compose --env-file "$DEPLOY_ENV" -f "$BASE_COMPOSE" -f "$RELEASE_OVERLAY")
-API_UID="$("${compose[@]}" run --rm --no-deps --entrypoint id api -u 2>/dev/null)" || die api_uid_resolution_failed
+API_UID="$("${compose[@]}" run --build --rm --no-deps --entrypoint id api -u 2>/dev/null)" || die api_uid_resolution_failed
 [[ "$API_UID" =~ ^[1-9][0-9]*$ ]] || die api_uid_invalid
 [[ "$API_UID" == "$BASE_API_UID" ]] || die api_uid_changed_across_overlay
 

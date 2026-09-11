@@ -183,11 +183,12 @@ elif command == "find":
 elif command == "docker":
     joined = " ".join(args)
     if "--entrypoint id api -u" in joined:
-        if os.environ.get("FAKE_DOCKER_AUTOCREATE_STORAGE") == "1" and joined.count(" -f ") > 1:
+        is_overlay = joined.count(" -f ") > 1
+        if os.environ.get("FAKE_DOCKER_AUTOCREATE_STORAGE") == "1" and is_overlay:
             storage = pathlib.Path(os.environ["FAKE_STORAGE_ROOT"])
             if not storage.exists():
                 storage.mkdir(parents=True); metadata_set(storage, "755", "0", "0")
-        print("1234"); sys.exit(0)
+        print(os.environ.get("FAKE_TARGET_API_UID", "1234") if is_overlay else "1234"); sys.exit(0)
     passed_env = {args[i + 1].split("=", 1)[0]: args[i + 1].split("=", 1)[1] for i, value in enumerate(args[:-1]) if value == "-e" and "=" in args[i + 1]}
     action = passed_env.get("EURITH_PROBE_ACTION", "")
     if os.environ.get("FAKE_DOCKER_FAIL_ACTION") == action: sys.exit(9)
@@ -318,9 +319,11 @@ def test_storage_exists_before_any_release_overlay_compose_probe() -> None:
     script = SCRIPT.read_text(encoding="utf-8")
     base_probe = script.index("BASE_API_UID=")
     storage_create = script.index('install -d -m 2770 -o "$BASE_API_UID"')
+    storage_verify = script.index('for directory in "$STORAGE_ROOT"')
     overlay_compose = script.index('compose=(docker compose --env-file "$DEPLOY_ENV" -f "$BASE_COMPOSE" -f "$RELEASE_OVERLAY")')
     target_probe = script.index("\nAPI_UID=", base_probe + 1)
-    assert base_probe < storage_create < overlay_compose < target_probe
+    assert base_probe < storage_create < storage_verify < overlay_compose < target_probe
+    assert '"${compose[@]}" run --build --rm --no-deps --entrypoint id api -u' in script
     assert "api_uid_changed_across_overlay" in script
 
 
@@ -353,6 +356,32 @@ def test_first_use_survives_real_compose_short_bind_autocreate_side_effect(host:
     assert metadata[str(host.storage.resolve())] == {
         "mode": "2770", "owner": "1234", "group": "4321"
     }
+
+
+def test_target_image_uid_change_fails_before_permission_probes(host: Host) -> None:
+    result = host.run(FAKE_TARGET_API_UID="2345")
+    assert result.returncode != 0
+    assert "error=api_uid_changed_across_overlay" in result.stderr
+    assert "permissions=verified" not in result.stdout
+
+
+def test_preexisting_unsafe_storage_fails_before_overlay_compose(host: Host) -> None:
+    host.storage.mkdir(parents=True)
+    metadata_path = host.state / "metadata.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata[str(host.storage.resolve())] = {"mode": "755", "owner": "0", "group": "0"}
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    result = host.run()
+
+    assert result.returncode != 0
+    assert "error=protected_metadata_mismatch" in result.stderr
+    docker_calls = [
+        line for line in (host.state / "calls.log").read_text().splitlines()
+        if line.startswith("docker ")
+    ]
+    assert len(docker_calls) == 1
+    assert docker_calls[0].count(" -f ") == 1
 
 
 def test_env_files_have_exact_keys_and_storage_roots(host: Host) -> None:
