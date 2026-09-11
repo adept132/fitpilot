@@ -13,8 +13,9 @@ require_full_sha "$MOBILE_CANDIDATE_SHA"
 
 APP_DIR="${APP_DIR:-/opt/eurith}"
 SOURCE_DIR="${SOURCE_DIR:-$APP_DIR/backend}"
+EURITH_DEPLOY_ASSET_ROOT="${EURITH_DEPLOY_ASSET_ROOT:-}"
 EURITH_BASE_COMPOSE="${EURITH_BASE_COMPOSE:-$APP_DIR/docker-compose.yml}"
-RELEASE_OVERLAY="${RELEASE_OVERLAY:-$RUNNER_ROOT/deploy/compose.release.yml}"
+RELEASE_OVERLAY="${RELEASE_OVERLAY:-$EURITH_DEPLOY_ASSET_ROOT/deploy/compose.release.yml}"
 OLD_RELEASE_OVERLAY="$SOURCE_DIR/deploy/compose.release.yml"
 DEPLOY_ENV="${DEPLOY_ENV:-/etc/eurith/release-deploy.env}"
 EURITH_PUBLIC_API_URL="${EURITH_PUBLIC_API_URL:-}"
@@ -31,7 +32,7 @@ CADDY_IMAGE="caddy:2.11.4"
 EURITH_APPROVED_CADDY_DIGEST="${EURITH_APPROVED_CADDY_DIGEST:-}"
 CADDY_IMAGE_REF="$CADDY_IMAGE@$EURITH_APPROVED_CADDY_DIGEST"
 export CADDY_IMAGE_REF
-CADDYFILE="$RUNNER_ROOT/deploy/caddy/Caddyfile"
+CADDYFILE="$EURITH_DEPLOY_ASSET_ROOT/deploy/caddy/Caddyfile"
 MOBILE_GATE_PUBLISHER="$RUNNER_ROOT/deploy/publish-mobile-gate.py"
 MIGRATION_MANIFEST_TOOL="$RUNNER_ROOT/deploy/migration-path-manifest.py"
 MIGRATION_APPROVAL_TOOL="$RUNNER_ROOT/deploy/validate-migration-approval.py"
@@ -40,7 +41,7 @@ REHEARSAL_INPUT_PREPARER="$RUNNER_ROOT/deploy/prepare-rehearsal-inputs.py"
 MOBILE_GATE_FILE="${MOBILE_GATE_FILE:-$EURITH_EVIDENCE_ROOT/backend-gate-${TARGET_SHA}.env}"
 
 for command_name in git docker curl sha256sum awk sed grep stat findmnt head python3 install chmod date mktemp mv rm rmdir seq sleep; do require_command "$command_name"; done
-for path in "$SOURCE_DIR" "$EURITH_BASE_COMPOSE" "$RELEASE_OVERLAY" "$DEPLOY_ENV" "$EURITH_BACKUP_ROOT" "$EURITH_RESTORE_DB_URL_FILE" "$EURITH_RESTORE_VOLUME_ROOT" "$EURITH_MIGRATION_APPROVAL_FILE" "$EURITH_EVIDENCE_ROOT" "$EURITH_CANARY_IDS_FILE" "$MOBILE_GATE_FILE"; do [[ -n "$path" ]] || die required_runtime_path_missing; done
+for path in "$SOURCE_DIR" "$EURITH_DEPLOY_ASSET_ROOT" "$EURITH_BASE_COMPOSE" "$RELEASE_OVERLAY" "$DEPLOY_ENV" "$EURITH_BACKUP_ROOT" "$EURITH_RESTORE_DB_URL_FILE" "$EURITH_RESTORE_VOLUME_ROOT" "$EURITH_MIGRATION_APPROVAL_FILE" "$EURITH_EVIDENCE_ROOT" "$EURITH_CANARY_IDS_FILE" "$MOBILE_GATE_FILE"; do [[ -n "$path" ]] || die required_runtime_path_missing; done
 PUBLIC_API_BASE="$(python3 - "$EURITH_PUBLIC_API_URL" <<'PY'
 import ipaddress, re, sys
 import urllib.parse
@@ -83,7 +84,12 @@ require_safe_absolute_path "$EURITH_RESTORE_VOLUME_ROOT" backup "$SOURCE_DIR"
 require_safe_absolute_path "$EURITH_MIGRATION_APPROVAL_FILE" secret "$SOURCE_DIR"
 require_safe_absolute_path "$EURITH_RESTORE_DB_URL_FILE" secret "$SOURCE_DIR"
 require_safe_absolute_path "$MOBILE_GATE_FILE" backup "$SOURCE_DIR"
+require_safe_absolute_path "$EURITH_DEPLOY_ASSET_ROOT" backup "$SOURCE_DIR"
+[[ "$(_canonical_path "$EURITH_DEPLOY_ASSET_ROOT")" == "$(_canonical_path "$RUNNER_ROOT")" ]] || die deploy_asset_root_mismatch
+[[ "$(_canonical_path "$RELEASE_OVERLAY")" == "$(_canonical_path "$EURITH_DEPLOY_ASSET_ROOT")/deploy/compose.release.yml" ]] || die deploy_asset_overlay_mismatch
 case "$(_canonical_path "$EURITH_EVIDENCE_ROOT")/" in "$(_canonical_path "$EURITH_RELEASE_VOLUME_ROOT")"/*) die evidence_below_release_storage ;; esac
+export EURITH_RUNTIME_SOURCE_ROOT="$EURITH_DEPLOY_ASSET_ROOT"
+export EURITH_RUNTIME_ASSET_ROOT="$EURITH_DEPLOY_ASSET_ROOT"
 compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY")
 OLD_COMMIT=''; EVIDENCE_DIR=''; BACKUP_GENERATION=''; BACKUP_MANIFEST_SHA256=''; EXPECTED_ALEMBIC_HEAD=''; MIGRATION_ATTEMPTED=0; MIGRATION_STATE=not_attempted; MIGRATION_EVIDENCE_WRITTEN=0; SWITCH_ATTEMPTED=0; SOURCE_SWITCHED=0; SCHEMA_ROLLBACK_COMPATIBLE=0; ROLLBACK_ATTEMPTED=0; ROLLBACK_EVIDENCE_WRITTEN=0; PRIOR_CADDY_PRESENT=0; OLD_CADDY_IMAGE_ID=''; REHEARSAL_DIR=''; REHEARSAL_DB_URL_SNAPSHOT=''; REHEARSAL_OVERLAY=''; CURRENT_STAGE=preflight
 declare -A SWITCH_CONTAINER_IDS=()
@@ -98,9 +104,11 @@ gate_checkout() {
   [[ -z "$(git status --porcelain)" ]] || die checkout_dirty
   require_root
   OLD_COMMIT="$(git rev-parse HEAD)"; require_full_sha "${OLD_COMMIT,,}"
-  [[ -d "$RUNNER_ROOT/.git" || -f "$RUNNER_ROOT/.git" ]] || die deploy_runner_not_versioned
-  [[ -z "$(git -C "$RUNNER_ROOT" status --porcelain)" ]] || die deploy_runner_dirty
-  [[ "$(git -C "$RUNNER_ROOT" rev-parse HEAD)" == "$TARGET_SHA" ]] || die deploy_runner_sha_mismatch
+  [[ -d "$EURITH_DEPLOY_ASSET_ROOT/.git" || -f "$EURITH_DEPLOY_ASSET_ROOT/.git" ]] || die deploy_runner_not_versioned
+  [[ "$(git -C "$EURITH_DEPLOY_ASSET_ROOT" rev-parse --show-toplevel)" == "$(_canonical_path "$EURITH_DEPLOY_ASSET_ROOT")" ]] || die deploy_asset_root_toplevel_mismatch
+  [[ -z "$(git -C "$EURITH_DEPLOY_ASSET_ROOT" status --porcelain)" ]] || die deploy_asset_root_dirty
+  [[ "$(git -C "$EURITH_DEPLOY_ASSET_ROOT" rev-parse HEAD)" == "$TARGET_SHA" ]] || die deploy_asset_root_sha_mismatch
+  if git -C "$EURITH_DEPLOY_ASSET_ROOT" symbolic-ref -q HEAD >/dev/null 2>&1; then die deploy_asset_root_not_detached; fi
   git fetch --prune origin >/dev/null || die fetch_failed
   [[ "$(git rev-parse --verify "${TARGET_SHA}^{commit}")" == "$TARGET_SHA" ]] || die target_sha_unresolved
   git rev-parse --verify "${APPROVED_REMOTE_REF}^{commit}" >/dev/null || die approved_remote_ref_missing
@@ -160,8 +168,22 @@ verify_isolated_restore() {
 }
 
 checkout_target_source() {
+  local relative deploy_asset_hash runtime_asset_hash
   git -C "$SOURCE_DIR" checkout --detach "$TARGET_SHA" >/dev/null || die target_checkout_failed
   SOURCE_SWITCHED=1
+  [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" == "$TARGET_SHA" && -z "$(git -C "$SOURCE_DIR" status --porcelain)" ]] || die target_checkout_invalid
+  for relative in deploy/compose.release.yml deploy/caddy/Caddyfile deploy/caddy/caddy-entrypoint.sh; do
+    [[ -f "$SOURCE_DIR/$relative" && ! -L "$SOURCE_DIR/$relative" ]] || die runtime_asset_missing
+    [[ "$(sha256_file "$SOURCE_DIR/$relative")" == "$(sha256_file "$EURITH_DEPLOY_ASSET_ROOT/$relative")" ]] || die runtime_asset_bytes_mismatch
+  done
+  deploy_asset_hash="$(sha256sum "$EURITH_DEPLOY_ASSET_ROOT/deploy/compose.release.yml" "$EURITH_DEPLOY_ASSET_ROOT/deploy/caddy/Caddyfile" "$EURITH_DEPLOY_ASSET_ROOT/deploy/caddy/caddy-entrypoint.sh" | sha256sum | awk '{print $1}')"
+  runtime_asset_hash="$(sha256sum "$SOURCE_DIR/deploy/compose.release.yml" "$SOURCE_DIR/deploy/caddy/Caddyfile" "$SOURCE_DIR/deploy/caddy/caddy-entrypoint.sh" | sha256sum | awk '{print $1}')"
+  [[ "$runtime_asset_hash" == "$deploy_asset_hash" ]] || die runtime_asset_bytes_mismatch
+  export EURITH_RUNTIME_SOURCE_ROOT="$SOURCE_DIR"
+  export EURITH_RUNTIME_ASSET_ROOT="$SOURCE_DIR"
+  "${compose[@]}" config >/dev/null || die runtime_compose_validation_failed
+  evidence deploy_asset_sha256 "$deploy_asset_hash"
+  evidence runtime_asset_sha256 "$runtime_asset_hash"
 }
 
 validate_caddy() {
@@ -180,7 +202,7 @@ validate_caddy() {
 
 run_caddy_integration() {
   [[ "${TEST_DATABASE_URL:-}" =~ ^postgresql\+asyncpg://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?/fitpilot_task_caddy_[a-z0-9_]+$ ]] || die guarded_caddy_database_required
-  CADDY_INTEGRATION_REQUIRED=1 python3 -m pytest tests/deploy/test_caddy_integration.py -q -m caddy_integration || die caddy_integration_failed
+  (cd "$EURITH_DEPLOY_ASSET_ROOT" && CADDY_INTEGRATION_REQUIRED=1 python3 -m pytest tests/deploy/test_caddy_integration.py -q -m caddy_integration) || die caddy_integration_failed
   evidence caddy_integration passed
 }
 
@@ -189,7 +211,7 @@ gate_migrations() {
   current="$("${compose[@]}" exec -T api alembic current 2>/dev/null | sed -n 's/^\([0-9A-Za-z_]*\).*/\1/p' | tail -n1)" || die alembic_current_failed
   [[ "$current" =~ ^[0-9A-Za-z_]+$ ]] || die alembic_current_unknown
   path_manifest="$EVIDENCE_DIR/migration-path.manifest"
-  python3 "$MIGRATION_MANIFEST_TOOL" "$SOURCE_DIR/migrations/versions" "$current" >"$path_manifest" || die alembic_graph_invalid
+  python3 "$MIGRATION_MANIFEST_TOOL" "$EURITH_DEPLOY_ASSET_ROOT/migrations/versions" "$current" >"$path_manifest" || die alembic_graph_invalid
   chmod 0600 "$path_manifest" || die migration_manifest_permissions_failed
   heads="$(sed -n 's/^target_head=//p' "$path_manifest")"
   migration_path="$(sed -n 's/^migration_path=//p' "$path_manifest")"
@@ -206,7 +228,7 @@ gate_migrations() {
 
 build_target() {
   local runtime_heads
-  "$SCRIPT_DIR/provision-release-host.sh" --secret-source-dir "$EURITH_SECRET_SOURCE_DIR" --base-compose "$EURITH_BASE_COMPOSE" --release-overlay "$RELEASE_OVERLAY" >/dev/null || die provisioning_verification_failed
+  "$SCRIPT_DIR/provision-release-host.sh" --secret-source-dir "$EURITH_SECRET_SOURCE_DIR" --base-compose "$EURITH_BASE_COMPOSE" --release-overlay "$RELEASE_OVERLAY" --deploy-asset-root "$EURITH_DEPLOY_ASSET_ROOT" --target-sha "$TARGET_SHA" >/dev/null || die provisioning_verification_failed
   "${compose[@]}" build api || die target_build_failed
   runtime_heads="$("${compose[@]}" run --rm --no-deps api alembic heads 2>/dev/null | sed -n 's/^\([0-9A-Za-z_]*\).*/\1/p')" || die alembic_heads_failed
   [[ "$runtime_heads" == "$EXPECTED_ALEMBIC_HEAD" ]] || die built_image_alembic_head_mismatch
@@ -223,8 +245,9 @@ rehearse_migration_compatibility() {
   [[ "$target_current" == "$EXPECTED_ALEMBIC_HEAD" ]] || die target_schema_rehearsal_failed
   "${target_rehearsal_compose[@]}" run --rm --no-deps --workdir /app -e PYTHONPATH=/app api python /tmp/eurith-rehearse-release-db.py "$EXPECTED_ALEMBIC_HEAD" || die target_schema_rehearsal_failed
   evidence target_migration_rehearsal passed
-  git -C "$SOURCE_DIR" checkout --detach "$OLD_COMMIT" >/dev/null || die old_rehearsal_checkout_failed
   [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" == "$OLD_COMMIT" && -z "$(git -C "$SOURCE_DIR" status --porcelain)" ]] || die old_rehearsal_checkout_invalid
+  export EURITH_RUNTIME_SOURCE_ROOT="$SOURCE_DIR"
+  export EURITH_RUNTIME_ASSET_ROOT="$SOURCE_DIR"
   old_rehearsal_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE")
   [[ -f "$OLD_RELEASE_OVERLAY" ]] && old_rehearsal_compose+=(-f "$OLD_RELEASE_OVERLAY")
   old_rehearsal_compose+=(-f "$REHEARSAL_OVERLAY")
@@ -232,8 +255,8 @@ rehearse_migration_compatibility() {
   "${old_rehearsal_compose[@]}" build api >/dev/null || die old_backend_compatibility_rehearsal_failed
   "${old_rehearsal_compose[@]}" run --rm --no-deps --workdir /app -e PYTHONPATH=/app api python /tmp/eurith-rehearse-release-db.py "$EXPECTED_ALEMBIC_HEAD" || die old_backend_compatibility_rehearsal_failed
   evidence old_backend_compatibility_rehearsal passed
-  git -C "$SOURCE_DIR" checkout --detach "$TARGET_SHA" >/dev/null || die target_rehearsal_restore_failed
-  [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" == "$TARGET_SHA" && -z "$(git -C "$SOURCE_DIR" status --porcelain)" ]] || die target_rehearsal_restore_invalid
+  export EURITH_RUNTIME_SOURCE_ROOT="$EURITH_DEPLOY_ASSET_ROOT"
+  export EURITH_RUNTIME_ASSET_ROOT="$EURITH_DEPLOY_ASSET_ROOT"
   "${compose[@]}" build api >/dev/null || die target_rebuild_after_rehearsal_failed
   SCHEMA_ROLLBACK_COMPATIBLE=1
   evidence schema_rollback_compatible yes
@@ -260,6 +283,8 @@ rollback_infrastructure() {
     if [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null)" != "$OLD_COMMIT" ]]; then evidence rollback_checkout failed; evidence rollback_checkout_mismatch yes; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; fi
     if [[ -n "$(git -C "$SOURCE_DIR" status --porcelain 2>/dev/null)" ]]; then evidence rollback_checkout failed; evidence rollback_checkout_dirty yes; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; fi
     evidence rollback_checkout passed
+    export EURITH_RUNTIME_SOURCE_ROOT="$SOURCE_DIR"
+    export EURITH_RUNTIME_ASSET_ROOT="$SOURCE_DIR"
     if [[ "$MIGRATION_ATTEMPTED" == 0 || ( "$MIGRATION_STATE" == applied && "$SCHEMA_ROLLBACK_COMPATIBLE" == 1 ) ]]; then
       if [[ "$PRIOR_CADDY_PRESENT" == 1 ]]; then
         [[ "$OLD_CADDY_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || { evidence rollback_caddy_image failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; }
@@ -383,12 +408,12 @@ CURRENT_STAGE=gate_pause; gate_pause; evidence gate_pause_exit 0
 CURRENT_STAGE=snapshot_rehearsal_inputs; snapshot_rehearsal_inputs; evidence snapshot_rehearsal_inputs_exit 0
 CURRENT_STAGE=create_paired_backup; create_paired_backup; evidence create_paired_backup_exit 0
 CURRENT_STAGE=verify_isolated_restore; verify_isolated_restore; evidence verify_isolated_restore_exit 0
-CURRENT_STAGE=checkout_target_source; checkout_target_source; evidence checkout_target_source_exit 0
 CURRENT_STAGE=validate_caddy; validate_caddy; evidence validate_caddy_exit 0
 CURRENT_STAGE=run_caddy_integration; run_caddy_integration; evidence run_caddy_integration_exit 0
 CURRENT_STAGE=gate_migrations; gate_migrations; evidence gate_migrations_exit 0
 CURRENT_STAGE=build_target; build_target; evidence build_target_exit 0
 CURRENT_STAGE=rehearse_migration_compatibility; rehearse_migration_compatibility; evidence rehearse_migration_compatibility_exit 0
+CURRENT_STAGE=checkout_target_source; checkout_target_source; evidence checkout_target_source_exit 0
 CURRENT_STAGE=apply_migration_once; apply_migration_once; evidence apply_migration_once_exit 0
 CURRENT_STAGE=switch_api_and_caddy; switch_api_and_caddy; evidence switch_api_and_caddy_exit 0
 CURRENT_STAGE=wait_for_readiness; wait_for_readiness; evidence wait_for_readiness_exit 0

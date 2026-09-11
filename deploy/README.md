@@ -18,14 +18,21 @@ generated 64-character lowercase hexadecimal values. They are consumed as follow
 - webhook: server API and the GitHub webhook Secret field only;
 - cleanup database URL: host cleanup/backup tooling only.
 
-Never paste values into command arguments, logs, evidence, or Git. Run first-use
-provisioning from the reviewed checkout:
+Never paste values into command arguments, logs, evidence, or Git. First create
+a clean detached worktree at the reviewed target SHA. `EURITH_DEPLOY_ASSET_ROOT`
+must name that exact worktree; an attached branch, dirty tree, different SHA,
+symlinked path, or overlay outside it is rejected. This lets first-use provisioning
+consume target Caddy assets and the target API build context while the production
+`SOURCE_DIR` remains on the old revision for backup and compatibility rehearsal:
 
 ```bash
-sudo ./backend/deploy/provision-release-host.sh \
+sudo CADDY_IMAGE_REF=caddy:2.11.4@sha256:<approved-digest> \
+  /opt/eurith/deploy-run/<backend-full-sha>/deploy/provision-release-host.sh \
   --secret-source-dir /etc/eurith/release-secret-source \
   --base-compose /opt/eurith/docker-compose.yml \
-  --release-overlay /opt/eurith/backend/deploy/compose.release.yml
+  --release-overlay /opt/eurith/deploy-run/<backend-full-sha>/deploy/compose.release.yml \
+  --deploy-asset-root /opt/eurith/deploy-run/<backend-full-sha> \
+  --target-sha <backend-full-sha>
 ```
 
 The same command is the existing-host verification command. It verifies rather
@@ -54,7 +61,13 @@ non_direct_release_id=<existing-eas-or-play-uuid>
 ```
 
 These rows are operational fixtures retained in the registry; the canary never
-creates or changes a release. The ordinary public probe is fixed to the
+creates or changes a release. On a genuinely empty category only,
+`withdrawn_release_id` or `non_direct_release_id` may be the literal
+`not_applicable`. The canary accepts that sentinel only after its authorized
+server-side registry query proves zero rows in the exact category, and emits
+`withdrawn_release=not_applicable` or `non_direct_release=not_applicable`.
+If a matching row exists, the sentinel is fatal and its retained UUID is required.
+The ordinary public probe is fixed to the
 allowlisted `/openapi.json` route with expected status `200`; arbitrary paths or
 expected statuses are rejected.
 
@@ -130,6 +143,7 @@ git -C /opt/eurith/backend worktree add --detach \
   /opt/eurith/deploy-run/<backend-full-sha> <backend-full-sha>
 sudo RELEASE_MUTATIONS_PAUSED=1 \
   SOURCE_DIR=/opt/eurith/backend \
+  EURITH_DEPLOY_ASSET_ROOT=/opt/eurith/deploy-run/<backend-full-sha> \
   EURITH_BASE_COMPOSE=/opt/eurith/docker-compose.yml \
   EURITH_PUBLIC_API_URL=https://api.eurith.app \
   EURITH_APPROVED_CADDY_DIGEST=sha256:<reviewed-64-hex-digest> \
@@ -140,6 +154,13 @@ sudo RELEASE_MUTATIONS_PAUSED=1 \
   /opt/eurith/deploy-run/<backend-full-sha>/deploy/deploy.sh \
   <backend-full-sha> <mobile-candidate-full-sha>
 ```
+
+Before production migration, the API image and Caddy assets come only from the
+validated detached target root through `EURITH_RUNTIME_SOURCE_ROOT` and
+`EURITH_RUNTIME_ASSET_ROOT`; operators do not set those internal variables.
+After both target and old-code rehearsals pass, the deployer checks out the exact
+target in `SOURCE_DIR`, proves the runtime overlay/Caddy bytes and aggregate hash
+match the detached root, then points final Compose binds at `SOURCE_DIR`.
 
 The sequence is: provenance and pause gates; paired backup; isolated restore;
 Compose and Caddy fmt/adapt/validate; required real loopback Caddy integration;

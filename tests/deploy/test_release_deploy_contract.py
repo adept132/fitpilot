@@ -45,7 +45,40 @@ def test_deploy_requires_two_exact_shas_and_remote_containment() -> None:
     assert "git status --porcelain" in script
     assert "git merge-base --is-ancestor" in script
     assert "APPROVED_REMOTE_REF" in script
-    assert "deploy_runner_sha_mismatch" in script
+    assert "deploy_asset_root_sha_mismatch" in script
+
+
+def test_exact_detached_asset_root_bootstraps_before_source_checkout() -> None:
+    script = _text(DEPLOY)
+    provision = _text(ROOT / "deploy" / "provision-release-host.sh")
+    overlay = _text(ROOT / "deploy" / "compose.release.yml")
+    for contract in (
+        "EURITH_DEPLOY_ASSET_ROOT",
+        "deploy_asset_root_not_detached",
+        "deploy_asset_root_sha_mismatch",
+        "deploy_asset_root_dirty",
+        "deploy_asset_overlay_mismatch",
+        "EURITH_RUNTIME_SOURCE_ROOT",
+        "EURITH_RUNTIME_ASSET_ROOT",
+    ):
+        assert contract in script or contract in provision or contract in overlay
+    assert 'git -C "$EURITH_DEPLOY_ASSET_ROOT" symbolic-ref -q HEAD' in script
+    assert 'git -C "$EURITH_DEPLOY_ASSET_ROOT" status --porcelain' in script
+    assert 'git -C "$EURITH_DEPLOY_ASSET_ROOT" rev-parse HEAD' in script
+    assert '--deploy-asset-root "$EURITH_DEPLOY_ASSET_ROOT"' in script
+    assert '--target-sha "$TARGET_SHA"' in script
+
+    rehearsal = script.index("CURRENT_STAGE=rehearse_migration_compatibility")
+    source_checkout = script.index("CURRENT_STAGE=checkout_target_source")
+    production_migration = script.index("CURRENT_STAGE=apply_migration_once")
+    assert rehearsal < source_checkout < production_migration
+    assert 'EURITH_RUNTIME_SOURCE_ROOT="$EURITH_DEPLOY_ASSET_ROOT"' in script
+    assert 'EURITH_RUNTIME_ASSET_ROOT="$EURITH_DEPLOY_ASSET_ROOT"' in script
+    assert 'EURITH_RUNTIME_SOURCE_ROOT="$SOURCE_DIR"' in script
+    assert 'EURITH_RUNTIME_ASSET_ROOT="$SOURCE_DIR"' in script
+    assert "runtime_asset_bytes_mismatch" in script
+    assert "deploy_asset_sha256" in script
+    assert "runtime_asset_sha256" in script
 
 
 def test_deploy_orders_irreversible_work_behind_all_preflight_gates() -> None:
@@ -158,6 +191,18 @@ def test_canary_is_bounded_fail_closed_and_does_not_create_release_rows() -> Non
     assert "http-header-gate.py" in script
     assert "urllib.parse" in script
     assert "unrelated_public_path" not in script
+
+
+def test_canary_allows_category_sentinel_only_after_zero_row_database_proof() -> None:
+    script = _text(CANARY)
+    assert 'withdrawn_release_id" == not_applicable' in script
+    assert 'non_direct_release_id" == not_applicable' in script
+    assert "withdrawn_release=not_applicable" in script
+    assert "non_direct_release=not_applicable" in script
+    assert "delivery_method='direct_apk' AND status='withdrawn'" in script
+    assert "delivery_method <> 'direct_apk'" in script
+    assert "category_not_empty" in script
+    assert script.index("category_not_empty") < script.index("canary_result=passed")
 
 
 def test_header_gate_rejects_duplicate_folded_malformed_and_injected_headers(tmp_path: Path) -> None:
@@ -379,6 +424,9 @@ def test_runbooks_cover_first_use_rotation_recovery_and_mobile_gate() -> None:
         "free space",
         "framing",
         "rotation",
+        "EURITH_DEPLOY_ASSET_ROOT",
+        "detached",
+        "EURITH_RUNTIME_ASSET_ROOT",
     ):
         assert contract.lower() in combined.lower()
 
@@ -402,7 +450,8 @@ def test_dirty_checkout_stops_before_any_mutating_command(tmp_path: Path) -> Non
     env = os.environ.copy(); env.update({
         "PATH": _shell(bin_dir) + ":/usr/bin:/bin", "FAKE_CALLS": _shell(calls),
         "SOURCE_DIR": _shell(source), "APP_DIR": _shell(tmp_path / "app"),
-        "EURITH_BASE_COMPOSE": _shell(base), "RELEASE_OVERLAY": _shell(overlay),
+        "EURITH_DEPLOY_ASSET_ROOT": _shell(ROOT),
+        "EURITH_BASE_COMPOSE": _shell(base), "RELEASE_OVERLAY": _shell(ROOT / "deploy" / "compose.release.yml"),
         "DEPLOY_ENV": _shell(deploy_env), "EURITH_PUBLIC_API_URL": "https://example.invalid",
         "EURITH_CANARY_IDS_FILE": _shell(ids), "EURITH_BACKUP_ROOT": _shell(tmp_path / "backups"),
         "EURITH_RESTORE_DB_URL_FILE": _shell(restore_db), "EURITH_RESTORE_VOLUME_ROOT": _shell(restore_root),

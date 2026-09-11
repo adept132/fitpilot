@@ -13,6 +13,8 @@ DEPLOY_ENV=/etc/eurith/release-deploy.env
 BASE_COMPOSE="$CHECKOUT_ROOT/../docker-compose.yml"
 RELEASE_OVERLAY="$CHECKOUT_ROOT/deploy/compose.release.yml"
 SITE_ADDRESS=https://api.eurith.app
+DEPLOY_ASSET_ROOT=
+TARGET_SHA=
 
 usage() { printf '%s\n' 'usage: provision-release-host.sh [protected path options]' >&2; exit 2; }
 while [[ $# -gt 0 ]]; do
@@ -26,6 +28,8 @@ while [[ $# -gt 0 ]]; do
     --base-compose) BASE_COMPOSE="$2" ;;
     --release-overlay) RELEASE_OVERLAY="$2" ;;
     --site-address) SITE_ADDRESS="$2" ;;
+    --deploy-asset-root) DEPLOY_ASSET_ROOT="$2" ;;
+    --target-sha) TARGET_SHA="${2,,}" ;;
     *) usage ;;
   esac
   shift 2
@@ -35,10 +39,26 @@ for command_name in docker findmnt mount umount getent groupadd install chown st
   require_command "$command_name"
 done
 if [[ "$ROOT_PREFIX" != / ]]; then require_safe_absolute_path "$ROOT_PREFIX" mutable "$CHECKOUT_ROOT"; fi
-for path in "$SECRET_SOURCE_DIR" "$API_RELEASE_ENV" "$CLEANUP_ENV" "$DEPLOY_ENV" "$BASE_COMPOSE" "$RELEASE_OVERLAY"; do
+for path in "$SECRET_SOURCE_DIR" "$API_RELEASE_ENV" "$CLEANUP_ENV" "$DEPLOY_ENV" "$BASE_COMPOSE" "$RELEASE_OVERLAY" "$DEPLOY_ASSET_ROOT"; do
   purpose=mutable; [[ "$path" == "$SECRET_SOURCE_DIR" || "$path" == "$API_RELEASE_ENV" || "$path" == "$CLEANUP_ENV" || "$path" == "$DEPLOY_ENV" ]] && purpose=secret
   require_safe_absolute_path "$path" "$purpose" "$CHECKOUT_ROOT"
 done
+require_full_sha "$TARGET_SHA"
+asset_resolved="$(_canonical_path "$DEPLOY_ASSET_ROOT")"
+checkout_resolved="$(_canonical_path "$CHECKOUT_ROOT")"
+[[ "$asset_resolved" == "$checkout_resolved" ]] || die deploy_asset_root_mismatch
+[[ "$(_canonical_path "$RELEASE_OVERLAY")" == "$asset_resolved/deploy/compose.release.yml" ]] || die deploy_asset_overlay_mismatch
+if [[ "$ROOT_PREFIX" == / ]]; then
+  require_command git
+  [[ -d "$DEPLOY_ASSET_ROOT/.git" || -f "$DEPLOY_ASSET_ROOT/.git" ]] || die deploy_asset_root_not_versioned
+  [[ "$(git -C "$DEPLOY_ASSET_ROOT" rev-parse --show-toplevel 2>/dev/null)" == "$asset_resolved" ]] || die deploy_asset_root_toplevel_mismatch
+  [[ "$(git -C "$DEPLOY_ASSET_ROOT" rev-parse HEAD 2>/dev/null)" == "$TARGET_SHA" ]] || die deploy_asset_root_sha_mismatch
+  [[ -z "$(git -C "$DEPLOY_ASSET_ROOT" status --porcelain 2>/dev/null)" ]] || die deploy_asset_root_dirty
+  if git -C "$DEPLOY_ASSET_ROOT" symbolic-ref -q HEAD >/dev/null 2>&1; then die deploy_asset_root_not_detached; fi
+  [[ "${CADDY_IMAGE_REF:-}" =~ ^caddy:2\.11\.4@sha256:[0-9a-f]{64}$ ]] || die caddy_image_ref_not_pinned
+fi
+export EURITH_RUNTIME_SOURCE_ROOT="$DEPLOY_ASSET_ROOT"
+export EURITH_RUNTIME_ASSET_ROOT="$DEPLOY_ASSET_ROOT"
 [[ -f "$BASE_COMPOSE" && ! -L "$BASE_COMPOSE" ]] || die base_compose_invalid
 [[ -f "$RELEASE_OVERLAY" && ! -L "$RELEASE_OVERLAY" ]] || die release_overlay_invalid
 _reject_newline "$SITE_ADDRESS"

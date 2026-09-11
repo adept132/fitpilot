@@ -57,6 +57,7 @@ def test_compose_keeps_api_private_and_mounts_only_required_release_paths() -> N
     assert compose["volumes"] == {"caddy_data": {}, "caddy_config": {}}
 
     api = compose["services"]["api"]
+    assert api["build"] == {"context": "${EURITH_RUNTIME_SOURCE_ROOT:?set exact runtime source root}"}
     assert "ports" not in api
     assert api["expose"] == ["8000"]
     assert api["env_file"] == ["/etc/eurith/api-release.env"]
@@ -77,14 +78,14 @@ def test_compose_keeps_api_private_and_mounts_only_required_release_paths() -> N
         "volumes": [
             {
                 "type": "bind",
-                "source": "./backend/deploy/caddy/Caddyfile",
+                "source": "${EURITH_RUNTIME_ASSET_ROOT:?set exact runtime asset root}/deploy/caddy/Caddyfile",
                 "target": "/etc/caddy/Caddyfile",
                 "read_only": True,
                 "bind": {"create_host_path": False},
             },
             {
                 "type": "bind",
-                "source": "./backend/deploy/caddy/caddy-entrypoint.sh",
+                "source": "${EURITH_RUNTIME_ASSET_ROOT:?set exact runtime asset root}/deploy/caddy/caddy-entrypoint.sh",
                 "target": "/usr/local/bin/caddy-entrypoint.sh",
                 "read_only": True,
                 "bind": {"create_host_path": False},

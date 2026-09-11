@@ -1,5 +1,7 @@
 services:
   api:
+    build:
+      context: "${EURITH_RUNTIME_SOURCE_ROOT:?set exact runtime source root}"
     env_file:
       - /etc/eurith/api-release.env
     group_add:
@@ -24,13 +26,13 @@ services:
       - "${RELEASE_SHARED_GID:?set in /etc/eurith/release-deploy.env}"
     volumes:
       - type: bind
-        source: ./backend/deploy/caddy/Caddyfile
+        source: "${EURITH_RUNTIME_ASSET_ROOT:?set exact runtime asset root}/deploy/caddy/Caddyfile"
         target: /etc/caddy/Caddyfile
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ./backend/deploy/caddy/caddy-entrypoint.sh
+        source: "${EURITH_RUNTIME_ASSET_ROOT:?set exact runtime asset root}/deploy/caddy/caddy-entrypoint.sh"
         target: /usr/local/bin/caddy-entrypoint.sh
         read_only: true
         bind:

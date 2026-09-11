@@ -275,6 +275,7 @@ class Host:
             "FAKE_FINAL_VIEW": str(self.final_view),
             "FAKE_PROBE_VIEW": str(self.probe_view),
             "EURITH_FAKE_SYMLINKS": "1",
+            "CADDY_IMAGE_REF": "caddy:2.11.4@sha256:" + "c" * 64,
         })
         env.update(extra_env)
         args = [
@@ -286,6 +287,8 @@ class Host:
             "--base-compose", _shell(self.base_compose),
             "--release-overlay", _shell(ROOT / "deploy" / "compose.release.yml"),
             "--site-address", "https://api.eurith.app",
+            "--deploy-asset-root", _shell(ROOT),
+            "--target-sha", "a" * 40,
         ]
         return subprocess.run(args, cwd=ROOT, env=env, text=True, capture_output=True, check=False)
 

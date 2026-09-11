@@ -117,7 +117,14 @@ applicable gate above has explicit evidence and operator approval.
 ## Caddy rollout and backend-before-mobile closure
 
 On first use and every existing-host verification, run
-`deploy/provision-release-host.sh`. While release mutations and cleanup are
+`deploy/provision-release-host.sh` from a clean detached exact-target
+`EURITH_DEPLOY_ASSET_ROOT`, passing `--deploy-asset-root` and `--target-sha`.
+Provisioning and pre-switch validation use `EURITH_RUNTIME_SOURCE_ROOT` and
+`EURITH_RUNTIME_ASSET_ROOT` internally so the old production checkout remains
+unchanged through backup, restore, and both compatibility rehearsals. After
+rehearsal, deployment checks out the target in `SOURCE_DIR`, verifies the final
+overlay and Caddy bytes/hash equal the detached root, and only then binds final
+runtime assets from `SOURCE_DIR`. While release mutations and cleanup are
 paused, create a paired generation with `deploy/backup-release-state.sh` and
 prove it through `deploy/verify-release-restore.sh` in an empty volume and local
 `eurith_restore_*` database. Run deployment only as
@@ -149,7 +156,11 @@ requires manual investigation, and forbids automatic database restore/downgrade.
 
 The public URL must be a structurally valid HTTPS origin with no credentials,
 query, or fragment. Canary IDs are an exact three-key root-owned mode `0400`
-file; the ordinary public probe is the fixed `/openapi.json` status-`200` route.
+file. `withdrawn_release_id=not_applicable` and
+`non_direct_release_id=not_applicable` are allowed only when an authorized
+server-side count proves that exact category has zero rows; otherwise an exact
+retained UUID is mandatory. The ordinary public probe is the fixed
+`/openapi.json` status-`200` route.
 After bounded readiness retries, verify exact parsed headers, at most 250 MiB
 artifact metadata, container identity/restart delta, and Compose-native bounded
 logs. Header ambiguity, redirects leaking an internal header, malformed headers,
