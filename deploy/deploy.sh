@@ -291,7 +291,10 @@ capture_prior_runtime() {
 }
 
 rollback_infrastructure() {
-  local result=failed rollback_caddy_id rollback_caddy_image rollback_image_overlay
+  local result=failed rollback_caddy_id rollback_caddy_image rollback_image_overlay=''
+  local rollback_api_ref rollback_built_api_image rollback_api_id rollback_api_image rollback_api_status rollback_api_restarts
+  local current_api_id attempt status rollback_api_image_verified=0 rollback_api_runtime_verified=0 rollback_api_readiness_verified=0 rollback_api_verified=0 rollback_caddy_verified=0
+  local -a rollback_compose
   ROLLBACK_ATTEMPTED=1
   if [[ "$SWITCH_ATTEMPTED" == 1 || ( "$MIGRATION_ATTEMPTED" == 1 && "$MIGRATION_STATE" == applied ) ]]; then
     if [[ "$SWITCH_ATTEMPTED" == 1 ]]; then "${compose[@]}" stop caddy >/dev/null 2>&1 || true; fi
@@ -305,24 +308,63 @@ rollback_infrastructure() {
     export EURITH_RUNTIME_SOURCE_ROOT="$SOURCE_DIR"
     export EURITH_RUNTIME_ASSET_ROOT="$EURITH_DEPLOY_ASSET_ROOT"
     if [[ "$MIGRATION_ATTEMPTED" == 0 || ( "$MIGRATION_STATE" == applied && "$SCHEMA_ROLLBACK_COMPATIBLE" == 1 ) ]]; then
+      rollback_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY")
       if [[ "$PRIOR_CADDY_PRESENT" == 1 ]]; then
         [[ "$OLD_CADDY_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || { evidence rollback_caddy_image failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; }
         rollback_image_overlay="$(mktemp)" || { evidence rollback_caddy_image failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; }
         chmod 0600 "$rollback_image_overlay" || { rm -f -- "$rollback_image_overlay"; evidence rollback_caddy_image failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; }
         printf 'services:\n  caddy:\n    image: "%s"\n' "$OLD_CADDY_IMAGE_ID" >"$rollback_image_overlay" || { rm -f -- "$rollback_image_overlay"; evidence rollback_caddy_image failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; }
-        rollback_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY")
         rollback_compose+=(-f "$rollback_image_overlay")
-        if "${rollback_compose[@]}" build api >/dev/null 2>&1 && "${rollback_compose[@]}" up -d --no-deps --pull never api caddy >/dev/null 2>&1; then
-          rollback_caddy_id="$("${rollback_compose[@]}" ps -q caddy 2>/dev/null)"
-          rollback_caddy_image="$(docker inspect "$rollback_caddy_id" --format '{{.Image}}' 2>/dev/null || true)"
-          if [[ -n "$rollback_caddy_id" && "$rollback_caddy_image" == "$OLD_CADDY_IMAGE_ID" ]]; then evidence rollback_caddy_image passed; result=passed; else evidence rollback_caddy_image failed; fi
-        fi
-        rm -f -- "$rollback_image_overlay"
       else
         evidence rollback_caddy_image not_applicable
-        rollback_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY")
-        "${rollback_compose[@]}" build api >/dev/null 2>&1 && "${rollback_compose[@]}" up -d --no-deps api >/dev/null 2>&1 && result=passed
+        rollback_caddy_verified=1
       fi
+      if "${rollback_compose[@]}" build api >/dev/null 2>&1; then
+        rollback_api_ref="$("${rollback_compose[@]}" config --images api 2>/dev/null || true)"
+        if [[ "$rollback_api_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$ ]]; then
+          rollback_built_api_image="$(docker image inspect --format '{{.Id}}' "$rollback_api_ref" 2>/dev/null || true)"
+          [[ "$rollback_built_api_image" == sha256:* ]] || rollback_built_api_image="sha256:${rollback_built_api_image}"
+          if [[ "$rollback_built_api_image" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            if [[ "$PRIOR_CADDY_PRESENT" == 1 ]]; then
+              "${rollback_compose[@]}" up -d --no-deps --pull never api caddy >/dev/null 2>&1 || true
+              rollback_caddy_id="$("${rollback_compose[@]}" ps -q caddy 2>/dev/null || true)"
+              rollback_caddy_image="$(docker inspect "$rollback_caddy_id" --format '{{.Image}}' 2>/dev/null || true)"
+              if [[ -n "$rollback_caddy_id" && "$rollback_caddy_image" == "$OLD_CADDY_IMAGE_ID" ]]; then rollback_caddy_verified=1; fi
+            else
+              "${rollback_compose[@]}" up -d --no-deps --pull never api >/dev/null 2>&1 || true
+            fi
+            rollback_api_id="$("${rollback_compose[@]}" ps -q api 2>/dev/null || true)"
+            rollback_api_image="$(docker inspect "$rollback_api_id" --format '{{.Image}}' 2>/dev/null || true)"
+            rollback_api_status="$(docker inspect "$rollback_api_id" --format '{{.State.Status}}' 2>/dev/null || true)"
+            rollback_api_restarts="$(docker inspect "$rollback_api_id" --format '{{.RestartCount}}' 2>/dev/null || true)"
+            if [[ -n "$rollback_api_id" && "$rollback_api_image" == "$rollback_built_api_image" ]]; then rollback_api_image_verified=1; fi
+            if [[ "$rollback_api_image_verified" == 1 && "$rollback_api_status" == running && "$rollback_api_restarts" == 0 ]]; then
+              rollback_api_runtime_verified=1
+              for attempt in $(seq 1 30); do
+                status="$(curl --silent --show-error --max-time 5 --max-filesize 65536 --output /dev/null --write-out '%{http_code}' "$PUBLIC_API_BASE/health" || true)"
+                if [[ "$status" == 200 ]]; then
+                  current_api_id="$("${rollback_compose[@]}" ps -q api 2>/dev/null || true)"
+                  rollback_api_image="$(docker inspect "$current_api_id" --format '{{.Image}}' 2>/dev/null || true)"
+                  rollback_api_status="$(docker inspect "$current_api_id" --format '{{.State.Status}}' 2>/dev/null || true)"
+                  rollback_api_restarts="$(docker inspect "$current_api_id" --format '{{.RestartCount}}' 2>/dev/null || true)"
+                  if [[ "$current_api_id" == "$rollback_api_id" && "$rollback_api_image" == "$rollback_built_api_image" && "$rollback_api_status" == running && "$rollback_api_restarts" == 0 ]]; then rollback_api_readiness_verified=1; else rollback_api_runtime_verified=0; fi
+                  break
+                fi
+                sleep 2
+              done
+            fi
+          fi
+        fi
+      fi
+      [[ -z "$rollback_image_overlay" ]] || rm -f -- "$rollback_image_overlay"
+      if [[ "$PRIOR_CADDY_PRESENT" == 1 ]]; then
+        if [[ "$rollback_caddy_verified" == 1 ]]; then evidence rollback_caddy_image passed; else evidence rollback_caddy_image failed; fi
+      fi
+      if [[ "$rollback_api_image_verified" == 1 ]]; then evidence rollback_api_image passed; else evidence rollback_api_image failed; fi
+      if [[ "$rollback_api_runtime_verified" == 1 ]]; then evidence rollback_api_runtime passed; else evidence rollback_api_runtime failed; fi
+      if [[ "$rollback_api_readiness_verified" == 1 ]]; then evidence rollback_api_readiness passed; else evidence rollback_api_readiness failed; fi
+      if [[ "$rollback_api_image_verified" == 1 && "$rollback_api_runtime_verified" == 1 && "$rollback_api_readiness_verified" == 1 ]]; then rollback_api_verified=1; fi
+      [[ "$rollback_api_verified" == 1 && "$rollback_caddy_verified" == 1 ]] && result=passed
     fi
   fi
   evidence rollback_result "$result"; ROLLBACK_EVIDENCE_WRITTEN=1; printf '%s\n' 'database_restore=manual_only' >&2; return 1

@@ -465,6 +465,29 @@ def test_rollback_restores_both_prior_caddy_topologies() -> None:
     assert 'rollback_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY")' in script
 
 
+def test_rollback_pass_requires_exact_candidate_api_image_running_stable_and_ready() -> None:
+    script = _text(DEPLOY)
+    rollback = script[script.index("rollback_infrastructure()") : script.index("switch_api_and_caddy()")]
+    assert 'config --images api' in rollback
+    assert "docker image inspect --format '{{.Id}}'" in rollback
+    assert "--format '{{.Image}}'" in rollback
+    assert "--format '{{.State.Status}}'" in rollback
+    assert "--format '{{.RestartCount}}'" in rollback
+    assert "rollback_api_readiness" in rollback
+    assert "rollback_api_runtime" in rollback
+    assert "rollback_api_image_verified" in rollback
+    assert rollback.count("result=passed") == 1
+    assert '"$rollback_api_image" == "$rollback_built_api_image"' in rollback
+    assert '"$rollback_api_status" == running' in rollback
+    assert '"$rollback_api_restarts" == 0' in rollback
+    assert "for attempt in $(seq 1 30)" in rollback
+    assert '"$PUBLIC_API_BASE/health"' in rollback
+    assert "rollback_api_verified=1" in rollback
+    assert "rollback_caddy_verified=1" in rollback
+    assert '[[ "$rollback_api_verified" == 1 && "$rollback_caddy_verified" == 1 ]] && result=passed' in rollback
+    assert 'up -d --no-deps api >/dev/null 2>&1 && result=passed' not in rollback
+
+
 def test_nginx_artifact_and_instructions_are_removed_together() -> None:
     assert not (ROOT / "deploy" / "nginx" / "releases.conf").exists()
     combined = _text(README).lower() + _text(CHECKLIST).lower()
