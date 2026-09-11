@@ -7,7 +7,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import textwrap
+from urllib.parse import quote, unquote, urlsplit
+import uuid
 
 import pytest
 
@@ -51,8 +52,16 @@ elif command == "pg_restore":
         sys.exit(3)
 elif command == "psql":
     sql = args[args.index("--command") + 1]
-    if "pg_catalog.pg_class" in sql:
-        print(os.environ.get("FAKE_DB_OBJECT_COUNT", "0"))
+    catalog_env = {
+        "FROM pg_catalog.pg_namespace": "FAKE_DB_SCHEMA_COUNT",
+        "FROM pg_catalog.pg_class": "FAKE_DB_RELATION_COUNT",
+        "FROM pg_catalog.pg_proc": "FAKE_DB_ROUTINE_COUNT",
+        "FROM pg_catalog.pg_type": "FAKE_DB_TYPE_COUNT",
+        "FROM pg_catalog.pg_extension": "FAKE_DB_EXTENSION_COUNT",
+    }
+    matched = next((value for token, value in catalog_env.items() if token in sql), None)
+    if matched:
+        print(os.environ.get(matched, os.environ.get("FAKE_DB_OBJECT_COUNT", "0")))
     elif "artifact_storage_key" in sql:
         rows = pathlib.Path(os.environ["FAKE_ROWS_FILE"])
         if rows.exists(): print(rows.read_text(encoding="utf-8"), end="")
@@ -64,10 +73,24 @@ elif command == "tar":
         with tarfile.open(target, "w") as archive:
             for item in sorted(root.rglob("*")):
                 archive.add(item, arcname=item.relative_to(root).as_posix(), recursive=False)
+            if os.environ.get("FAKE_ARCHIVE_UNSAFE") == "1":
+                member = tarfile.TarInfo("unsafe-link")
+                member.type = tarfile.SYMTYPE
+                member.linkname = "/etc/passwd"
+                archive.addfile(member)
     elif "--extract" in args:
+        if os.environ.get("FAKE_TAR_EXTRACT_FAIL") == "1": sys.exit(5)
         source = pathlib.Path(args[args.index("--file") + 1])
         root = pathlib.Path(args[args.index("--directory") + 1])
-        with tarfile.open(source) as archive: archive.extractall(root)
+        with tarfile.open(source) as archive:
+            for member in archive.getmembers():
+                # tarfile on Windows may preserve backslashes in names even
+                # though the production GNU tar archive uses POSIX separators.
+                target = root / pathlib.PurePosixPath(member.name.replace("\\", "/"))
+                if member.isdir(): target.mkdir(parents=True, exist_ok=True)
+                elif member.isfile():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(archive.extractfile(member).read())
     elif "--list" in args:
         source = pathlib.Path(args[args.index("--file") + 1])
         with tarfile.open(source) as archive:
@@ -87,6 +110,7 @@ elif command == "stat":
     path = pathlib.Path(args[-1])
     if "%a" in args: print(metadata().get(str(path.resolve()), oct(path.stat().st_mode & 0o777)[2:]))
     elif "%s" in args: print(path.stat().st_size)
+    elif "%h" in args: print(path.stat().st_nlink)
     else: sys.exit(2)
 else:
     sys.exit(127)
@@ -231,6 +255,72 @@ def test_backup_rejects_unsafe_output_locations(tmp_path: Path, location: str) -
     assert "protected_path" in completed.stderr
 
 
+def test_backup_rejects_hardlinks_anywhere_in_release_volume(tmp_path: Path) -> None:
+    """Catches validating only final APK leaves while archiving aliased files elsewhere."""
+    harness = Harness(tmp_path)
+    source = harness.volume / ".staging" / "pending.part"
+    alias = harness.volume / ".staging" / "pending.alias"
+    try:
+        os.link(source, alias)
+    except OSError:
+        pytest.skip("hardlink creation is unavailable")
+
+    completed = harness.run_backup()
+
+    assert completed.returncode != 0
+    assert "release_volume_hardlink_forbidden" in completed.stderr
+
+
+def test_backup_rejects_symlink_anywhere_in_release_volume(tmp_path: Path) -> None:
+    """Catches leaf-only checks that permit links in staging or nested metadata."""
+    harness = Harness(tmp_path)
+    link = harness.volume / ".staging" / "external"
+    try:
+        link.symlink_to(harness.rows)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+
+    completed = harness.run_backup()
+
+    assert completed.returncode != 0
+    assert "release_volume_symlink_forbidden" in completed.stderr
+
+
+def test_backup_rejects_special_files_anywhere_in_release_volume(tmp_path: Path) -> None:
+    """Catches FIFOs/devices/sockets entering a supposedly complete regular-file archive."""
+    harness = Harness(tmp_path)
+    special = harness.volume / ".staging" / "unexpected.fifo"
+    try:
+        os.mkfifo(special)
+    except (AttributeError, OSError):
+        pytest.skip("special-file creation is unavailable")
+
+    completed = harness.run_backup()
+
+    assert completed.returncode != 0
+    assert "release_volume_special_file_forbidden" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("environment", "expected"),
+    [
+        ({"FAKE_ARCHIVE_UNSAFE": "1"}, "unsafe_release_archive"),
+        ({"FAKE_TAR_EXTRACT_FAIL": "1"}, "archive_restore_test_failed"),
+    ],
+)
+def test_backup_inspects_and_test_restores_created_archive(
+    tmp_path: Path, environment: dict[str, str], expected: str
+) -> None:
+    """Catches trusting a tar exit code without validating its entries and restorability."""
+    harness = Harness(tmp_path)
+
+    completed = harness.run_backup(env=harness.env(**environment))
+
+    assert completed.returncode != 0
+    assert expected in completed.stderr
+    assert list(harness.output.iterdir()) == []
+
+
 def test_restore_accepts_only_matching_pair_and_reports_redacted_counts(tmp_path: Path) -> None:
     """Catches restore verification skipping the database-to-file integrity join."""
     harness = Harness(tmp_path)
@@ -293,6 +383,19 @@ def test_restore_rejects_production_nonempty_or_symlink_volume(tmp_path: Path) -
         assert expected in completed.stderr
 
 
+def test_restore_rejects_generation_stored_below_production_volume(tmp_path: Path) -> None:
+    """Catches treating production-served data as a trusted backup generation."""
+    harness = Harness(tmp_path)
+    assert harness.run_backup().returncode == 0
+    unsafe_generation = harness.volume / harness.generation().name
+    shutil.copytree(harness.generation(), unsafe_generation)
+
+    completed = harness.run_restore(generation=unsafe_generation)
+
+    assert completed.returncode != 0
+    assert "protected_path_below_release_volume" in completed.stderr
+
+
 @pytest.mark.parametrize("mutation", ["dump", "archive", "manifest_generation", "missing", "hash", "size", "escape"])
 def test_restore_fails_closed_on_mixed_or_corrupt_generation(tmp_path: Path, mutation: str) -> None:
     """Catches mix-and-match generations and restored registry/file divergence."""
@@ -324,3 +427,178 @@ def test_restore_rejects_nonempty_database_before_pg_restore(tmp_path: Path) -> 
     assert completed.returncode != 0
     assert "restore_database_not_empty" in completed.stderr
     assert "pg_restore" not in (harness.state / "calls.log").read_text().split("psql")[-1]
+
+
+@pytest.mark.parametrize(
+    ("environment", "catalog", "object_kind"),
+    [
+        ("FAKE_DB_SCHEMA_COUNT", "pg_catalog.pg_namespace", "other_schema"),
+        ("FAKE_DB_RELATION_COUNT", "pg_catalog.pg_class", "table"),
+        ("FAKE_DB_RELATION_COUNT", "pg_catalog.pg_class", "sequence"),
+        ("FAKE_DB_RELATION_COUNT", "pg_catalog.pg_class", "view"),
+        ("FAKE_DB_RELATION_COUNT", "pg_catalog.pg_class", "materialized_view"),
+        ("FAKE_DB_RELATION_COUNT", "pg_catalog.pg_class", "foreign_table"),
+        ("FAKE_DB_ROUTINE_COUNT", "pg_catalog.pg_proc", "function"),
+        ("FAKE_DB_TYPE_COUNT", "pg_catalog.pg_type", "enum_or_type"),
+        ("FAKE_DB_EXTENSION_COUNT", "pg_catalog.pg_extension", "extension"),
+    ],
+)
+def test_restore_rejects_every_user_object_category_before_pg_restore(
+    tmp_path: Path, environment: str, catalog: str, object_kind: str
+) -> None:
+    """Catches a nominally empty DB that contains schemas, routines, types or extensions."""
+    harness = Harness(tmp_path)
+    assert harness.run_backup().returncode == 0
+
+    completed = harness.run_restore(**{environment: "1"})
+
+    assert completed.returncode != 0
+    assert "restore_database_not_empty" in completed.stderr
+    calls = (harness.state / "calls.log").read_text()
+    assert catalog in calls
+    if object_kind in {"table", "sequence", "view", "materialized_view", "foreign_table"}:
+        relation_probe = next(line for line in calls.splitlines() if "FROM pg_catalog.pg_class" in line)
+        assert "relkind" not in relation_probe
+    assert "pg_restore" not in calls
+
+
+def test_real_disposable_postgresql_paired_roundtrip(tmp_path: Path) -> None:
+    """Opt-in proof using real PostgreSQL tools and two invocation-owned databases."""
+    if os.environ.get("RUN_REAL_RELEASE_BACKUP_RESTORE") != "1":
+        pytest.skip("set RUN_REAL_RELEASE_BACKUP_RESTORE=1 for the real recovery drill")
+    raw_url = os.environ.get("TEST_DATABASE_URL", "").strip()
+    if not raw_url:
+        pytest.fail("TEST_DATABASE_URL is required when the real recovery drill is enabled")
+    parsed = urlsplit(raw_url.replace("postgresql+asyncpg://", "postgresql://", 1))
+    if (
+        parsed.scheme != "postgresql"
+        or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.strip("/")
+    ):
+        pytest.fail("TEST_DATABASE_URL must be a plain local PostgreSQL URL")
+
+    tools = {name: shutil.which(name) for name in ("psql", "pg_dump", "pg_restore")}
+    missing = [name for name, path in tools.items() if path is None]
+    if missing:
+        pytest.fail(f"required PostgreSQL tools are unavailable: {', '.join(missing)}")
+
+    suffix = uuid.uuid4().hex[:12]
+    source_database = f"eurith_backup_{suffix}"
+    restore_database = f"eurith_restore_{suffix}"
+    created: list[str] = []
+    username = unquote(parsed.username or "")
+    password = unquote(parsed.password or "")
+    pg_environment = os.environ.copy()
+    pg_environment.update(
+        {
+            "PGHOST": parsed.hostname or "",
+            "PGPORT": str(parsed.port or 5432),
+            "PGUSER": username,
+            "PGPASSWORD": password,
+            "PGDATABASE": parsed.path.strip("/"),
+            "PGCONNECT_TIMEOUT": "5",
+        }
+    )
+    psql = str(tools["psql"])
+
+    def sql(command: str, database: str | None = None) -> None:
+        completed = subprocess.run(
+            [psql, "--no-psqlrc", "--set", "ON_ERROR_STOP=1", "--dbname", database or pg_environment["PGDATABASE"], "--command", command],
+            env=pg_environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert completed.returncode == 0, "real PostgreSQL setup operation failed"
+
+    def database_url(database: str) -> str:
+        host = parsed.hostname or ""
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        authority = host if parsed.port is None else f"{host}:{parsed.port}"
+        credentials = quote(username, safe="")
+        if password:
+            credentials += f":{quote(password, safe='')}"
+        return f"postgresql://{credentials}@{authority}/{database}"
+
+    volume = tmp_path / "source-volume"
+    output = tmp_path / "backups"
+    restore_root = tmp_path / "restore-volume"
+    wrappers = tmp_path / "posix-wrappers"
+    for path in (volume / "android" / "sha256", volume / ".staging", output, restore_root):
+        path.mkdir(parents=True, exist_ok=True)
+    payload = b"EURITH-REAL-PAIRED-BACKUP"
+    digest = hashlib.sha256(payload).hexdigest()
+    key = f"android/sha256/{digest}.apk"
+    (volume / key).write_bytes(payload)
+    (volume / ".staging" / "pending.part").write_bytes(b"staging")
+    source_url_file = tmp_path / "source.env"
+    restore_url_file = tmp_path / "restore.env"
+    source_url_file.write_text(f"DATABASE_URL={database_url(source_database)}\n", encoding="utf-8")
+    restore_url_file.write_text(f"DATABASE_URL={database_url(restore_database)}\n", encoding="utf-8")
+    if os.name != "nt":
+        source_url_file.chmod(0o600)
+        restore_url_file.chmod(0o600)
+
+    script_environment = pg_environment.copy()
+    script_environment.update(
+        {
+            "RELEASE_MUTATIONS_PAUSED": "1",
+            "RELEASE_DATABASE_URL_FILE": _shell(source_url_file),
+            "RELEASE_VOLUME_ROOT": _shell(volume),
+            "RELEASE_CHECKOUT_ROOT": _shell(ROOT),
+        }
+    )
+
+    def run_script(script: Path, *arguments: Path | str) -> subprocess.CompletedProcess[str]:
+        command = [BASH, _shell(script), *(_shell(value) if isinstance(value, Path) else value for value in arguments)]
+        environment = script_environment.copy()
+        if os.name == "nt":
+            wrappers.mkdir(exist_ok=True)
+            wrapper_content = {
+                "python3": f'#!/usr/bin/env bash\nexec "{_shell(Path(sys.executable))}" "$@"\n',
+                "mkdir": '#!/usr/bin/env bash\nargs=(); while (($#)); do case "$1" in -m) shift 2;; --) shift;; *) args+=("$1"); shift;; esac; done; exec /usr/bin/mkdir "${args[@]}"\n',
+                "stat": '#!/usr/bin/env bash\nif [[ "$*" == *"%a"* ]]; then printf "700\\n"; exit 0; fi; exec /usr/bin/stat "$@"\n',
+                "chmod": "#!/usr/bin/env bash\nexit 0\n",
+                "psql": f'#!/usr/bin/env bash\nset -o pipefail\n"{_shell(Path(psql))}" "$@" | tr -d "\\r"\n',
+            }
+            for name, content in wrapper_content.items():
+                (wrappers / name).write_text(content, encoding="utf-8", newline="\n")
+            pg_bin = _shell(Path(str(tools["psql"])).parent)
+            prelude = 'export PATH="$1:$2:/usr/bin:/bin"; shift 2; exec "$@"'
+            command = [BASH, "-lc", prelude, "bash", _shell(wrappers), pg_bin, *command[1:]]
+        return subprocess.run(command, cwd=ROOT, env=environment, capture_output=True, text=True, timeout=60)
+
+    try:
+        sql(f'CREATE DATABASE "{source_database}"')
+        created.append(source_database)
+        sql(f'CREATE DATABASE "{restore_database}"')
+        created.append(restore_database)
+        ddl = (
+            "CREATE TABLE app_releases (artifact_storage_key text, status text, "
+            "artifact_size_bytes bigint, artifact_sha256 text, delivery_method text, "
+            "artifact_deleted_at timestamptz);"
+            f"INSERT INTO app_releases VALUES ('{key}','published',{len(payload)},'{digest}','direct_apk',NULL),"
+            f"('{key}','withdrawn',{len(payload)},'{digest}','direct_apk',NULL);"
+        )
+        sql(ddl, source_database)
+
+        backup = run_script(BACKUP, SHA, output)
+        assert backup.returncode == 0, backup.stderr
+        generations = list(output.iterdir())
+        assert len(generations) == 1
+        restore = run_script(RESTORE, generations[0], restore_url_file, restore_root)
+        assert restore.returncode == 0, restore.stderr
+        assert "rows=2" in restore.stdout and "files=1" in restore.stdout
+        assert (restore_root / key).read_bytes() == payload
+        manifest = (generations[0] / "manifest.sha256").read_text(encoding="utf-8")
+        assert f"artifact\t{key}\t{len(payload)}\t{digest}\n" in manifest
+        combined_output = backup.stdout + backup.stderr + restore.stdout + restore.stderr
+        assert password not in combined_output if password else True
+    finally:
+        for database in reversed(created):
+            sql(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)')
+        source_url_file.unlink(missing_ok=True)
+        restore_url_file.unlink(missing_ok=True)

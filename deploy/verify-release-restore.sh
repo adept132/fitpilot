@@ -18,8 +18,10 @@ require_safe_absolute_path "$generation" backup "$checkout_root"
 require_safe_absolute_path "$database_url_file" secret "$checkout_root"
 require_safe_absolute_path "$restore_root" backup "$checkout_root"
 [[ -d "$generation" && ! -L "$generation" ]] || die "backup_generation_invalid"
+generation_resolved="$(_canonical_path "$generation")"
 restore_resolved="$(_canonical_path "$restore_root")"
 production_resolved="$(_canonical_path "$production_root")"
+case "$generation_resolved/" in "$production_resolved"/*) die "protected_path_below_release_volume" ;; esac
 case "$restore_resolved/" in "$production_resolved"/*) die "restore_volume_is_production" ;; esac
 [[ -d "$restore_root" && ! -L "$restore_root" ]] || die "restore_volume_invalid"
 [[ -z "$(find -P "$restore_root" -mindepth 1 -print -quit)" ]] || die "restore_volume_not_empty"
@@ -77,15 +79,32 @@ python3 - "$archive" <<'PY'
 import pathlib, sys, tarfile
 archive = pathlib.Path(sys.argv[1])
 with tarfile.open(archive) as opened:
+    seen = set()
     for member in opened.getmembers():
         path = pathlib.PurePosixPath(member.name)
         if path.is_absolute() or ".." in path.parts or not (member.isdir() or member.isfile()):
             raise SystemExit("error=unsafe_release_archive")
+        normalized = path.as_posix()
+        if normalized in seen:
+            raise SystemExit("error=unsafe_release_archive")
+        seen.add(normalized)
 PY
 
-object_count="$(psql --no-psqlrc --set ON_ERROR_STOP=1 --tuples-only --no-align --command "SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','S')")" || die "restore_database_probe_failed"
-object_count="${object_count//[[:space:]]/}"
-[[ "$object_count" == 0 ]] || die "restore_database_not_empty"
+require_catalog_zero() {
+  local query="$1" count
+  count="$(psql --no-psqlrc --set ON_ERROR_STOP=1 --tuples-only --no-align --command "$query")" || die "restore_database_probe_failed"
+  count="${count//[[:space:]]/}"
+  [[ "$count" =~ ^[0-9]+$ ]] || die "restore_database_probe_invalid"
+  [[ "$count" == 0 ]] || die "restore_database_not_empty"
+}
+
+# Explicit pristine-database baseline: public plus PostgreSQL system schemas,
+# and optionally the default plpgsql extension. Any user schema/object fails.
+require_catalog_zero "SELECT count(*) FROM pg_catalog.pg_namespace n WHERE n.nspname NOT IN ('public','pg_catalog','information_schema','pg_toast') AND n.nspname !~ '^pg_(temp|toast_temp)_[0-9]+$'"
+require_catalog_zero "SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' OR (n.nspname NOT IN ('pg_catalog','information_schema','pg_toast') AND n.nspname !~ '^pg_(temp|toast_temp)_[0-9]+$')"
+require_catalog_zero "SELECT count(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' OR (n.nspname NOT IN ('pg_catalog','information_schema','pg_toast') AND n.nspname !~ '^pg_(temp|toast_temp)_[0-9]+$')"
+require_catalog_zero "SELECT count(*) FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname='public' OR (n.nspname NOT IN ('pg_catalog','information_schema','pg_toast') AND n.nspname !~ '^pg_(temp|toast_temp)_[0-9]+$')"
+require_catalog_zero "SELECT count(*) FROM pg_catalog.pg_extension e WHERE e.extname NOT IN ('plpgsql')"
 pg_restore --exit-on-error --no-owner --no-privileges --dbname "$PGDATABASE" "$dump" || die "database_restore_failed"
 tar --extract --file "$archive" --directory "$restore_root" || die "archive_restore_failed"
 

@@ -24,7 +24,7 @@ trap cleanup_incomplete EXIT
 
 [[ "${RELEASE_MUTATIONS_PAUSED:-}" == 1 ]] || die "mutations_not_paused"
 require_full_sha "$source_sha"
-for command in pg_dump psql tar sha256sum stat find sort python3; do require_command "$command"; done
+for command in pg_dump psql tar sha256sum stat find sort python3 rm; do require_command "$command"; done
 
 require_safe_absolute_path "$output_root" backup "$checkout_root"
 require_safe_absolute_path "$release_root" mutable
@@ -34,6 +34,45 @@ require_safe_absolute_path "$database_url_file" secret "$checkout_root"
 output_resolved="$(_canonical_path "$output_root")"
 release_resolved="$(_canonical_path "$release_root")"
 case "$output_resolved/" in "$release_resolved"/*) die "protected_path_below_release_volume" ;; esac
+
+# Validate the complete tree, not only finalized APK leaves. A paused release
+# volume must be a closed tree of directories and singly-linked regular files.
+if ! python3 - "$release_root" <<'PY'
+import os, pathlib, stat, sys
+
+root = pathlib.Path(sys.argv[1]).resolve(strict=True)
+root_stat = os.lstat(root)
+if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_nlink < 1:
+    raise SystemExit("error=release_volume_root_invalid")
+for directory, names, files in os.walk(root, topdown=True, followlinks=False):
+    current = pathlib.Path(directory)
+    try:
+        if os.path.commonpath((root, current.resolve(strict=True))) != str(root):
+            raise SystemExit("error=release_volume_path_escape")
+    except ValueError:
+        raise SystemExit("error=release_volume_path_escape")
+    for name in names + files:
+        path = current / name
+        metadata = os.lstat(path)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise SystemExit("error=release_volume_symlink_forbidden")
+        if stat.S_ISDIR(metadata.st_mode):
+            if metadata.st_nlink < 1:
+                raise SystemExit("error=release_volume_directory_invalid")
+        elif stat.S_ISREG(metadata.st_mode):
+            if metadata.st_nlink != 1:
+                raise SystemExit("error=release_volume_hardlink_forbidden")
+        else:
+            raise SystemExit("error=release_volume_special_file_forbidden")
+        try:
+            if os.path.commonpath((root, path.resolve(strict=True))) != str(root):
+                raise SystemExit("error=release_volume_path_escape")
+        except ValueError:
+            raise SystemExit("error=release_volume_path_escape")
+PY
+then
+  exit 1
+fi
 
 started_at="${RELEASE_BACKUP_NOW:-$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$started_at" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "invalid_backup_timestamp"
@@ -107,6 +146,9 @@ while IFS=$'\t' read -r key status expected_size expected_sha extra; do
     [[ "$status" != published ]] || die "published_artifact_missing"
     die "registry_artifact_missing"
   fi
+  artifact_resolved="$(_canonical_path "$artifact")"
+  case "$artifact_resolved" in "$release_resolved"/*) ;; *) die "artifact_path_escape" ;; esac
+  [[ "$(stat -c '%h' -- "$artifact")" == 1 ]] || die "release_volume_hardlink_forbidden"
   actual_size="$(stat -c '%s' -- "$artifact")" || die "artifact_stat_failed"
   [[ "$actual_size" == "$expected_size" ]] || die "artifact_size_mismatch"
   actual_sha="$(sha256_file "$artifact")"
@@ -120,6 +162,61 @@ pg_dump --format=custom --file "$dump" || die "database_dump_failed"
 archive="$generation/releases.tar"
 tar --create --file "$archive" --directory "$release_root" . || die "archive_failed"
 [[ -s "$archive" && ! -L "$archive" ]] || die "archive_empty"
+
+# A successful tar exit is insufficient: inspect every member and prove the
+# resulting archive can be extracted before publishing the generation.
+if ! python3 - "$archive" <<'PY'
+import pathlib, sys, tarfile
+
+seen = set()
+with tarfile.open(sys.argv[1]) as archive:
+    for member in archive.getmembers():
+        path = pathlib.PurePosixPath(member.name)
+        if path.is_absolute() or ".." in path.parts or not (member.isdir() or member.isfile()):
+            raise SystemExit("error=unsafe_release_archive")
+        normalized = path.as_posix()
+        if normalized in seen:
+            raise SystemExit("error=unsafe_release_archive")
+        seen.add(normalized)
+PY
+then
+  exit 1
+fi
+archive_restore="$generation/.archive-restore"
+mkdir -m 0700 -- "$archive_restore" || die "archive_restore_test_create_failed"
+tar --extract --file "$archive" --directory "$archive_restore" || die "archive_restore_test_failed"
+if ! python3 - "$release_root" "$archive_restore" <<'PY'
+import hashlib, os, pathlib, stat, sys
+
+def snapshot(raw_root):
+    root = pathlib.Path(raw_root).resolve(strict=True)
+    result = []
+    for directory, names, files in os.walk(root, topdown=True, followlinks=False):
+        current = pathlib.Path(directory)
+        for name in sorted(names + files):
+            path = current / name
+            metadata = os.lstat(path)
+            relative = path.relative_to(root).as_posix()
+            if stat.S_ISLNK(metadata.st_mode):
+                raise SystemExit("error=unsafe_restored_archive")
+            if stat.S_ISDIR(metadata.st_mode):
+                result.append(("directory", relative, 0, ""))
+            elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                result.append(("file", relative, metadata.st_size, digest))
+            elif stat.S_ISREG(metadata.st_mode):
+                raise SystemExit("error=release_volume_hardlink_forbidden")
+            else:
+                raise SystemExit("error=unsafe_restored_archive")
+    return result
+
+if snapshot(sys.argv[1]) != snapshot(sys.argv[2]):
+    raise SystemExit("error=archive_restore_mismatch")
+PY
+then
+  exit 1
+fi
+rm -rf -- "$archive_restore"
 
 artifacts="$generation/.artifacts.tsv"
 : >"$artifacts"
