@@ -133,9 +133,12 @@ Resolve the approved Caddy image to a digest and run Compose with
 `caddy:2.11.4@sha256:<approved-digest>` and pulls disabled during the switch.
 Before migration, restore the paired backup in isolation, compare its reported
 manifest hash to the backup result, rehearse the target upgrade plus exact old
-backend rollback, and install the exact four-line root-owned mode `0400`
+backend rollback, hash the exact binary migration diff, and install the exact
+five-line root-owned mode `0400`
 `EURITH_MIGRATION_APPROVAL_FILE` described in `deploy/README.md`. Missing or
-mismatched approval is fatal. Any partial migration attempt is
+mismatched approval is fatal. The positive operation allowlist rejects dynamic
+SQL, helper/bind execution, data mutation, rename/drop/alter, and every unknown
+migration call; those require expand/contract. Any partial migration attempt is
 `migration_state=unknown`, requires manual investigation, and forbids automatic
 database restore/downgrade.
 
@@ -145,7 +148,10 @@ file; the ordinary public probe is the fixed `/openapi.json` status-`200` route.
 After bounded readiness retries, verify exact parsed headers, at most 250 MiB
 artifact metadata, container identity/restart delta, and Compose-native bounded
 logs. Header ambiguity, redirects leaking an internal header, malformed headers,
-restart delta, or timeout is fatal.
+restart delta, or timeout is fatal. Capture the new container identities and
+zero restart counts immediately after the switch, verify them after readiness
+and again after canaries/log review, and retain the exact prior Caddy image ID
+so rollback both injects and verifies that immutable identity.
 
 Store evidence outside checkout and release storage in a root-owned mode `0700`
 directory. The mobile gate must be an absolute nonexistent direct child. Publish

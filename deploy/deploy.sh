@@ -33,9 +33,10 @@ CADDY_IMAGE_REF="$CADDY_IMAGE@$EURITH_APPROVED_CADDY_DIGEST"
 export CADDY_IMAGE_REF
 CADDYFILE="$RUNNER_ROOT/deploy/caddy/Caddyfile"
 MOBILE_GATE_PUBLISHER="$RUNNER_ROOT/deploy/publish-mobile-gate.py"
+MIGRATION_SAFETY_GATE="$RUNNER_ROOT/deploy/migration-safety-gate.py"
 MOBILE_GATE_FILE="${MOBILE_GATE_FILE:-$EURITH_EVIDENCE_ROOT/backend-gate-${TARGET_SHA}.env}"
 
-for command_name in git docker curl sha256sum awk sed grep stat findmnt head python3 install chmod date mktemp mv seq sleep; do require_command "$command_name"; done
+for command_name in git docker curl sha256sum awk sed grep stat findmnt head python3 install chmod date mktemp mv rm seq sleep; do require_command "$command_name"; done
 for path in "$SOURCE_DIR" "$EURITH_BASE_COMPOSE" "$RELEASE_OVERLAY" "$DEPLOY_ENV" "$EURITH_BACKUP_ROOT" "$EURITH_RESTORE_DB_URL_FILE" "$EURITH_RESTORE_VOLUME_ROOT" "$EURITH_MIGRATION_APPROVAL_FILE" "$EURITH_EVIDENCE_ROOT" "$EURITH_CANARY_IDS_FILE" "$MOBILE_GATE_FILE"; do [[ -n "$path" ]] || die required_runtime_path_missing; done
 PUBLIC_API_BASE="$(python3 - "$EURITH_PUBLIC_API_URL" <<'PY'
 import ipaddress, re, sys
@@ -68,6 +69,7 @@ PY
 [[ -f "$EURITH_BASE_COMPOSE" && ! -L "$EURITH_BASE_COMPOSE" ]] || die base_compose_invalid
 [[ -f "$RELEASE_OVERLAY" && ! -L "$RELEASE_OVERLAY" ]] || die release_overlay_invalid
 [[ -f "$MOBILE_GATE_PUBLISHER" && ! -L "$MOBILE_GATE_PUBLISHER" ]] || die mobile_gate_publisher_invalid
+[[ -f "$MIGRATION_SAFETY_GATE" && ! -L "$MIGRATION_SAFETY_GATE" ]] || die migration_safety_gate_invalid
 [[ -f "$EURITH_CANARY_IDS_FILE" && ! -L "$EURITH_CANARY_IDS_FILE" ]] || die canary_ids_file_invalid
 [[ -f "$EURITH_MIGRATION_APPROVAL_FILE" && ! -L "$EURITH_MIGRATION_APPROVAL_FILE" ]] || die migration_approval_file_invalid
 
@@ -78,7 +80,8 @@ require_safe_absolute_path "$EURITH_MIGRATION_APPROVAL_FILE" secret "$SOURCE_DIR
 require_safe_absolute_path "$MOBILE_GATE_FILE" backup "$SOURCE_DIR"
 case "$(_canonical_path "$EURITH_EVIDENCE_ROOT")/" in "$(_canonical_path "$EURITH_RELEASE_VOLUME_ROOT")"/*) die evidence_below_release_storage ;; esac
 compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY")
-OLD_COMMIT=''; EVIDENCE_DIR=''; BACKUP_GENERATION=''; BACKUP_MANIFEST_SHA256=''; EXPECTED_ALEMBIC_HEAD=''; MIGRATION_ATTEMPTED=0; MIGRATION_STATE=not_attempted; MIGRATION_EVIDENCE_WRITTEN=0; SWITCH_ATTEMPTED=0; SOURCE_SWITCHED=0; SCHEMA_ROLLBACK_COMPATIBLE=0; ROLLBACK_ATTEMPTED=0; ROLLBACK_EVIDENCE_WRITTEN=0; CURRENT_STAGE=preflight
+OLD_COMMIT=''; EVIDENCE_DIR=''; BACKUP_GENERATION=''; BACKUP_MANIFEST_SHA256=''; EXPECTED_ALEMBIC_HEAD=''; MIGRATION_ATTEMPTED=0; MIGRATION_STATE=not_attempted; MIGRATION_EVIDENCE_WRITTEN=0; SWITCH_ATTEMPTED=0; SOURCE_SWITCHED=0; SCHEMA_ROLLBACK_COMPATIBLE=0; ROLLBACK_ATTEMPTED=0; ROLLBACK_EVIDENCE_WRITTEN=0; OLD_CADDY_IMAGE_ID=''; CURRENT_STAGE=preflight
+declare -A SWITCH_CONTAINER_IDS=()
 evidence() {
   local key="$1" value="$2"
   [[ "$key" =~ ^[a-z_]+$ && "$value" != *$'\n'* && "$value" != *$'\r'* && "$value" != *'='* ]] || die invalid_evidence
@@ -155,21 +158,13 @@ run_caddy_integration() {
 }
 
 gate_migrations() {
-  local current graph heads migration_path changed_migrations approval_hash
+  local current graph heads migration_path changed_migrations approval_hash migration_diff_hash
   changed_migrations="$(git diff --name-only "$OLD_COMMIT..$TARGET_SHA" -- migrations/versions)"
+  migration_diff_hash="$(git diff --binary "$OLD_COMMIT..$TARGET_SHA" -- migrations/versions | sha256sum | awk '{print $1}')"
+  [[ "$migration_diff_hash" =~ ^[0-9a-f]{64}$ ]] || die migration_diff_hash_invalid
   while IFS= read -r migration_file; do
     [[ -n "$migration_file" ]] || continue
-    python3 - "$SOURCE_DIR/$migration_file" <<'PY' || die destructive_migration_requires_expand_contract
-import ast, pathlib, re, sys
-tree = ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"), filename=sys.argv[1])
-upgrade = next((node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "upgrade"), None)
-if upgrade is None: raise SystemExit(1)
-for node in ast.walk(upgrade):
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in {"drop_table", "drop_column", "drop_constraint"}:
-        raise SystemExit(1)
-    if isinstance(node, ast.Constant) and isinstance(node.value, str) and re.search(r"\b(DROP\s+(TABLE|COLUMN)|ALTER\s+[^;]*\sTYPE\b)", node.value, re.I):
-        raise SystemExit(1)
-PY
+    python3 "$MIGRATION_SAFETY_GATE" "$SOURCE_DIR/$migration_file" || die destructive_migration_requires_expand_contract
   done <<<"$changed_migrations"
   current="$("${compose[@]}" exec -T api alembic current 2>/dev/null | sed -n 's/^\([0-9A-Za-z_]*\).*/\1/p' | tail -n1)" || die alembic_current_failed
   [[ "$current" =~ ^[0-9A-Za-z_]+$ ]] || die alembic_current_unknown
@@ -204,15 +199,16 @@ PY
   [[ "$heads" =~ ^[0-9A-Za-z_]+$ && "$migration_path" == "$current->$heads" ]] || die alembic_path_unknown
   [[ "$(stat -c '%a:%u:%g' "$EURITH_MIGRATION_APPROVAL_FILE")" == 400:0:0 ]] || die migration_approval_file_permissions_invalid
   mapfile -t approval_lines <"$EURITH_MIGRATION_APPROVAL_FILE"
-  [[ "${#approval_lines[@]}" == 4 ]] || die migration_approval_file_invalid
+  [[ "${#approval_lines[@]}" == 5 ]] || die migration_approval_file_invalid
   [[ "${approval_lines[0]}" == "old_backend_sha=$OLD_COMMIT" ]] || die migration_approval_file_old_sha_mismatch
   [[ "${approval_lines[1]}" == "new_backend_sha=$TARGET_SHA" ]] || die migration_approval_file_new_sha_mismatch
   [[ "${approval_lines[2]}" == "classification=additive" ]] || die migration_approval_file_policy_missing
-  [[ "${approval_lines[3]}" == "rollback_rehearsal=passed" ]] || die migration_approval_file_rehearsal_missing
+  [[ "${approval_lines[3]}" == "migration_diff_sha256=$migration_diff_hash" ]] || die migration_approval_file_diff_mismatch
+  [[ "${approval_lines[4]}" == "rollback_rehearsal=passed" ]] || die migration_approval_file_rehearsal_missing
   approval_hash="$(sha256_file "$EURITH_MIGRATION_APPROVAL_FILE")"; [[ "$approval_hash" =~ ^[0-9a-f]{64}$ ]] || die migration_approval_file_hash_invalid
   EXPECTED_ALEMBIC_HEAD="$heads"
   SCHEMA_ROLLBACK_COMPATIBLE=1
-  evidence alembic_heads "$heads"; evidence alembic_path "$migration_path"; evidence migration_policy_sha256 "$approval_hash"; evidence schema_rollback_compatible yes
+  evidence alembic_heads "$heads"; evidence alembic_path "$migration_path"; evidence migration_diff_sha256 "$migration_diff_hash"; evidence migration_policy_sha256 "$approval_hash"; evidence schema_rollback_compatible yes
 }
 
 build_target() {
@@ -234,7 +230,7 @@ apply_migration_once() {
 }
 
 rollback_infrastructure() {
-  local result=failed
+  local result=failed rollback_caddy_id rollback_caddy_image rollback_image_overlay
   ROLLBACK_ATTEMPTED=1
   if [[ "$SWITCH_ATTEMPTED" == 1 ]]; then
     "${compose[@]}" stop caddy >/dev/null 2>&1 || true
@@ -244,8 +240,17 @@ rollback_infrastructure() {
     evidence rollback_checkout passed
     if [[ "$MIGRATION_ATTEMPTED" == 0 || ( "$MIGRATION_STATE" == applied && "$SCHEMA_ROLLBACK_COMPATIBLE" == 1 ) ]]; then
       if [[ -f "$OLD_RELEASE_OVERLAY" ]]; then
-        rollback_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$OLD_RELEASE_OVERLAY")
-        "${rollback_compose[@]}" build api >/dev/null 2>&1 && "${rollback_compose[@]}" up -d --no-deps --pull never api caddy >/dev/null 2>&1 && result=passed
+        [[ "$OLD_CADDY_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || { evidence rollback_caddy_image failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; }
+        rollback_image_overlay="$(mktemp)" || { evidence rollback_caddy_image failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; }
+        chmod 0600 "$rollback_image_overlay" || { rm -f -- "$rollback_image_overlay"; evidence rollback_caddy_image failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; }
+        printf 'services:\n  caddy:\n    image: "%s"\n' "$OLD_CADDY_IMAGE_ID" >"$rollback_image_overlay" || { rm -f -- "$rollback_image_overlay"; evidence rollback_caddy_image failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; }
+        rollback_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$OLD_RELEASE_OVERLAY" -f "$rollback_image_overlay")
+        if "${rollback_compose[@]}" build api >/dev/null 2>&1 && "${rollback_compose[@]}" up -d --no-deps --pull never api caddy >/dev/null 2>&1; then
+          rollback_caddy_id="$("${rollback_compose[@]}" ps -q caddy 2>/dev/null)"
+          rollback_caddy_image="$(docker inspect "$rollback_caddy_id" --format '{{.Image}}' 2>/dev/null || true)"
+          if [[ -n "$rollback_caddy_id" && "$rollback_caddy_image" == "$OLD_CADDY_IMAGE_ID" ]]; then evidence rollback_caddy_image passed; result=passed; else evidence rollback_caddy_image failed; fi
+        fi
+        rm -f -- "$rollback_image_overlay"
       else
         rollback_compose=(docker compose -f "$EURITH_BASE_COMPOSE")
         "${rollback_compose[@]}" build api >/dev/null 2>&1 && "${rollback_compose[@]}" up -d --no-deps api >/dev/null 2>&1 && result=passed
@@ -255,7 +260,34 @@ rollback_infrastructure() {
   evidence rollback_result "$result"; ROLLBACK_EVIDENCE_WRITTEN=1; printf '%s\n' 'database_restore=manual_only' >&2; return 1
 }
 
-switch_api_and_caddy() { SWITCH_ATTEMPTED=1; "${compose[@]}" up -d --no-deps --pull never api caddy || rollback_infrastructure; evidence switch_status passed; }
+switch_api_and_caddy() {
+  local service old_caddy_id container_id restarts
+  old_caddy_id="$("${compose[@]}" ps -q caddy 2>/dev/null || true)"
+  if [[ -n "$old_caddy_id" ]]; then
+    OLD_CADDY_IMAGE_ID="$(docker inspect "$old_caddy_id" --format '{{.Image}}' 2>/dev/null || true)"
+    [[ "$OLD_CADDY_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die prior_caddy_image_unknown
+    evidence prior_caddy_image_id "$OLD_CADDY_IMAGE_ID"
+  fi
+  SWITCH_ATTEMPTED=1
+  "${compose[@]}" up -d --no-deps --pull never api caddy || rollback_infrastructure
+  for service in api caddy; do
+    container_id="$("${compose[@]}" ps -q "$service")"; [[ -n "$container_id" ]] || rollback_infrastructure
+    restarts="$(docker inspect "$container_id" --format '{{.RestartCount}}' 2>/dev/null || printf invalid)"
+    [[ "$restarts" == 0 ]] || { evidence unexpected_switched_container_restart yes; rollback_infrastructure; }
+    SWITCH_CONTAINER_IDS["$service"]="$container_id"
+  done
+  evidence switch_status passed
+}
+verify_switched_container_stability() {
+  local service container_id restarts
+  for service in api caddy; do
+    container_id="$("${compose[@]}" ps -q "$service")"
+    [[ -n "$container_id" && "$container_id" == "${SWITCH_CONTAINER_IDS[$service]}" ]] || rollback_infrastructure
+    restarts="$(docker inspect "$container_id" --format '{{.RestartCount}}' 2>/dev/null || printf invalid)"
+    [[ "$restarts" == 0 ]] || { evidence unexpected_switched_container_restart yes; rollback_infrastructure; }
+  done
+  evidence switched_container_stability passed
+}
 wait_for_readiness() {
   local attempt status
   for attempt in $(seq 1 30); do
@@ -330,7 +362,9 @@ CURRENT_STAGE=build_target; build_target; evidence build_target_exit 0
 CURRENT_STAGE=apply_migration_once; apply_migration_once; evidence apply_migration_once_exit 0
 CURRENT_STAGE=switch_api_and_caddy; switch_api_and_caddy; evidence switch_api_and_caddy_exit 0
 CURRENT_STAGE=wait_for_readiness; wait_for_readiness; evidence wait_for_readiness_exit 0
+CURRENT_STAGE=verify_switched_container_stability; verify_switched_container_stability; evidence verify_switched_container_stability_exit 0
 CURRENT_STAGE=run_public_canaries; run_public_canaries; evidence run_public_canaries_exit 0
 CURRENT_STAGE=review_runtime_logs; review_runtime_logs; evidence review_runtime_logs_exit 0
+CURRENT_STAGE=verify_switched_container_stability_final; verify_switched_container_stability; evidence verify_switched_container_stability_final_exit 0
 CURRENT_STAGE=write_mobile_gate; write_mobile_gate
 trap - EXIT

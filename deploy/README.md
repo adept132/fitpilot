@@ -93,17 +93,22 @@ rejected.
 
 After restoring a production snapshot into isolation, rehearse the target
 upgrade and prove that the exact old backend can still run against the upgraded
-schema. Only then create a root-owned `root:root` mode `0400` approval file:
+schema. Only then calculate the exact binary migration-diff SHA-256 and create
+a root-owned `root:root` mode `0400` approval file:
 
 ```text
 old_backend_sha=<previous-backend-full-sha>
 new_backend_sha=<backend-full-sha>
 classification=additive
+migration_diff_sha256=<sha256-of-binary-migration-diff>
 rollback_rehearsal=passed
 ```
 
-The file must contain exactly those four lines. A missing/mismatched approval,
-destructive migration, failed rehearsal, or any partially attempted migration
+The file must contain exactly those five lines. A positive static allowlist
+permits only explicit additive Alembic operations and known SQLAlchemy value
+constructors. Dynamic SQL, helper/bind execution, data mutation, rename,
+drop/alter, and unknown calls require a separate expand/contract rollout. A
+missing/mismatched approval, failed rehearsal, or any partially attempted migration
 is fail-closed. A partial attempt is recorded as `migration_state=unknown` and
 requires manual database investigation; it never triggers an automatic restore.
 
@@ -127,8 +132,10 @@ sudo RELEASE_MUTATIONS_PAUSED=1 \
 The sequence is: provenance and pause gates; paired backup; isolated restore;
 Compose and Caddy fmt/adapt/validate; required real loopback Caddy integration;
 one-head and migration-path gate; exact API build; one migration; coordinated
-API+Caddy switch with image pulls disabled; bounded readiness retries; public
-canaries; Compose-native bounded log review; mobile gate.
+API+Caddy switch with image pulls disabled; immediate zero-restart identity
+capture; bounded readiness retries; public canaries; Compose-native bounded log
+review; final identity/restart proof; mobile gate. Rollback injects and verifies
+the exact immutable image ID used by the prior Caddy container.
 
 Run canaries independently with the same protected inputs:
 

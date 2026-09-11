@@ -13,6 +13,7 @@ DEPLOY = ROOT / "deploy" / "deploy.sh"
 CANARY = ROOT / "deploy" / "canary-release-delivery.sh"
 HEADER_GATE = ROOT / "deploy" / "http-header-gate.py"
 PUBLISH_GATE = ROOT / "deploy" / "publish-mobile-gate.py"
+MIGRATION_GATE = ROOT / "deploy" / "migration-safety-gate.py"
 README = ROOT / "deploy" / "README.md"
 CHECKLIST = ROOT / "docs" / "releases" / "update-center-backend-checklist.md"
 BASH = shutil.which("bash") or "D:/Git/usr/bin/bash.exe"
@@ -58,6 +59,7 @@ def test_deploy_orders_irreversible_work_behind_all_preflight_gates() -> None:
         "apply_migration_once",
         "switch_api_and_caddy",
         "wait_for_readiness",
+        "verify_switched_container_stability",
         "run_public_canaries",
         "review_runtime_logs",
         "write_mobile_gate",
@@ -76,7 +78,9 @@ def test_deploy_never_persists_rendered_compose_or_restores_database_automatical
     assert "git reset --hard" not in script
     assert "rollback_infrastructure" in script
     assert "schema_rollback_compatible" in script
-    assert "ast.walk(upgrade)" in script
+    migration_gate = _text(MIGRATION_GATE)
+    assert "ast.walk(upgrade)" in migration_gate
+    assert "ALLOWED_OP_CALLS" in migration_gate
 
 
 def test_deploy_records_required_redacted_evidence_and_pins_caddy_digest() -> None:
@@ -108,6 +112,10 @@ def test_deploy_records_required_redacted_evidence_and_pins_caddy_digest() -> No
         "--pull never",
         "CADDY_IMAGE_REF",
         "rollback_checkout_mismatch",
+        "migration_diff_sha256",
+        "OLD_CADDY_IMAGE_ID",
+        "rollback_image_overlay",
+        "unexpected_switched_container_restart",
     ):
         assert contract in script
     for contract in ("evidence_sha256", "evidence.parent.parent", "_write_all", "os.fstat", "os.link", "os.fsync"):
@@ -196,6 +204,27 @@ def test_mobile_gate_publisher_writes_all_bytes_and_never_links_partial_gate(tmp
     else:
         raise AssertionError("zero-length write must fail")
     assert not gate.exists()
+
+
+def test_migration_gate_allows_only_known_additive_operations_and_rejects_dynamic_sql(tmp_path: Path) -> None:
+    valid = tmp_path / "valid.py"
+    valid.write_text(
+        "from alembic import op\nimport sqlalchemy as sa\n"
+        "def upgrade():\n    op.add_column('items', sa.Column('label', sa.String(20), nullable=True))\n",
+        encoding="utf-8",
+    )
+    assert subprocess.run([sys.executable, MIGRATION_GATE, valid], capture_output=True).returncode == 0
+    invalid_sources = {
+        "module-dynamic": "DESTRUCTIVE_SQL='TRUNCATE items'\ndef upgrade():\n    op.execute(DESTRUCTIVE_SQL)\n",
+        "module-side-effect": "EVIL = run_sql()\ndef upgrade():\n    op.add_column('x', sa.Column('y', sa.String()))\n",
+        "delete": "def upgrade():\n    bind.execute('DELETE FROM items')\n",
+        "rename": "def upgrade():\n    op.rename_table('items', 'gone')\n",
+        "drop-index": "def upgrade():\n    op.drop_index('ix_items')\n",
+        "truncate": "def upgrade():\n    op.execute('TRUNCATE items')\n",
+    }
+    for name, source in invalid_sources.items():
+        candidate = tmp_path / f"{name}.py"; candidate.write_text(source, encoding="utf-8")
+        assert subprocess.run([sys.executable, MIGRATION_GATE, candidate], capture_output=True).returncode != 0, name
 
 
 def test_nginx_artifact_and_instructions_are_removed_together() -> None:
