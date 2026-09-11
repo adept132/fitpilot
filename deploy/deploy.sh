@@ -32,6 +32,7 @@ EURITH_APPROVED_CADDY_DIGEST="${EURITH_APPROVED_CADDY_DIGEST:-}"
 CADDY_IMAGE_REF="$CADDY_IMAGE@$EURITH_APPROVED_CADDY_DIGEST"
 export CADDY_IMAGE_REF
 CADDYFILE="$RUNNER_ROOT/deploy/caddy/Caddyfile"
+MOBILE_GATE_PUBLISHER="$RUNNER_ROOT/deploy/publish-mobile-gate.py"
 MOBILE_GATE_FILE="${MOBILE_GATE_FILE:-$EURITH_EVIDENCE_ROOT/backend-gate-${TARGET_SHA}.env}"
 
 for command_name in git docker curl sha256sum awk sed grep stat findmnt head python3 install chmod date mktemp mv seq sleep; do require_command "$command_name"; done
@@ -66,6 +67,7 @@ PY
 [[ "$(stat -c '%a:%u' "$DEPLOY_ENV")" =~ ^(600|640):0$ ]] || die protected_deploy_env_permissions_invalid
 [[ -f "$EURITH_BASE_COMPOSE" && ! -L "$EURITH_BASE_COMPOSE" ]] || die base_compose_invalid
 [[ -f "$RELEASE_OVERLAY" && ! -L "$RELEASE_OVERLAY" ]] || die release_overlay_invalid
+[[ -f "$MOBILE_GATE_PUBLISHER" && ! -L "$MOBILE_GATE_PUBLISHER" ]] || die mobile_gate_publisher_invalid
 [[ -f "$EURITH_CANARY_IDS_FILE" && ! -L "$EURITH_CANARY_IDS_FILE" ]] || die canary_ids_file_invalid
 [[ -f "$EURITH_MIGRATION_APPROVAL_FILE" && ! -L "$EURITH_MIGRATION_APPROVAL_FILE" ]] || die migration_approval_file_invalid
 
@@ -280,38 +282,7 @@ write_mobile_gate() {
   evidence backend_gate passed
   evidence deployment_result passed
   evidence deploy_completed_at "$completed_at"
-  python3 - "$EVIDENCE_DIR/deploy.env" "$MOBILE_GATE_FILE" "$TARGET_SHA" "$MOBILE_CANDIDATE_SHA" "$completed_at" <<'PY'
-import hashlib, os, pathlib, sys, tempfile
-evidence, gate = map(pathlib.Path, sys.argv[1:3])
-backend, mobile, completed = sys.argv[3:6]
-with evidence.open("rb") as handle:
-    payload = handle.read(); os.fsync(handle.fileno())
-for durable_directory in (evidence.parent, evidence.parent.parent):
-    directory_fd = os.open(durable_directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try: os.fsync(directory_fd)
-    finally: os.close(directory_fd)
-evidence_sha256 = hashlib.sha256(payload).hexdigest()
-directory = gate.parent
-fd, temporary = tempfile.mkstemp(prefix=".backend-gate.", dir=directory)
-try:
-    os.fchmod(fd, 0o600)
-    content = (
-        f"backend_gate=passed\nbackend_sha={backend}\nmobile_candidate_sha={mobile}\n"
-        f"deploy_completed_at={completed}\nevidence_sha256={evidence_sha256}\nwrite_mobile_gate_exit=0\n"
-    ).encode("ascii")
-    os.write(fd, content); os.fsync(fd); os.close(fd); fd = -1
-    os.link(temporary, gate)
-    directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try: os.fsync(directory_fd)
-    finally: os.close(directory_fd)
-finally:
-    if fd >= 0: os.close(fd)
-    try: os.unlink(temporary)
-    except FileNotFoundError: pass
-    directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try: os.fsync(directory_fd)
-    finally: os.close(directory_fd)
-PY
+  python3 "$MOBILE_GATE_PUBLISHER" "$EVIDENCE_DIR/deploy.env" "$MOBILE_GATE_FILE" "$TARGET_SHA" "$MOBILE_CANDIDATE_SHA" "$completed_at"
   printf 'backend_gate=passed\n'
 }
 

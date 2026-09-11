@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -11,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "deploy" / "deploy.sh"
 CANARY = ROOT / "deploy" / "canary-release-delivery.sh"
 HEADER_GATE = ROOT / "deploy" / "http-header-gate.py"
+PUBLISH_GATE = ROOT / "deploy" / "publish-mobile-gate.py"
 README = ROOT / "deploy" / "README.md"
 CHECKLIST = ROOT / "docs" / "releases" / "update-center-backend-checklist.md"
 BASH = shutil.which("bash") or "D:/Git/usr/bin/bash.exe"
@@ -79,6 +81,7 @@ def test_deploy_never_persists_rendered_compose_or_restores_database_automatical
 
 def test_deploy_records_required_redacted_evidence_and_pins_caddy_digest() -> None:
     script = _text(DEPLOY)
+    publisher = _text(PUBLISH_GATE)
     for field in (
         "old_backend_sha",
         "new_backend_sha",
@@ -102,15 +105,13 @@ def test_deploy_records_required_redacted_evidence_and_pins_caddy_digest() -> No
         "migration_state=unknown",
         "wait_for_readiness",
         "deploy_completed_at",
-        "evidence_sha256",
-        "evidence.parent.parent",
-        "os.link",
-        "fsync",
         "--pull never",
         "CADDY_IMAGE_REF",
         "rollback_checkout_mismatch",
     ):
         assert contract in script
+    for contract in ("evidence_sha256", "evidence.parent.parent", "_write_all", "os.fstat", "os.link", "os.fsync"):
+        assert contract in publisher
     assert 'CADDY_IMAGE_REF="$CADDY_IMAGE@$EURITH_APPROVED_CADDY_DIGEST"' in script
 
 
@@ -169,6 +170,32 @@ def test_header_gate_absent_mode_checks_every_response_block(tmp_path: Path) -> 
     candidate.write_bytes(b"HTTP/1.1 302 Found\r\nX-Accel-Redirect: /secret\r\n\r\nHTTP/2 404\r\n\r\n")
     result = subprocess.run([sys.executable, HEADER_GATE, "absent", candidate, "X-Accel-Redirect"], capture_output=True)
     assert result.returncode != 0
+
+
+def test_mobile_gate_publisher_writes_all_bytes_and_never_links_partial_gate(tmp_path: Path, monkeypatch) -> None:
+    spec = importlib.util.spec_from_file_location("publish_mobile_gate", PUBLISH_GATE)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    evidence_dir = tmp_path / "evidence" / "generation"; evidence_dir.mkdir(parents=True)
+    evidence = evidence_dir / "deploy.env"; evidence.write_text("deployment_result=passed\n", encoding="ascii")
+    gate = tmp_path / "evidence" / "gate.env"
+    monkeypatch.setattr(module, "_fsync_directory", lambda _path: None)
+    monkeypatch.setattr(module.os, "fsync", lambda _descriptor: None)
+    real_write = module.os.write
+    monkeypatch.setattr(module.os, "write", lambda fd, data: real_write(fd, data[:3]))
+    module.publish(evidence, gate, "a" * 40, "b" * 40, "2026-09-11T00:00:00Z")
+    payload = gate.read_bytes()
+    assert payload.endswith(b"write_mobile_gate_exit=0\n")
+    gate.unlink()
+    monkeypatch.setattr(module.os, "write", lambda _fd, _data: 0)
+    try:
+        module.publish(evidence, gate, "a" * 40, "b" * 40, "2026-09-11T00:00:00Z")
+    except OSError:
+        pass
+    else:
+        raise AssertionError("zero-length write must fail")
+    assert not gate.exists()
 
 
 def test_nginx_artifact_and_instructions_are_removed_together() -> None:
