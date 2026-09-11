@@ -33,7 +33,9 @@ CADDY_IMAGE_REF="$CADDY_IMAGE@$EURITH_APPROVED_CADDY_DIGEST"
 export CADDY_IMAGE_REF
 CADDYFILE="$RUNNER_ROOT/deploy/caddy/Caddyfile"
 MOBILE_GATE_PUBLISHER="$RUNNER_ROOT/deploy/publish-mobile-gate.py"
-MIGRATION_SAFETY_GATE="$RUNNER_ROOT/deploy/migration-safety-gate.py"
+MIGRATION_MANIFEST_TOOL="$RUNNER_ROOT/deploy/migration-path-manifest.py"
+MIGRATION_APPROVAL_TOOL="$RUNNER_ROOT/deploy/validate-migration-approval.py"
+REHEARSAL_PROBE="$RUNNER_ROOT/deploy/rehearse-release-db.py"
 MOBILE_GATE_FILE="${MOBILE_GATE_FILE:-$EURITH_EVIDENCE_ROOT/backend-gate-${TARGET_SHA}.env}"
 
 for command_name in git docker curl sha256sum awk sed grep stat findmnt head python3 install chmod date mktemp mv rm seq sleep; do require_command "$command_name"; done
@@ -69,9 +71,11 @@ PY
 [[ -f "$EURITH_BASE_COMPOSE" && ! -L "$EURITH_BASE_COMPOSE" ]] || die base_compose_invalid
 [[ -f "$RELEASE_OVERLAY" && ! -L "$RELEASE_OVERLAY" ]] || die release_overlay_invalid
 [[ -f "$MOBILE_GATE_PUBLISHER" && ! -L "$MOBILE_GATE_PUBLISHER" ]] || die mobile_gate_publisher_invalid
-[[ -f "$MIGRATION_SAFETY_GATE" && ! -L "$MIGRATION_SAFETY_GATE" ]] || die migration_safety_gate_invalid
+for helper in "$MIGRATION_MANIFEST_TOOL" "$MIGRATION_APPROVAL_TOOL" "$REHEARSAL_PROBE"; do [[ -f "$helper" && ! -L "$helper" ]] || die migration_release_helper_invalid; done
 [[ -f "$EURITH_CANARY_IDS_FILE" && ! -L "$EURITH_CANARY_IDS_FILE" ]] || die canary_ids_file_invalid
 [[ -f "$EURITH_MIGRATION_APPROVAL_FILE" && ! -L "$EURITH_MIGRATION_APPROVAL_FILE" ]] || die migration_approval_file_invalid
+[[ -f "$EURITH_RESTORE_DB_URL_FILE" && ! -L "$EURITH_RESTORE_DB_URL_FILE" ]] || die restore_database_url_file_invalid
+[[ "$(stat -c '%a:%u' "$EURITH_RESTORE_DB_URL_FILE")" =~ ^(400|600):0$ ]] || die restore_database_url_file_permissions_invalid
 
 require_safe_absolute_path "$EURITH_BACKUP_ROOT" backup "$SOURCE_DIR"
 require_safe_absolute_path "$EURITH_EVIDENCE_ROOT" backup "$SOURCE_DIR"
@@ -80,7 +84,7 @@ require_safe_absolute_path "$EURITH_MIGRATION_APPROVAL_FILE" secret "$SOURCE_DIR
 require_safe_absolute_path "$MOBILE_GATE_FILE" backup "$SOURCE_DIR"
 case "$(_canonical_path "$EURITH_EVIDENCE_ROOT")/" in "$(_canonical_path "$EURITH_RELEASE_VOLUME_ROOT")"/*) die evidence_below_release_storage ;; esac
 compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY")
-OLD_COMMIT=''; EVIDENCE_DIR=''; BACKUP_GENERATION=''; BACKUP_MANIFEST_SHA256=''; EXPECTED_ALEMBIC_HEAD=''; MIGRATION_ATTEMPTED=0; MIGRATION_STATE=not_attempted; MIGRATION_EVIDENCE_WRITTEN=0; SWITCH_ATTEMPTED=0; SOURCE_SWITCHED=0; SCHEMA_ROLLBACK_COMPATIBLE=0; ROLLBACK_ATTEMPTED=0; ROLLBACK_EVIDENCE_WRITTEN=0; PRIOR_CADDY_PRESENT=0; OLD_CADDY_IMAGE_ID=''; CURRENT_STAGE=preflight
+OLD_COMMIT=''; EVIDENCE_DIR=''; BACKUP_GENERATION=''; BACKUP_MANIFEST_SHA256=''; EXPECTED_ALEMBIC_HEAD=''; MIGRATION_ATTEMPTED=0; MIGRATION_STATE=not_attempted; MIGRATION_EVIDENCE_WRITTEN=0; SWITCH_ATTEMPTED=0; SOURCE_SWITCHED=0; SCHEMA_ROLLBACK_COMPATIBLE=0; ROLLBACK_ATTEMPTED=0; ROLLBACK_EVIDENCE_WRITTEN=0; PRIOR_CADDY_PRESENT=0; OLD_CADDY_IMAGE_ID=''; REHEARSAL_OVERLAY=''; CURRENT_STAGE=preflight
 declare -A SWITCH_CONTAINER_IDS=()
 evidence() {
   local key="$1" value="$2"
@@ -130,6 +134,20 @@ verify_isolated_restore() {
   restored_manifest="$(sed -n 's/^manifest_sha256=//p' <<<"$output")"
   [[ "$restored_manifest" =~ ^[0-9a-f]{64}$ && "$restored_manifest" == "$BACKUP_MANIFEST_SHA256" ]] || die backup_restore_manifest_mismatch
   evidence restore_drill passed
+  python3 - "$EURITH_RESTORE_DB_URL_FILE" <<'PY' || die rehearsal_database_url_invalid
+import pathlib, re, sys
+from urllib.parse import unquote, urlsplit
+path = pathlib.Path(sys.argv[1])
+lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line and not line.startswith("#")]
+if len(lines) != 1 or not lines[0].startswith("DATABASE_URL="): raise SystemExit(1)
+parsed = urlsplit(lines[0].split("=", 1)[1])
+database = unquote(parsed.path.lstrip("/"))
+if parsed.scheme not in {"postgresql", "postgresql+asyncpg"} or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}: raise SystemExit(1)
+if parsed.query or parsed.fragment or re.fullmatch(r"eurith_restore_[a-z0-9][a-z0-9_]*", database) is None: raise SystemExit(1)
+PY
+  REHEARSAL_OVERLAY="$(mktemp)" || die rehearsal_overlay_create_failed
+  chmod 0600 "$REHEARSAL_OVERLAY" || die rehearsal_overlay_permissions_failed
+  printf 'services:\n  api:\n    env_file:\n      - "%s"\n    volumes:\n      - "%s:/tmp/eurith-rehearse-release-db.py:ro"\n' "$EURITH_RESTORE_DB_URL_FILE" "$REHEARSAL_PROBE" >"$REHEARSAL_OVERLAY" || die rehearsal_overlay_write_failed
 }
 
 checkout_target_source() {
@@ -158,57 +176,23 @@ run_caddy_integration() {
 }
 
 gate_migrations() {
-  local current graph heads migration_path changed_migrations approval_hash migration_diff_hash
-  changed_migrations="$(git diff --name-only "$OLD_COMMIT..$TARGET_SHA" -- migrations/versions)"
-  migration_diff_hash="$(git diff --binary "$OLD_COMMIT..$TARGET_SHA" -- migrations/versions | sha256sum | awk '{print $1}')"
-  [[ "$migration_diff_hash" =~ ^[0-9a-f]{64}$ ]] || die migration_diff_hash_invalid
-  while IFS= read -r migration_file; do
-    [[ -n "$migration_file" ]] || continue
-    python3 "$MIGRATION_SAFETY_GATE" "$SOURCE_DIR/$migration_file" || die destructive_migration_requires_expand_contract
-  done <<<"$changed_migrations"
+  local current heads migration_path migration_path_hash approval_output approval_hash approval_identity path_manifest
   current="$("${compose[@]}" exec -T api alembic current 2>/dev/null | sed -n 's/^\([0-9A-Za-z_]*\).*/\1/p' | tail -n1)" || die alembic_current_failed
   [[ "$current" =~ ^[0-9A-Za-z_]+$ ]] || die alembic_current_unknown
-  graph="$(python3 - "$SOURCE_DIR/migrations/versions" "$current" <<'PY'
-import ast, pathlib, sys
-root, current = pathlib.Path(sys.argv[1]), sys.argv[2]
-revisions = {}
-for path in root.glob("*.py"):
-    values = {}
-    for node in ast.parse(path.read_text(encoding="utf-8"), filename=str(path)).body:
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            for target in targets:
-                if isinstance(target, ast.Name) and target.id in {"revision", "down_revision"}:
-                    values[target.id] = ast.literal_eval(node.value)
-    revision = values.get("revision")
-    parent = values.get("down_revision")
-    if not isinstance(revision, str) or revision in revisions: raise SystemExit(1)
-    if parent is not None and not isinstance(parent, str): raise SystemExit(1)
-    revisions[revision] = parent
-parents = {parent for parent in revisions.values() if parent is not None}
-heads = sorted(set(revisions) - parents)
-if len(heads) != 1 or current not in revisions: raise SystemExit(1)
-cursor, seen = heads[0], set()
-while cursor != current:
-    if cursor in seen or cursor not in revisions or revisions[cursor] is None: raise SystemExit(1)
-    seen.add(cursor); cursor = revisions[cursor]
-print(heads[0]); print(f"{current}->{heads[0]}")
-PY
-)" || die alembic_graph_invalid
-  heads="$(sed -n '1p' <<<"$graph")"; migration_path="$(sed -n '2p' <<<"$graph")"
+  path_manifest="$EVIDENCE_DIR/migration-path.manifest"
+  python3 "$MIGRATION_MANIFEST_TOOL" "$SOURCE_DIR/migrations/versions" "$current" >"$path_manifest" || die alembic_graph_invalid
+  chmod 0600 "$path_manifest" || die migration_manifest_permissions_failed
+  heads="$(sed -n 's/^target_head=//p' "$path_manifest")"
+  migration_path="$(sed -n 's/^migration_path=//p' "$path_manifest")"
+  migration_path_hash="$(sed -n 's/^migration_path_sha256=//p' "$path_manifest")"
   [[ "$heads" =~ ^[0-9A-Za-z_]+$ && "$migration_path" == "$current->$heads" ]] || die alembic_path_unknown
-  [[ "$(stat -c '%a:%u:%g' "$EURITH_MIGRATION_APPROVAL_FILE")" == 400:0:0 ]] || die migration_approval_file_permissions_invalid
-  mapfile -t approval_lines <"$EURITH_MIGRATION_APPROVAL_FILE"
-  [[ "${#approval_lines[@]}" == 5 ]] || die migration_approval_file_invalid
-  [[ "${approval_lines[0]}" == "old_backend_sha=$OLD_COMMIT" ]] || die migration_approval_file_old_sha_mismatch
-  [[ "${approval_lines[1]}" == "new_backend_sha=$TARGET_SHA" ]] || die migration_approval_file_new_sha_mismatch
-  [[ "${approval_lines[2]}" == "classification=additive" ]] || die migration_approval_file_policy_missing
-  [[ "${approval_lines[3]}" == "migration_diff_sha256=$migration_diff_hash" ]] || die migration_approval_file_diff_mismatch
-  [[ "${approval_lines[4]}" == "rollback_rehearsal=passed" ]] || die migration_approval_file_rehearsal_missing
-  approval_hash="$(sha256_file "$EURITH_MIGRATION_APPROVAL_FILE")"; [[ "$approval_hash" =~ ^[0-9a-f]{64}$ ]] || die migration_approval_file_hash_invalid
+  [[ "$migration_path_hash" =~ ^[0-9a-f]{64}$ ]] || die migration_path_hash_invalid
+  approval_output="$(python3 "$MIGRATION_APPROVAL_TOOL" "$EURITH_MIGRATION_APPROVAL_FILE" "$OLD_COMMIT" "$TARGET_SHA" "$current" "$heads" "$migration_path_hash")" || die migration_approval_file_invalid
+  approval_hash="$(sed -n 's/^approval_sha256=//p' <<<"$approval_output")"
+  approval_identity="$(sed -n 's/^approval_identity=//p' <<<"$approval_output")"
+  [[ "$approval_hash" =~ ^[0-9a-f]{64}$ && "$approval_identity" =~ ^[A-Za-z0-9][A-Za-z0-9._@-]{2,127}$ ]] || die migration_approval_output_invalid
   EXPECTED_ALEMBIC_HEAD="$heads"
-  SCHEMA_ROLLBACK_COMPATIBLE=1
-  evidence alembic_heads "$heads"; evidence alembic_path "$migration_path"; evidence migration_diff_sha256 "$migration_diff_hash"; evidence migration_policy_sha256 "$approval_hash"; evidence schema_rollback_compatible yes
+  evidence alembic_heads "$heads"; evidence alembic_path "$migration_path"; evidence migration_path_sha256 "$migration_path_hash"; evidence migration_policy_sha256 "$approval_hash"; evidence migration_approval_identity "$approval_identity"; evidence rehearsal_probe_sha256 "$(sha256_file "$REHEARSAL_PROBE")"
 }
 
 build_target() {
@@ -218,6 +202,32 @@ build_target() {
   runtime_heads="$("${compose[@]}" run --rm --no-deps api alembic heads 2>/dev/null | sed -n 's/^\([0-9A-Za-z_]*\).*/\1/p')" || die alembic_heads_failed
   [[ "$runtime_heads" == "$EXPECTED_ALEMBIC_HEAD" ]] || die built_image_alembic_head_mismatch
   evidence build_status passed
+}
+
+rehearse_migration_compatibility() {
+  local target_current
+  local -a target_rehearsal_compose old_rehearsal_compose
+  target_rehearsal_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY" -f "$REHEARSAL_OVERLAY")
+  "${target_rehearsal_compose[@]}" config >/dev/null || die target_rehearsal_compose_invalid
+  "${target_rehearsal_compose[@]}" run --rm --no-deps api alembic upgrade head || die target_migration_rehearsal_failed
+  target_current="$("${target_rehearsal_compose[@]}" run --rm --no-deps api alembic current 2>/dev/null | sed -n 's/^\([0-9A-Za-z_]*\).*/\1/p' | tail -n1)" || die target_schema_rehearsal_failed
+  [[ "$target_current" == "$EXPECTED_ALEMBIC_HEAD" ]] || die target_schema_rehearsal_failed
+  "${target_rehearsal_compose[@]}" run --rm --no-deps api python /tmp/eurith-rehearse-release-db.py "$EXPECTED_ALEMBIC_HEAD" || die target_schema_rehearsal_failed
+  evidence target_migration_rehearsal passed
+  git -C "$SOURCE_DIR" checkout --detach "$OLD_COMMIT" >/dev/null || die old_rehearsal_checkout_failed
+  [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" == "$OLD_COMMIT" && -z "$(git -C "$SOURCE_DIR" status --porcelain)" ]] || die old_rehearsal_checkout_invalid
+  old_rehearsal_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE")
+  [[ -f "$OLD_RELEASE_OVERLAY" ]] && old_rehearsal_compose+=(-f "$OLD_RELEASE_OVERLAY")
+  old_rehearsal_compose+=(-f "$REHEARSAL_OVERLAY")
+  "${old_rehearsal_compose[@]}" config >/dev/null || die old_backend_compatibility_rehearsal_failed
+  "${old_rehearsal_compose[@]}" build api >/dev/null || die old_backend_compatibility_rehearsal_failed
+  "${old_rehearsal_compose[@]}" run --rm --no-deps api python /tmp/eurith-rehearse-release-db.py "$EXPECTED_ALEMBIC_HEAD" || die old_backend_compatibility_rehearsal_failed
+  evidence old_backend_compatibility_rehearsal passed
+  git -C "$SOURCE_DIR" checkout --detach "$TARGET_SHA" >/dev/null || die target_rehearsal_restore_failed
+  [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" == "$TARGET_SHA" && -z "$(git -C "$SOURCE_DIR" status --porcelain)" ]] || die target_rehearsal_restore_invalid
+  "${compose[@]}" build api >/dev/null || die target_rebuild_after_rehearsal_failed
+  SCHEMA_ROLLBACK_COMPATIBLE=1
+  evidence schema_rollback_compatible yes
 }
 
 apply_migration_once() {
@@ -355,6 +365,7 @@ for durable_directory in (path.parent, path.parent.parent):
     finally: os.close(directory_fd)
 PY
   fi
+  [[ -z "$REHEARSAL_OVERLAY" ]] || rm -f -- "$REHEARSAL_OVERLAY"
   exit "$status"
 }
 trap on_exit EXIT
@@ -367,6 +378,7 @@ CURRENT_STAGE=validate_caddy; validate_caddy; evidence validate_caddy_exit 0
 CURRENT_STAGE=run_caddy_integration; run_caddy_integration; evidence run_caddy_integration_exit 0
 CURRENT_STAGE=gate_migrations; gate_migrations; evidence gate_migrations_exit 0
 CURRENT_STAGE=build_target; build_target; evidence build_target_exit 0
+CURRENT_STAGE=rehearse_migration_compatibility; rehearse_migration_compatibility; evidence rehearse_migration_compatibility_exit 0
 CURRENT_STAGE=apply_migration_once; apply_migration_once; evidence apply_migration_once_exit 0
 CURRENT_STAGE=switch_api_and_caddy; switch_api_and_caddy; evidence switch_api_and_caddy_exit 0
 CURRENT_STAGE=wait_for_readiness; wait_for_readiness; evidence wait_for_readiness_exit 0
@@ -375,4 +387,5 @@ CURRENT_STAGE=run_public_canaries; run_public_canaries; evidence run_public_cana
 CURRENT_STAGE=review_runtime_logs; review_runtime_logs; evidence review_runtime_logs_exit 0
 CURRENT_STAGE=verify_switched_container_stability_final; verify_switched_container_stability; evidence verify_switched_container_stability_final_exit 0
 CURRENT_STAGE=write_mobile_gate; write_mobile_gate
+[[ -z "$REHEARSAL_OVERLAY" ]] || rm -f -- "$REHEARSAL_OVERLAY"
 trap - EXIT

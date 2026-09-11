@@ -131,16 +131,19 @@ database URL, internal handoff path, or artifact filesystem path.
 
 Resolve the approved Caddy image to a digest and run Compose with
 `caddy:2.11.4@sha256:<approved-digest>` and pulls disabled during the switch.
-Before migration, restore the paired backup in isolation, compare its reported
-manifest hash to the backup result, rehearse the target upgrade plus exact old
-backend rollback, hash the exact binary migration diff, and install the exact
-five-line root-owned mode `0400`
-`EURITH_MIGRATION_APPROVAL_FILE` described in `deploy/README.md`. Missing or
-mismatched approval is fatal. The positive operation allowlist rejects dynamic
-SQL, helper/bind execution, data mutation, rename/drop/alter, and every unknown
-migration call; those require expand/contract. Any partial migration attempt is
-`migration_state=unknown`, requires manual investigation, and forbids automatic
-database restore/downgrade.
+Before migration, restore the paired backup in isolation and compare its reported
+manifest hash to the backup result. Generate the deterministic ordered migration
+path manifest (revision, file name, and SHA-256 of exact file bytes), review those
+exact files, and install the exact seven-line root-owned mode `0400`
+`EURITH_MIGRATION_APPROVAL_FILE` described in `deploy/README.md`, outside the
+checkout. Missing/mismatched identity, SHA, Alembic head, path hash, owner, mode,
+symlink status, rollback decision, or reviewer identity is fatal. The deployment
+then upgrades only the isolated `eurith_restore_*` database, runs the target
+health/full ORM schema probe, and runs the exact old backend against that upgraded
+isolated database. Only explicit `rollback_compatible=true` and successful target
+and old-backend rehearsals permit production migration and automatic code
+rollback. Any partial production migration attempt is `migration_state=unknown`,
+requires manual investigation, and forbids automatic database restore/downgrade.
 
 The public URL must be a structurally valid HTTPS origin with no credentials,
 query, or fragment. Canary IDs are an exact three-key root-owned mode `0400`

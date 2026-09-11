@@ -13,7 +13,9 @@ DEPLOY = ROOT / "deploy" / "deploy.sh"
 CANARY = ROOT / "deploy" / "canary-release-delivery.sh"
 HEADER_GATE = ROOT / "deploy" / "http-header-gate.py"
 PUBLISH_GATE = ROOT / "deploy" / "publish-mobile-gate.py"
-MIGRATION_GATE = ROOT / "deploy" / "migration-safety-gate.py"
+MIGRATION_MANIFEST = ROOT / "deploy" / "migration-path-manifest.py"
+MIGRATION_APPROVAL = ROOT / "deploy" / "validate-migration-approval.py"
+REHEARSAL_PROBE = ROOT / "deploy" / "rehearse-release-db.py"
 README = ROOT / "deploy" / "README.md"
 CHECKLIST = ROOT / "docs" / "releases" / "update-center-backend-checklist.md"
 BASH = shutil.which("bash") or "D:/Git/usr/bin/bash.exe"
@@ -56,6 +58,7 @@ def test_deploy_orders_irreversible_work_behind_all_preflight_gates() -> None:
         "run_caddy_integration",
         "gate_migrations",
         "build_target",
+        "rehearse_migration_compatibility",
         "apply_migration_once",
         "switch_api_and_caddy",
         "wait_for_readiness",
@@ -78,9 +81,7 @@ def test_deploy_never_persists_rendered_compose_or_restores_database_automatical
     assert "git reset --hard" not in script
     assert "rollback_infrastructure" in script
     assert "schema_rollback_compatible" in script
-    migration_gate = _text(MIGRATION_GATE)
-    assert "ast.walk(upgrade)" in migration_gate
-    assert "ALLOWED_OP_CALLS" in migration_gate
+    assert not (ROOT / "deploy" / "migration-safety-gate.py").exists()
 
 
 def test_deploy_records_required_redacted_evidence_and_pins_caddy_digest() -> None:
@@ -112,7 +113,9 @@ def test_deploy_records_required_redacted_evidence_and_pins_caddy_digest() -> No
         "--pull never",
         "CADDY_IMAGE_REF",
         "rollback_checkout_mismatch",
-        "migration_diff_sha256",
+        "migration_path_sha256",
+        "migration_approval_identity",
+        "rehearsal_probe_sha256",
         "OLD_CADDY_IMAGE_ID",
         "rollback_image_overlay",
         "unexpected_switched_container_restart",
@@ -206,122 +209,90 @@ def test_mobile_gate_publisher_writes_all_bytes_and_never_links_partial_gate(tmp
     assert not gate.exists()
 
 
-def test_migration_gate_allows_only_known_additive_operations_and_rejects_dynamic_sql(tmp_path: Path) -> None:
-    valid = tmp_path / "valid.py"
-    valid.write_text(
-        "from alembic import op\nimport sqlalchemy as sa\n"
-        "def upgrade():\n    op.add_column('items', sa.Column('label', sa.String(20), nullable=True))\n",
-        encoding="utf-8",
-    )
-    assert subprocess.run([sys.executable, MIGRATION_GATE, valid], capture_output=True).returncode == 0
-    invalid_sources = {
-        "module-dynamic": "DESTRUCTIVE_SQL='TRUNCATE items'\ndef upgrade():\n    op.execute(DESTRUCTIVE_SQL)\n",
-        "module-side-effect": "EVIL = run_sql()\ndef upgrade():\n    op.add_column('x', sa.Column('y', sa.String()))\n",
-        "delete": "def upgrade():\n    bind.execute('DELETE FROM items')\n",
-        "rename": "def upgrade():\n    op.rename_table('items', 'gone')\n",
-        "drop-index": "def upgrade():\n    op.drop_index('ix_items')\n",
-        "truncate": "def upgrade():\n    op.execute('TRUNCATE items')\n",
-        "monkeypatch-op": (
-            "from alembic import op\nimport sqlalchemy as sa\n"
-            "def destructive(*args):\n    op.execute('TRUNCATE app_releases')\n"
-            "op.add_column = destructive\n"
-            "def upgrade():\n    op.add_column('items', sa.Column('label', sa.String(20), nullable=True))\n"
-        ),
-        "upgrade-import-shadow": (
-            "from alembic import op\nimport sqlalchemy as sa\n"
-            "def upgrade():\n"
-            "    import api.destructive_migration as op\n"
-            "    op.add_column('items', sa.Column('label', sa.String(20), nullable=True))\n"
-        ),
-        "nested-helper": (
-            "from alembic import op\nimport sqlalchemy as sa\n"
-            "def upgrade():\n    def helper():\n        op.add_column('x', sa.Column('y', sa.String()))\n    helper()\n"
-        ),
-        "lambda-helper": (
-            "from alembic import op\nimport sqlalchemy as sa\n"
-            "def upgrade():\n    helper = lambda: op.add_column('x', sa.Column('y', sa.String()))\n    helper()\n"
-        ),
-        "comprehension-shadow": (
-            "from alembic import op\nimport sqlalchemy as sa\n"
-            "def upgrade():\n    [op.add_column('x', sa.Column('y', sa.String())) for op in [object()]]\n"
-        ),
-        "downgrade-return-annotation": (
-            "from alembic import op\nimport sqlalchemy as sa\n"
-            "def downgrade() -> op.execute('TRUNCATE app_releases'):\n    pass\n"
-            "def upgrade():\n    op.add_column('items', sa.Column('label', sa.String(20), nullable=True))\n"
-        ),
-        "future-annotation-call": (
-            "from __future__ import annotations\nfrom alembic import op\nimport sqlalchemy as sa\n"
-            "def downgrade() -> op.execute('TRUNCATE app_releases'):\n    pass\n"
-            "def upgrade():\n    op.add_column('items', sa.Column('label', sa.String(20), nullable=True))\n"
-        ),
-        "generator-upgrade": (
-            "from alembic import op\nimport sqlalchemy as sa\n"
-            "def upgrade():\n    yield op.add_column('items', sa.Column('label', sa.String(20)))\n"
-        ),
-        "nested-generator-argument": (
-            "from alembic import op\nimport sqlalchemy as sa\n"
-            "def upgrade():\n"
-            "    op.add_column('items', (yield sa.Column('label', sa.String(20))))\n"
-        ),
-        "nested-yield-from-argument": (
-            "from alembic import op\nimport sqlalchemy as sa\n"
-            "def upgrade():\n"
-            "    op.add_column('items', (yield from [sa.Column('label', sa.String(20))]))\n"
-        ),
-        "nested-await-argument": (
-            "from alembic import op\nimport sqlalchemy as sa\n"
-            "def upgrade():\n"
-            "    op.add_column('items', (await sa.Column('label', sa.String(20))))\n"
-        ),
-        "named-expression-argument": (
-            "from alembic import op\nimport sqlalchemy as sa\n"
-            "def upgrade():\n"
-            "    op.add_column('items', (column := sa.Column('label', sa.String(20))))\n"
-        ),
-        "create-index-postgresql-ops-injection": (
-            "from alembic import op\nimport sqlalchemy as sa\n"
-            "def upgrade():\n"
-            "    op.create_index('ix_items_x', 'items', ['x'], "
-            "postgresql_ops={'x': 'int4_ops); DROP TABLE app_releases; --'})\n"
-        ),
-        "nested-index-postgresql-ops-injection": (
-            "from alembic import op\nimport sqlalchemy as sa\n"
-            "def upgrade():\n"
-            "    op.create_table('items', sa.Column('x', sa.Integer()), "
-            "sa.Index('ix_items_x', 'x', "
-            "postgresql_ops={'x': 'int4_ops); DROP TABLE app_releases; --'}))\n"
-        ),
-        "nested-index-benign": (
-            "from alembic import op\nimport sqlalchemy as sa\n"
-            "def upgrade():\n"
-            "    op.create_table('items', sa.Column('x', sa.Integer()), "
-            "sa.Index('ix_items_x', 'x'))\n"
-        ),
-        "unreachable-upgrade": (
-            "from alembic import op\nimport sqlalchemy as sa\n"
-            "def upgrade():\n    return\n    op.add_column('items', sa.Column('label', sa.String(20)))\n"
-        ),
-        "side-effect-check-expression": (
-            "from alembic import op\nimport sqlalchemy as sa\n"
-            "def upgrade():\n"
-            "    op.create_check_constraint('ck_seq', 'items', sa.text(\"setval('critical_seq', 1, false) > 0\"))\n"
-        ),
-        "side-effect-table-check": (
-            "from alembic import op\nimport sqlalchemy as sa\n"
-            "def upgrade():\n"
-            "    op.create_table('items', sa.Column('id', sa.Integer()), sa.CheckConstraint(\"setval('critical_seq', 1, false) > 0\"))\n"
-        ),
-    }
-    for name, source in invalid_sources.items():
-        candidate = tmp_path / f"{name}.py"; candidate.write_text(source, encoding="utf-8")
-        assert subprocess.run([sys.executable, MIGRATION_GATE, candidate], capture_output=True).returncode != 0, name
+def test_migration_path_manifest_hashes_exact_path_file_bytes(tmp_path: Path) -> None:
+    versions = tmp_path / "versions"; versions.mkdir()
+    first = versions / "001_first.py"; second = versions / "002_second.py"
+    first.write_text("revision = '001'\ndown_revision = None\n", encoding="utf-8")
+    second.write_text("revision = '002'\ndown_revision = '001'\n", encoding="utf-8")
+    initial = subprocess.run([sys.executable, MIGRATION_MANIFEST, versions, "001"], capture_output=True, text=True)
+    assert initial.returncode == 0
+    assert "old_head=001\ntarget_head=002\nmigration_path=001->002\n" in initial.stdout
+    assert "migration_file=002:002_second.py:" in initial.stdout
+    second.write_text("revision = '002'\ndown_revision = '001'\n# reviewed byte change\n", encoding="utf-8")
+    changed = subprocess.run([sys.executable, MIGRATION_MANIFEST, versions, "001"], capture_output=True, text=True)
+    assert changed.returncode == 0
+    initial_hash = initial.stdout.split("migration_path_sha256=", 1)[1].splitlines()[0]
+    changed_hash = changed.stdout.split("migration_path_sha256=", 1)[1].splitlines()[0]
+    assert initial_hash != changed_hash
+    assert subprocess.run([sys.executable, MIGRATION_MANIFEST, versions, "missing"], capture_output=True).returncode != 0
 
 
-def test_migration_gate_accepts_reviewed_release_schema_fragments() -> None:
-    for name in ("20260902_01_app_releases.py", "20260906_01_eas_update_id.py"):
-        migration = ROOT / "migrations" / "versions" / name
-        assert subprocess.run([sys.executable, MIGRATION_GATE, migration], capture_output=True).returncode == 0, name
+def test_migration_approval_is_exact_root_owned_mode_0400_and_identity_bound(tmp_path: Path) -> None:
+    spec = importlib.util.spec_from_file_location("migration_approval", MIGRATION_APPROVAL)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    approval = tmp_path / "approval.env"
+    old_sha, target_sha, path_hash = "a" * 40, "b" * 40, "c" * 64
+    lines = [
+        f"old_backend_sha={old_sha}", f"target_backend_sha={target_sha}",
+        "old_alembic_head=001", "target_alembic_head=002",
+        f"migration_path_sha256={path_hash}", "rollback_compatible=true",
+        "approval_identity=release-reviewer@example.invalid",
+    ]
+    approval.write_bytes(("\n".join(lines) + "\n").encode("ascii"))
+    class Metadata:
+        st_mode = 0o100400
+        st_uid = 0
+        st_gid = 0
+    raw = approval.read_bytes()
+    assert module.validate_payload(Metadata(), raw, old_sha, target_sha, "001", "002", path_hash)[1] == "release-reviewer@example.invalid"
+    Metadata.st_mode = 0o100600
+    try:
+        module.validate_payload(Metadata(), raw, old_sha, target_sha, "001", "002", path_hash)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("mode 0600 must be rejected")
+    Metadata.st_mode = 0o120400
+    try:
+        module.validate_payload(Metadata(), raw, old_sha, target_sha, "001", "002", path_hash)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("symlink approval must be rejected")
+    Metadata.st_mode = 0o100400
+    approval.write_bytes(("\n".join(lines[:-1] + ["approval_identity=bad identity"]) + "\n").encode("ascii"))
+    try:
+        module.validate_payload(Metadata(), approval.read_bytes(), old_sha, target_sha, "001", "002", path_hash)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid approval identity must be rejected")
+    mismatch = ("\n".join(lines) + "\n").replace("target_alembic_head=002", "target_alembic_head=evil")
+    approval.write_bytes(mismatch.encode("ascii"))
+    try:
+        module.validate_payload(Metadata(), approval.read_bytes(), old_sha, target_sha, "001", "002", path_hash)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("approval mismatch must be rejected")
+
+
+def test_migration_rehearsal_is_mandatory_and_fail_closed_before_production_mutation() -> None:
+    script = _text(DEPLOY)
+    assert "migration-safety-gate.py" not in script
+    assert "migration_path_sha256" in script
+    assert "rollback_compatible=true" in _text(MIGRATION_APPROVAL)
+    assert "approval_identity" in script
+    assert 'CURRENT_STAGE=rehearse_migration_compatibility; rehearse_migration_compatibility' in script
+    assert '|| die target_migration_rehearsal_failed' in script
+    assert '|| die target_schema_rehearsal_failed' in script
+    assert '|| die old_backend_compatibility_rehearsal_failed' in script
+    assert script.index("CURRENT_STAGE=rehearse_migration_compatibility") < script.index("CURRENT_STAGE=apply_migration_once")
+    assert script.index("SCHEMA_ROLLBACK_COMPATIBLE=1") < script.index("CURRENT_STAGE=apply_migration_once")
+    probe = _text(REHEARSAL_PROBE)
+    for contract in ("health_check", "alembic_version", "Base.metadata.sorted_tables", "missing_table", "missing_column"):
+        assert contract in probe
 
 
 def test_rollback_restores_both_prior_caddy_topologies() -> None:
@@ -364,7 +335,7 @@ def test_dirty_checkout_stops_before_any_mutating_command(tmp_path: Path) -> Non
     bin_dir = tmp_path / "bin"; bin_dir.mkdir()
     calls = tmp_path / "calls.log"
     _wrapper(bin_dir, "git", 'printf "git %s\\n" "$*" >>"$FAKE_CALLS"; [[ "$1 $2" == "status --porcelain" ]] && printf " M dirty\\n"')
-    _wrapper(bin_dir, "stat", 'printf "640:0\\n"')
+    _wrapper(bin_dir, "stat", 'if [[ "$*" == *"restore-db"* ]]; then printf "600:0\\n"; else printf "640:0\\n"; fi')
     for command in ("docker", "curl", "sha256sum", "awk", "sed", "grep", "findmnt", "head"):
         _wrapper(bin_dir, command, f'printf "{command} %s\\n" "$*" >>"$FAKE_CALLS"; exit 99')
     _wrapper(bin_dir, "python3", f'exec "{_shell(Path(sys.executable))}" "$@"')
