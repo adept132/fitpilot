@@ -22,14 +22,15 @@ Never paste values into command arguments, logs, evidence, or Git. First create
 a clean detached worktree at the reviewed target SHA. `EURITH_DEPLOY_ASSET_ROOT`
 must name that exact worktree; an attached branch, dirty tree, different SHA,
 symlinked path, or overlay outside it is rejected. This lets first-use provisioning
-consume target Caddy assets and the target API build context while the production
-`SOURCE_DIR` remains on the old revision for backup and compatibility rehearsal:
+consume target Caddy assets and the target API build context while preserving the
+production `SOURCE_DIR` through backup, restore, and target rehearsal; the deployer
+later checks out the approved rollback candidate for its separate rehearsal:
 
 ```bash
 sudo CADDY_IMAGE_REF=caddy:2.11.4@sha256:<approved-digest> \
   /opt/eurith/deploy-run/<backend-full-sha>/deploy/provision-release-host.sh \
   --secret-source-dir /etc/eurith/release-secret-source \
-  --base-compose /opt/eurith/docker-compose.yml \
+  --base-compose /opt/eurith/compose.yaml \
   --release-overlay /opt/eurith/deploy-run/<backend-full-sha>/deploy/compose.release.yml \
   --deploy-asset-root /opt/eurith/deploy-run/<backend-full-sha> \
   --target-sha <backend-full-sha>
