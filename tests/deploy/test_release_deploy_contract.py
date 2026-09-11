@@ -259,6 +259,32 @@ def test_migration_gate_allows_only_known_additive_operations_and_rejects_dynami
             "from alembic import op\nimport sqlalchemy as sa\n"
             "def upgrade():\n    yield op.add_column('items', sa.Column('label', sa.String(20)))\n"
         ),
+        "nested-generator-argument": (
+            "from alembic import op\nimport sqlalchemy as sa\n"
+            "def upgrade():\n"
+            "    op.add_column('items', (yield sa.Column('label', sa.String(20))))\n"
+        ),
+        "nested-yield-from-argument": (
+            "from alembic import op\nimport sqlalchemy as sa\n"
+            "def upgrade():\n"
+            "    op.add_column('items', (yield from [sa.Column('label', sa.String(20))]))\n"
+        ),
+        "nested-await-argument": (
+            "from alembic import op\nimport sqlalchemy as sa\n"
+            "def upgrade():\n"
+            "    op.add_column('items', (await sa.Column('label', sa.String(20))))\n"
+        ),
+        "named-expression-argument": (
+            "from alembic import op\nimport sqlalchemy as sa\n"
+            "def upgrade():\n"
+            "    op.add_column('items', (column := sa.Column('label', sa.String(20))))\n"
+        ),
+        "create-index-postgresql-ops-injection": (
+            "from alembic import op\nimport sqlalchemy as sa\n"
+            "def upgrade():\n"
+            "    op.create_index('ix_items_x', 'items', ['x'], "
+            "postgresql_ops={'x': 'int4_ops); DROP TABLE app_releases; --'})\n"
+        ),
         "unreachable-upgrade": (
             "from alembic import op\nimport sqlalchemy as sa\n"
             "def upgrade():\n    return\n    op.add_column('items', sa.Column('label', sa.String(20)))\n"

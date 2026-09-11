@@ -73,6 +73,15 @@ SAFE_SQL_FRAGMENTS = {
     "status = 'published'",
     "delivery_method = 'eas_update' OR eas_update_id IS NULL",
 }
+OPERATION_KEYWORDS = {
+    "add_column": frozenset(),
+    "create_check_constraint": frozenset(),
+    "create_foreign_key": frozenset(),
+    "create_index": frozenset({"unique", "postgresql_where"}),
+    "create_primary_key": frozenset(),
+    "create_table": frozenset(),
+    "create_unique_constraint": frozenset(),
+}
 
 
 def _call_path(node: ast.expr) -> tuple[str, ...] | None:
@@ -99,6 +108,29 @@ def _validate_sql_fragment(node: ast.expr) -> None:
     value = node.value
     if not value.isascii() or len(value) > 4096 or value not in SAFE_SQL_FRAGMENTS:
         raise ValueError("raw_sql_not_reviewed")
+
+
+def _validate_operation_keywords(operation: str, call: ast.Call) -> None:
+    allowed = OPERATION_KEYWORDS[operation]
+    seen: set[str] = set()
+    for keyword in call.keywords:
+        name = keyword.arg
+        if name is None or name not in allowed or name in seen:
+            raise ValueError("operation_keyword_not_reviewed")
+        seen.add(name)
+        if name == "unique":
+            if not isinstance(keyword.value, ast.Constant) or not isinstance(keyword.value.value, bool):
+                raise ValueError("operation_keyword_invalid")
+        elif name == "postgresql_where":
+            value = keyword.value
+            if (
+                not isinstance(value, ast.Call)
+                or _call_path(value.func) not in {("sa", "text"), ("sqlalchemy", "text")}
+                or len(value.args) != 1
+                or value.keywords
+            ):
+                raise ValueError("operation_keyword_invalid")
+            _validate_sql_fragment(value.args[0])
 
 
 def validate(path: Path) -> None:
@@ -161,6 +193,7 @@ def validate(path: Path) -> None:
         operation = _call_path(statement.value.func)
         if operation is None or len(operation) != 2 or operation[0] != "op" or operation[1] not in ALLOWED_OP_CALLS:
             raise ValueError("upgrade_operation_rejected")
+        _validate_operation_keywords(operation[1], statement.value)
     parents = {child: parent for parent in ast.walk(upgrade) for child in ast.iter_child_nodes(parent)}
     for node in ast.walk(upgrade):
         if node is not upgrade and isinstance(
@@ -174,6 +207,10 @@ def validate(path: Path) -> None:
                 ast.ImportFrom,
                 ast.Lambda,
                 ast.Nonlocal,
+                ast.Yield,
+                ast.YieldFrom,
+                ast.Await,
+                ast.NamedExpr,
             ),
         ):
             raise ValueError("nested_scope_or_import_rejected")
