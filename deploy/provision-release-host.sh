@@ -61,6 +61,7 @@ export EURITH_RUNTIME_SOURCE_ROOT="$DEPLOY_ASSET_ROOT"
 export EURITH_RUNTIME_ASSET_ROOT="$DEPLOY_ASSET_ROOT"
 [[ -f "$BASE_COMPOSE" && ! -L "$BASE_COMPOSE" ]] || die base_compose_invalid
 [[ -f "$RELEASE_OVERLAY" && ! -L "$RELEASE_OVERLAY" ]] || die release_overlay_invalid
+[[ -f "$DEPLOY_ASSET_ROOT/Dockerfile" && ! -L "$DEPLOY_ASSET_ROOT/Dockerfile" ]] || die target_dockerfile_invalid
 _reject_newline "$SITE_ADDRESS"
 [[ "$SITE_ADDRESS" =~ ^https://([A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?)(:[0-9]{1,5})?$ ]] || die site_address_invalid
 if [[ "$ROOT_PREFIX" == / ]]; then require_root; elif [[ "${EURITH_FAKE_SYMLINKS:-}" != 1 ]]; then die alternate_root_requires_test_harness; fi
@@ -148,30 +149,23 @@ atomic_install_text() {
 atomic_install_text "$DEPLOY_ENV" 0640 0 "$GROUP_GID" "RELEASE_SHARED_GID=${GROUP_GID}"$'\n'"EURITH_SITE_ADDRESS=${SITE_ADDRESS}"$'\n' 1
 assert_mode_owner_group "$DEPLOY_ENV" 640 0 "$GROUP_GID"
 
-base_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$BASE_COMPOSE")
-BASE_API_UID="$("${base_compose[@]}" run --rm --no-deps --entrypoint id api -u 2>/dev/null)" || die base_api_uid_resolution_failed
-[[ "$BASE_API_UID" =~ ^[1-9][0-9]*$ ]] || die base_api_uid_invalid
+TARGET_API_IMAGE="$(docker build --quiet --file "$DEPLOY_ASSET_ROOT/Dockerfile" "$DEPLOY_ASSET_ROOT" 2>/dev/null)" || die target_api_image_build_failed
+[[ "$TARGET_API_IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]] || die target_api_image_id_invalid
+API_UID="$(docker run --rm --entrypoint id "$TARGET_API_IMAGE" -u 2>/dev/null)" || die api_uid_resolution_failed
+[[ "$API_UID" =~ ^[1-9][0-9]*$ ]] || die api_uid_invalid
 
 storage_state=verified
 if [[ ! -e "$STORAGE_ROOT" ]]; then
-  install -d -m 2770 -o "$BASE_API_UID" -g "$GROUP_GID" -- "$STORAGE_ROOT" "$STAGING_DIR" "$(dirname -- "$FINAL_DIR")" "$FINAL_DIR" || die storage_create_failed
+  install -d -m 2770 -o "$API_UID" -g "$GROUP_GID" -- "$STORAGE_ROOT" "$STAGING_DIR" "$(dirname -- "$FINAL_DIR")" "$FINAL_DIR" || die storage_create_failed
   storage_state=created
 fi
 
 for directory in "$STORAGE_ROOT" "$STAGING_DIR" "$(dirname -- "$FINAL_DIR")" "$FINAL_DIR"; do
   [[ -d "$directory" && ! -L "$directory" ]] || die storage_tree_invalid
-  assert_mode_owner_group "$directory" 2770 "$BASE_API_UID" "$GROUP_GID"
+  assert_mode_owner_group "$directory" 2770 "$API_UID" "$GROUP_GID"
 done
 
 compose=(docker compose --env-file "$DEPLOY_ENV" -f "$BASE_COMPOSE" -f "$RELEASE_OVERLAY")
-API_UID="$("${compose[@]}" run --build --rm --no-deps --entrypoint id api -u 2>/dev/null)" || die api_uid_resolution_failed
-[[ "$API_UID" =~ ^[1-9][0-9]*$ ]] || die api_uid_invalid
-[[ "$API_UID" == "$BASE_API_UID" ]] || die api_uid_changed_across_overlay
-
-for directory in "$STORAGE_ROOT" "$STAGING_DIR" "$(dirname -- "$FINAL_DIR")" "$FINAL_DIR"; do
-  [[ -d "$directory" && ! -L "$directory" ]] || die storage_tree_invalid
-  assert_mode_owner_group "$directory" 2770 "$API_UID" "$GROUP_GID"
-done
 
 read_protected_line() {
   local file="$1" value
@@ -293,6 +287,7 @@ external_metadata="$(stat -c '%a:%u:%g' -- "$PROBE_EXTERNAL" 2>/dev/null)" || di
 [[ "$external_metadata" == "777:0:${GROUP_GID}" ]] || die external_probe_metadata_mismatch
 assert_regular_read_and_external_symlink_denied "$PROBE_REGULAR" "$PROBE_EXTERNAL"
 
+"${compose[@]}" build api >/dev/null 2>&1 || die target_api_compose_build_failed
 compose_run() { "${compose[@]}" run --rm --no-deps "$@"; }
 if [[ "$ROOT_PREFIX" != / && -n "${EURITH_TEST_PROBE_TOKEN:-}" ]]; then
   PROBE_TOKEN="$EURITH_TEST_PROBE_TOKEN"

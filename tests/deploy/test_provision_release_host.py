@@ -182,12 +182,21 @@ elif command == "find":
         print(f"{child.name}|{kind}")
 elif command == "docker":
     joined = " ".join(args)
+    if args[:2] == ["build", "--quiet"]:
+        if os.environ.get("FAKE_DOCKER_BUILD_FAIL") == "1": sys.exit(13)
+        print(os.environ.get("FAKE_TARGET_IMAGE_ID", "sha256:" + "a" * 64)); sys.exit(0)
+    if "--entrypoint id" in joined and joined.endswith(" -u") and " compose " not in (" " + joined + " "):
+        print(os.environ.get("FAKE_TARGET_API_UID", "1234")); sys.exit(0)
+    is_overlay = args[:1] == ["compose"] and joined.count(" -f ") > 1
+    if is_overlay and os.environ.get("FAKE_FAIL_OVERLAY_WITHOUT_API_ENV") == "1" and not pathlib.Path(os.environ["FAKE_API_ENV"]).exists():
+        sys.exit(14)
+    if is_overlay and os.environ.get("FAKE_DOCKER_AUTOCREATE_STORAGE") == "1":
+        storage = pathlib.Path(os.environ["FAKE_STORAGE_ROOT"])
+        if not storage.exists():
+            storage.mkdir(parents=True); metadata_set(storage, "755", "0", "0")
+    if is_overlay and joined.endswith(" build api"):
+        sys.exit(0)
     if "--entrypoint id api -u" in joined:
-        is_overlay = joined.count(" -f ") > 1
-        if os.environ.get("FAKE_DOCKER_AUTOCREATE_STORAGE") == "1" and is_overlay:
-            storage = pathlib.Path(os.environ["FAKE_STORAGE_ROOT"])
-            if not storage.exists():
-                storage.mkdir(parents=True); metadata_set(storage, "755", "0", "0")
         print(os.environ.get("FAKE_TARGET_API_UID", "1234") if is_overlay else "1234"); sys.exit(0)
     passed_env = {args[i + 1].split("=", 1)[0]: args[i + 1].split("=", 1)[1] for i, value in enumerate(args[:-1]) if value == "-e" and "=" in args[i + 1]}
     action = passed_env.get("EURITH_PROBE_ACTION", "")
@@ -278,6 +287,7 @@ class Host:
             "FAKE_FINAL_DIR": str(self.storage / "android" / "sha256"),
             "FAKE_STAGING_DIR": str(self.storage / ".staging"),
             "FAKE_STORAGE_ROOT": str(self.storage),
+            "FAKE_API_ENV": str(self.api_env),
             "FAKE_FINAL_VIEW": str(self.final_view),
             "FAKE_PROBE_VIEW": str(self.probe_view),
             "EURITH_FAKE_SYMLINKS": "1",
@@ -315,16 +325,15 @@ def test_scripts_exist() -> None:
     assert SCRIPT.is_file()
 
 
-def test_storage_exists_before_any_release_overlay_compose_probe() -> None:
+def test_target_uid_is_resolved_before_storage_and_any_release_overlay() -> None:
     script = SCRIPT.read_text(encoding="utf-8")
-    base_probe = script.index("BASE_API_UID=")
-    storage_create = script.index('install -d -m 2770 -o "$BASE_API_UID"')
+    target_build = script.index('TARGET_API_IMAGE="$(docker build --quiet --file ')
+    target_probe = script.index('API_UID="$(docker run --rm --entrypoint id ')
+    storage_create = script.index('install -d -m 2770 -o "$API_UID"')
     storage_verify = script.index('for directory in "$STORAGE_ROOT"')
     overlay_compose = script.index('compose=(docker compose --env-file "$DEPLOY_ENV" -f "$BASE_COMPOSE" -f "$RELEASE_OVERLAY")')
-    target_probe = script.index("\nAPI_UID=", base_probe + 1)
-    assert base_probe < storage_create < storage_verify < overlay_compose < target_probe
-    assert '"${compose[@]}" run --build --rm --no-deps --entrypoint id api -u' in script
-    assert "api_uid_changed_across_overlay" in script
+    assert target_build < target_probe < storage_create < storage_verify < overlay_compose
+    assert '[[ "$TARGET_API_IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]]' in script
 
 
 def test_first_use_and_repeat_are_idempotent_and_redacted(host: Host) -> None:
@@ -358,11 +367,51 @@ def test_first_use_survives_real_compose_short_bind_autocreate_side_effect(host:
     }
 
 
-def test_target_image_uid_change_fails_before_permission_probes(host: Host) -> None:
-    result = host.run(FAKE_TARGET_API_UID="2345")
+def test_first_use_builds_target_and_resolves_uid_without_release_env_or_overlay(host: Host) -> None:
+    result = host.run(
+        FAKE_FAIL_OVERLAY_WITHOUT_API_ENV="1",
+        FAKE_TARGET_API_UID="2345",
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (host.state / "calls.log").read_text().splitlines()
+    docker_calls = [line for line in calls if line.startswith("docker ")]
+    assert docker_calls[0].startswith("docker build --quiet --file ")
+    assert ROOT.resolve().as_posix() in docker_calls[0]
+    assert "docker run --rm --entrypoint id sha256:" in docker_calls[1]
+    first_overlay = next(index for index, line in enumerate(docker_calls) if line.count(" -f ") > 1)
+    assert first_overlay > 1
+    metadata = json.loads((host.state / "metadata.json").read_text())
+    assert metadata[str(host.storage.resolve())] == {
+        "mode": "2770", "owner": "2345", "group": "4321"
+    }
+
+
+@pytest.mark.parametrize(
+    ("extra_env", "expected_error"),
+    [
+        ({"FAKE_DOCKER_BUILD_FAIL": "1"}, "target_api_image_build_failed"),
+        ({"FAKE_TARGET_IMAGE_ID": "not-an-image-id"}, "target_api_image_id_invalid"),
+    ],
+)
+def test_target_image_resolution_fails_closed_before_storage_or_env(
+    host: Host, extra_env: dict[str, str], expected_error: str
+) -> None:
+    result = host.run(**extra_env)
+
     assert result.returncode != 0
-    assert "error=api_uid_changed_across_overlay" in result.stderr
-    assert "permissions=verified" not in result.stdout
+    assert f"error={expected_error}" in result.stderr
+    assert not host.storage.exists()
+    assert not host.api_env.exists()
+    assert not host.cleanup_env.exists()
+
+
+def test_target_image_uid_is_authoritative_for_new_storage(host: Host) -> None:
+    result = host.run(FAKE_TARGET_API_UID="2345")
+    assert result.returncode == 0, result.stderr
+    metadata = json.loads((host.state / "metadata.json").read_text())
+    assert metadata[str(host.storage.resolve())]["owner"] == "2345"
+    assert "permissions=verified" in result.stdout
 
 
 def test_preexisting_unsafe_storage_fails_before_overlay_compose(host: Host) -> None:
@@ -380,8 +429,9 @@ def test_preexisting_unsafe_storage_fails_before_overlay_compose(host: Host) -> 
         line for line in (host.state / "calls.log").read_text().splitlines()
         if line.startswith("docker ")
     ]
-    assert len(docker_calls) == 1
-    assert docker_calls[0].count(" -f ") == 1
+    assert len(docker_calls) == 2
+    assert docker_calls[0].startswith("docker build --quiet --file ")
+    assert docker_calls[1].startswith("docker run --rm --entrypoint id sha256:")
 
 
 def test_env_files_have_exact_keys_and_storage_roots(host: Host) -> None:
@@ -599,7 +649,9 @@ def test_runtime_commands_use_resolved_uid_gid_and_cleanup_through_api(host: Hos
     result = host.run()
     assert result.returncode == 0, result.stderr
     calls = (host.state / "calls.log").read_text()
-    assert "--entrypoint id api -u" in calls
+    assert "docker build --quiet --file " in calls
+    assert "docker run --rm --entrypoint id sha256:" in calls
+    assert " build api" in calls
     assert "eurith-provision" in calls
     assert ".apk" not in "\n".join(line for line in calls.splitlines() if "EURITH_PROBE_ACTION=" in line)
     for action in ("api-stage", "container-gate", "caddy-read", "caddy-create", "caddy-replace", "caddy-chmod", "caddy-delete", "api-remove"):
