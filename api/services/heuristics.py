@@ -21,12 +21,21 @@ class HeuristicsEngine:
         if re.search(r'прогулк|переноск|carry', name_lower):
             action = ExerciseAction.carry
 
-        # 2. Plantarflexion (Икры)
-        elif re.search(r'на носки|голен|calf|calves', name_lower):
+        # 2. Elevation (Шраги)
+        # ВЫШЕ икроножного правила намеренно: "Шраги в тренажере для голени" —
+        # это шраги в станке для голени, а не подъём на носки. Обратный порядок
+        # ловил такое имя на "голен" и метил его plantarflexion.
+        elif re.search(r'шраг|shrug', name_lower):
+            action = ExerciseAction.elevation
+            vector = ExerciseVector.vertical
+
+        # 3. Plantarflexion (Икры). Второй вариант — единственное число
+        # ("Подъем на носок с гантелью"): основа "носк" его не покрывает.
+        elif re.search(r'на носк|на носок|голен|calf|calves', name_lower):
             action = ExerciseAction.plantarflexion
             vector = ExerciseVector.vertical
 
-        # 3. Shoulder Extension (Пуловеры и прямые руки)
+        # 4. Shoulder Extension (Пуловеры и прямые руки)
         elif re.search(r'пуловер|pullover|прямых рук|прямыми рук', name_lower):
             action = ExerciseAction.shoulder_extension
             if re.search(r'леж|скамь', name_lower):
@@ -34,25 +43,38 @@ class HeuristicsEngine:
             else:
                 vector = ExerciseVector.vertical
 
-        # 4. Elevation (Шраги)
-        elif re.search(r'шраг|shrug', name_lower):
-            action = ExerciseAction.elevation
-            vector = ExerciseVector.vertical
-
         # 5. Rotation & Lateral Flexion (Вращения, косые скручивания, боковые наклоны)
-        elif re.search(r'вращен|ротац|woodchopper|face pull|кубинск', name_lower):
+        elif re.search(r'вращен|ротац|woodchopper|дровосек|face pull|тяга к лицу|кубинск', name_lower):
             action = ExerciseAction.rotation
         elif re.search(r'косы[ех]|наклоны в сторон|боков.*экстенз|боков.*скручив', name_lower):
             action = ExerciseAction.lateral_flexion
 
         # 5.5. Core (Защита пресса от попадания в flexion конечностей)
-        elif re.search(r'туловищ|подъем ног|скручиван|планка|пресс|crunch|roll|книжка', name_lower):
+        # "туловищ" сужено до "подъем туловища": одинокая основа ловила ещё и
+        # "Сгибания рук со штангой вдоль туловища" (упражнение на бицепс).
+        elif re.search(r'подъем туловищ|подъем ног|скручиван|планка|пресс|crunch|roll|книжка',
+                       name_lower):
             action = ExerciseAction.core
 
         # 6. Hip Hinge (Становые, Гудморнинг, Ягодичные мосты)
-        elif re.search(r'станов|румынск|мертв|гудморнинг|ягодичн.*мост|hip thrust|подъем таза|подъем ягодиц',
-                       name_lower):
+        # Тег важен не только для статистики: hinge запрещён при прехаб-флаге
+        # lower_back и считается осевой нагрузкой (см. INJURY_FORBID/is_axial),
+        # поэтому кириллические написания перечислены явно — "Доброе утро",
+        # "хип-траст" и "гиперэкстензия" раньше сюда не попадали и уходили
+        # пользователю с больной поясницей.
+        elif re.search(
+                r'станов|румынск|мертв|гудморнинг|good morning|доброе утро|'
+                r'ягодичн.*мост|hip thrust|хип.?траст|гиперэкстенз|hyperextension|'
+                r'подъем ягодиц',
+                name_lower):
             action = ExerciseAction.hinge
+
+        # "Подъем таза" — это и ягодичный мостик (hinge), и обратное скручивание
+        # на пресс ("Подъем таза из положения лежа"). Разводим по целевой мышце:
+        # для пресса это core, иначе — тазовое разгибание.
+        elif re.search(r'подъем таза', name_lower):
+            action = (ExerciseAction.core if 'пресс' in muscle_lower
+                      else ExerciseAction.hinge)
 
         # 7. Knee-Dominant (Приседы, Жимы ногами - изоляция от слова "жим")
         elif re.search(r'жим ногами|leg press|присед|выпад|squat|lunge|зашагиван', name_lower):
@@ -95,8 +117,14 @@ class HeuristicsEngine:
                 action = ExerciseAction.pull
             elif re.search(r'отведен|мах|abduction|разведен', name_lower):
                 action = ExerciseAction.abduction
-            elif re.search(r'сведен|adduction|бабочка|пек-дек', name_lower):
+            elif re.search(r'сведен|adduction|приведени|бабочка|пек-дек', name_lower):
                 action = ExerciseAction.adduction
+            # Подъёмы прямых рук (фронтальные и в плоскости лопатки) — тот же
+            # класс движения, что и махи в стороны: работа в плечевом суставе
+            # прямой рукой. Отдельного тега под них в таксономии нет.
+            elif re.search(r'подъем.*перед собой|фронтальн.*подъем|scaption|скапшен',
+                           name_lower):
+                action = ExerciseAction.abduction
 
         # ФОЛЛБЭК ДЛЯ ACTION
         if action == ExerciseAction.unknown:
@@ -106,7 +134,12 @@ class HeuristicsEngine:
                 action = ExerciseAction.pull
             elif 'пресс' in muscle_lower:
                 action = ExerciseAction.core
-            elif 'бицепс' in muscle_lower and 'бедра' not in muscle_lower:
+            # "Бицепсы ног"/"бицепс бедра" — это НЕ бицепс руки: без второй
+            # проверки любое неопознанное упражнение на заднюю поверхность бедра
+            # уезжало в flexion (сгибание локтя).
+            elif ('бицепс' in muscle_lower
+                  and 'бедра' not in muscle_lower
+                  and 'ног' not in muscle_lower):
                 action = ExerciseAction.flexion
             elif 'трицепс' in muscle_lower:
                 action = ExerciseAction.extension
@@ -144,7 +177,7 @@ class HeuristicsEngine:
         # ==========================================
         # Добавлены маркеры косых и боковых движений
         if re.search(
-                r'одной|поочередн|унилат|single|одноруч|одноног|пистолетик|выпад|lunge|концентрирован|косы[ех]|боков',
+                r'одной|поочередн|попеременн|унилат|single|одноруч|одноног|пистолетик|выпад|lunge|концентрирован|косы[ех]|боков',
                 name_lower):
             laterality = ExerciseLaterality.unilateral
         elif re.search(r'(отведени[ея]|сгибани[ея]|разгибани[ея]|тяга)\s+(руки|ноги)\b', name_lower):

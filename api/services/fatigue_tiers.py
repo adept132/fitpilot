@@ -16,12 +16,17 @@ EQUIPMENT_SCORES = {
     # Независимые свободные веса (Высокий стресс, но вес обычно меньше штанги)
     equip.DUMBBELL: 2,
     equip.KETTLEBELL: 2,
+    equip.PLATE: 2,
 
     # Работа со своим весом / Частичная опора (Средний стресс)
     equip.BODYWEIGHT: 1,
     equip.PULLUP_BAR: 1,
     equip.DIP_BARS: 1,
     equip.BENCH: 1,
+    # Опора/снаряд без собственного отягощения — стресс как у своего веса.
+    equip.BOX: 1,
+    equip.EXERCISE_BALL: 1,
+    equip.AB_ROLLER: 1,
 
     # Изолированные, блочные и стабилизированные (Низкий системный стресс)
     equip.BLOCK_MACHINE: 0,
