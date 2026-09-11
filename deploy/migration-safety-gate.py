@@ -92,9 +92,22 @@ def validate(path: Path) -> None:
         elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if not isinstance(statement, ast.FunctionDef) or statement.name not in {"upgrade", "downgrade"}:
                 raise ValueError("helper_function_rejected")
-            exposed = [*statement.decorator_list, *statement.args.defaults, *statement.args.kw_defaults]
-            if any(isinstance(node, ast.Call) for value in exposed if value is not None for node in ast.walk(value)):
-                raise ValueError("module_scope_call_rejected")
+            arguments = statement.args
+            if (
+                statement.decorator_list
+                or arguments.posonlyargs
+                or arguments.args
+                or arguments.vararg is not None
+                or arguments.kwonlyargs
+                or arguments.kwarg is not None
+                or arguments.defaults
+                or any(value is not None for value in arguments.kw_defaults)
+            ):
+                raise ValueError("migration_function_signature_rejected")
+            if statement.returns is not None and not (
+                isinstance(statement.returns, ast.Constant) and statement.returns.value is None
+            ):
+                raise ValueError("migration_function_annotation_rejected")
         elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
             if any(isinstance(node, ast.Call) for node in ast.walk(statement)):
                 raise ValueError("module_scope_call_rejected")

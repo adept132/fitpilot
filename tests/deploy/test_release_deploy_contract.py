@@ -245,6 +245,16 @@ def test_migration_gate_allows_only_known_additive_operations_and_rejects_dynami
             "from alembic import op\nimport sqlalchemy as sa\n"
             "def upgrade():\n    [op.add_column('x', sa.Column('y', sa.String())) for op in [object()]]\n"
         ),
+        "downgrade-return-annotation": (
+            "from alembic import op\nimport sqlalchemy as sa\n"
+            "def downgrade() -> op.execute('TRUNCATE app_releases'):\n    pass\n"
+            "def upgrade():\n    op.add_column('items', sa.Column('label', sa.String(20), nullable=True))\n"
+        ),
+        "future-annotation-call": (
+            "from __future__ import annotations\nfrom alembic import op\nimport sqlalchemy as sa\n"
+            "def downgrade() -> op.execute('TRUNCATE app_releases'):\n    pass\n"
+            "def upgrade():\n    op.add_column('items', sa.Column('label', sa.String(20), nullable=True))\n"
+        ),
     }
     for name, source in invalid_sources.items():
         candidate = tmp_path / f"{name}.py"; candidate.write_text(source, encoding="utf-8")
