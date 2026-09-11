@@ -154,6 +154,8 @@ def test_header_gate_rejects_duplicate_folded_malformed_and_injected_headers(tmp
         "folded": b"HTTP/2 200\r\nCache-Control: no-store\r\n injected\r\n\r\n",
         "malformed": b"HTTP/2 200\r\nCache-Control no-store\r\n\r\n",
         "nul": b"HTTP/2 200\r\nCache-Control: no-store\x00public\r\n\r\n",
+        "status-control": b"HTTP/2 200 ok\x01\r\nCache-Control: no-store\r\n\r\n",
+        "oversized": b"HTTP/2 200\r\nX-Fill: " + b"a" * 70_000 + b"\r\n\r\n",
     }
     for name, payload in adversarial.items():
         candidate = tmp_path / f"{name}.headers"; candidate.write_bytes(payload)

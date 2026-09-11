@@ -20,7 +20,13 @@ def fail() -> NoReturn:
 
 
 def parse(path: Path) -> list[dict[str, list[str]]]:
-    raw = path.read_bytes()
+    try:
+        if path.stat().st_size > MAX_HEADER_BYTES:
+            fail()
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_HEADER_BYTES + 1)
+    except OSError:
+        fail()
     if not raw or len(raw) > MAX_HEADER_BYTES or b"\x00" in raw:
         fail()
     raw = raw.replace(b"\r\n", b"\n")
@@ -33,7 +39,7 @@ def parse(path: Path) -> list[dict[str, list[str]]]:
         lines = raw_block.split(b"\n")
         if any(not line or len(line) > MAX_LINE_BYTES for line in lines):
             fail()
-        if STATUS.fullmatch(lines[0]) is None:
+        if STATUS.fullmatch(lines[0]) is None or any(byte < 32 or byte > 126 for byte in lines[0]):
             fail()
         headers: dict[str, list[str]] = {}
         for line in lines[1:]:
