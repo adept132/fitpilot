@@ -1,7 +1,12 @@
 import importlib
+import os
+import uuid
+from urllib.parse import urlsplit
 
 import pytest
 import sqlalchemy as sa
+from alembic.operations import Operations
+from alembic.runtime.migration import MigrationContext
 from sqlalchemy.dialects import postgresql
 
 
@@ -209,6 +214,30 @@ def test_history_where_old_migrations_ran_is_an_idempotent_noop():
     assert actions == ()
 
 
+def test_real_postgresql_reflection_shape_is_an_idempotent_noop():
+    migration = importlib.import_module(MIGRATION_MODULE)
+    schema = _release_schema()
+    platform = next(
+        item for item in schema["checks"]["app_releases"]
+        if item["name"] == "ck_app_releases_platform"
+    )
+    platform["sqltext"] = "platform::text = 'android'::text"
+    for item in schema["indexes"]["app_releases"]:
+        item.setdefault("include_columns", [])
+        item.setdefault("dialect_options", {})["postgresql_include"] = []
+    schema["indexes"]["exercises"][0].update(
+        include_columns=[], dialect_options={"postgresql_include": []}
+    )
+    schema["pks"]["app_releases"]["dialect_options"] = {"postgresql_include": []}
+    for item in schema["uniques"]["app_releases"]:
+        item["dialect_options"] = {
+            "postgresql_include": [],
+            "postgresql_nulls_not_distinct": False,
+        }
+
+    assert migration.plan_reconciliation(FakeInspector(**schema)) == ()
+
+
 def test_reconciliation_executes_the_original_additive_migrations_in_order():
     migration = importlib.import_module(MIGRATION_MODULE)
     called = []
@@ -272,6 +301,22 @@ def test_existing_localization_index_with_wrong_uniqueness_fails_closed():
     migration = importlib.import_module(MIGRATION_MODULE)
     schema = _release_schema()
     schema["indexes"]["exercises"][0]["unique"] = True
+
+    with pytest.raises(migration.SchemaReconciliationError):
+        migration.plan_reconciliation(FakeInspector(**schema))
+
+
+@pytest.mark.parametrize("mutation", ["predicate", "sort", "include"])
+def test_existing_localization_index_with_extra_semantics_fails_closed(mutation):
+    migration = importlib.import_module(MIGRATION_MODULE)
+    schema = _release_schema()
+    index = schema["indexes"]["exercises"][0]
+    if mutation == "predicate":
+        index["dialect_options"] = {"postgresql_where": "false"}
+    elif mutation == "sort":
+        index["column_sorting"] = {"name_en": ("desc",)}
+    else:
+        index["dialect_options"] = {"postgresql_include": ["description_en"]}
 
     with pytest.raises(migration.SchemaReconciliationError):
         migration.plan_reconciliation(FakeInspector(**schema))
@@ -348,6 +393,12 @@ def test_wrong_or_extra_release_check_aborts_before_apply(monkeypatch, kind):
     applied = []
     monkeypatch.setattr(migration.sa, "inspect", lambda _bind: FakeInspector(**schema))
     monkeypatch.setattr(migration.op, "get_bind", lambda: object())
+    monkeypatch.setattr(migration, "_require_exercise_index_catalog", lambda _bind: None)
+    monkeypatch.setattr(
+        migration,
+        "_require_postgresql_catalog_contract",
+        lambda _bind, *, include_eas: None,
+    )
     monkeypatch.setattr(migration, "apply_reconciliation", lambda actions: applied.extend(actions))
 
     with pytest.raises(migration.SchemaReconciliationError):
@@ -401,9 +452,126 @@ def test_unexpected_release_registry_objects_fail_closed(kind):
         migration.plan_reconciliation(FakeInspector(**schema))
 
 
+@pytest.mark.parametrize("kind", ["check_option", "pk_option", "unique_option"])
+def test_release_constraint_options_fail_closed(kind):
+    migration = importlib.import_module(MIGRATION_MODULE)
+    schema = _release_schema()
+    if kind == "check_option":
+        schema["checks"]["app_releases"][0]["dialect_options"] = {
+            "postgresql_not_valid": True
+        }
+    elif kind == "pk_option":
+        schema["pks"]["app_releases"]["dialect_options"] = {
+            "postgresql_include": ["platform"]
+        }
+    else:
+        schema["uniques"]["app_releases"][0]["dialect_options"] = {
+            "postgresql_include": ["platform"],
+            "postgresql_nulls_not_distinct": False,
+        }
+
+    with pytest.raises(migration.SchemaReconciliationError):
+        migration.plan_reconciliation(FakeInspector(**schema))
+
+
 def test_reconciliation_is_forward_only_after_security_cleanup_head():
     migration = importlib.import_module(MIGRATION_MODULE)
 
     assert migration.revision == "20260910_01"
     assert migration.down_revision == "20260909_02"
     assert migration.downgrade() is None
+
+
+def test_real_postgresql_dual_history_and_catalog_fail_closed():
+    if os.environ.get("RUN_REAL_RECONCILIATION") != "1":
+        pytest.skip("set RUN_REAL_RECONCILIATION=1 for the disposable PostgreSQL proof")
+    raw_url = os.environ.get("TEST_DATABASE_URL", "").strip().replace(
+        "postgresql+asyncpg://", "postgresql://", 1
+    )
+    parsed = urlsplit(raw_url)
+    if (
+        parsed.scheme != "postgresql"
+        or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        pytest.fail("TEST_DATABASE_URL must be a plain local PostgreSQL URL")
+    base_url = sa.engine.make_url(raw_url)
+    admin = sa.create_engine(base_url.set(database="postgres"), isolation_level="AUTOCOMMIT")
+    names = [f"eurith_reconcile_{kind}_{uuid.uuid4().hex[:12]}" for kind in ("prod", "full")]
+    modules = (
+        "migrations.versions.20260830_01_notification_message_keys",
+        "migrations.versions.20260830_02_exercise_localizations",
+        "migrations.versions.20260902_01_app_releases",
+        "migrations.versions.20260906_01_eas_update_id",
+    )
+
+    def migrate(connection, module_names):
+        with Operations.context(MigrationContext.configure(connection)):
+            for module_name in module_names:
+                importlib.import_module(module_name).upgrade()
+
+    try:
+        with admin.connect() as connection:
+            for name in names:
+                connection.exec_driver_sql(f'CREATE DATABASE "{name}"')
+        for position, name in enumerate(names):
+            engine = sa.create_engine(base_url.set(database=name))
+            with engine.begin() as connection:
+                connection.exec_driver_sql("CREATE TABLE app_notifications (id bigint PRIMARY KEY)")
+                connection.exec_driver_sql("CREATE TABLE exercises (id bigint PRIMARY KEY)")
+                if position:
+                    migrate(connection, modules)
+                migrate(connection, (MIGRATION_MODULE,))
+                migrate(connection, (MIGRATION_MODULE,))
+                assert connection.exec_driver_sql(
+                    "SELECT to_regclass('app_releases') IS NOT NULL"
+                ).scalar_one()
+                if position:
+                    connection.exec_driver_sql(
+                        "ALTER TABLE app_releases DROP CONSTRAINT uq_app_releases_idempotency_key"
+                    )
+                    connection.exec_driver_sql(
+                        "ALTER TABLE app_releases ADD CONSTRAINT uq_app_releases_idempotency_key "
+                        "UNIQUE (idempotency_key) DEFERRABLE INITIALLY DEFERRED"
+                    )
+                    with pytest.raises(
+                        importlib.import_module(MIGRATION_MODULE).SchemaReconciliationError
+                    ):
+                        migrate(connection, (MIGRATION_MODULE,))
+                    connection.exec_driver_sql(
+                        "ALTER TABLE app_releases DROP CONSTRAINT uq_app_releases_idempotency_key"
+                    )
+                    connection.exec_driver_sql(
+                        "ALTER TABLE app_releases ADD CONSTRAINT uq_app_releases_idempotency_key "
+                        "UNIQUE (idempotency_key)"
+                    )
+                    connection.exec_driver_sql("DROP INDEX ix_exercises_name_en")
+                    connection.exec_driver_sql(
+                        "CREATE INDEX ix_exercises_name_en ON exercises (name_en DESC) WHERE false"
+                    )
+                    with pytest.raises(
+                        importlib.import_module(MIGRATION_MODULE).SchemaReconciliationError
+                    ):
+                        migrate(connection, (MIGRATION_MODULE,))
+                    connection.exec_driver_sql("DROP INDEX ix_exercises_name_en")
+                    connection.exec_driver_sql(
+                        "CREATE INDEX ix_exercises_name_en ON exercises (name_en)"
+                    )
+                    connection.exec_driver_sql(
+                        "ALTER TABLE app_releases DROP CONSTRAINT ck_app_releases_platform"
+                    )
+                    connection.exec_driver_sql(
+                        "ALTER TABLE app_releases ADD CONSTRAINT ck_app_releases_platform "
+                        "CHECK (false) NOT VALID"
+                    )
+                    with pytest.raises(
+                        importlib.import_module(MIGRATION_MODULE).SchemaReconciliationError
+                    ):
+                        migrate(connection, (MIGRATION_MODULE,))
+            engine.dispose()
+    finally:
+        with admin.connect() as connection:
+            for name in names:
+                connection.exec_driver_sql(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+        admin.dispose()

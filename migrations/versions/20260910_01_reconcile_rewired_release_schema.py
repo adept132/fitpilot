@@ -101,6 +101,57 @@ _RELEASE_BASE_CHECKS = {
     "ck_app_releases_withdrawal_state": "(status = 'published' AND withdrawn_at IS NULL AND withdrawal_reason IS NULL) OR (status = 'withdrawn' AND withdrawn_at IS NOT NULL AND withdrawal_reason IS NOT NULL)",
 }
 _EAS_CHECK = "delivery_method = 'eas_update' OR eas_update_id IS NULL"
+_PG_REFLECTED_CHECKS = {
+    "ck_app_release_lanes_platform": "platform::text = 'android'::text",
+    "ck_app_release_lanes_channel": "channel::text = ANY (ARRAY['production-direct'::character varying, 'production-play'::character varying]::text[])",
+    "ck_app_release_lanes_expected_source_commit": "expected_source_commit::text ~ '^[0-9a-f]{40}$'::text",
+    "ck_app_releases_platform": "platform::text = 'android'::text",
+    "ck_app_releases_channel": "channel::text = ANY (ARRAY['production-direct'::character varying, 'production-play'::character varying]::text[])",
+    "ck_app_releases_delivery_method": "delivery_method::text = ANY (ARRAY['direct_apk'::character varying, 'eas_update'::character varying, 'google_play'::character varying]::text[])",
+    "ck_app_releases_version_code_positive": "version_code > 0",
+    "ck_app_releases_version_name": "version_name::text ~ '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$'::text",
+    "ck_app_releases_min_supported_version": "min_supported_version_code IS NULL OR min_supported_version_code <= version_code",
+    "ck_app_releases_artifact_sha256": "artifact_sha256 IS NULL OR artifact_sha256::text ~ '^[0-9a-f]{64}$'::text",
+    "ck_app_releases_source_commit": "source_commit::text ~ '^[0-9a-f]{40}$'::text",
+    "ck_app_releases_release_notes": "release_notes ? 'ru'::text AND release_notes ? 'en'::text AND jsonb_typeof(release_notes) = 'object'::text AND jsonb_typeof(release_notes -> 'ru'::text) = 'string'::text AND btrim(release_notes ->> 'ru'::text) <> ''::text AND jsonb_typeof(release_notes -> 'en'::text) = 'string'::text AND btrim(release_notes ->> 'en'::text) <> ''::text",
+    "ck_app_releases_delivery_payload": "delivery_method::text = 'direct_apk'::text AND artifact_storage_key IS NOT NULL AND artifact_sha256 IS NOT NULL AND artifact_size_bytes > 0 OR delivery_method::text = 'eas_update'::text AND eas_update_group_id IS NOT NULL AND runtime_version IS NOT NULL AND artifact_storage_key IS NULL OR delivery_method::text = 'google_play'::text AND artifact_storage_key IS NULL",
+    "ck_app_releases_non_apk_artifact_fields": "delivery_method::text = 'direct_apk'::text OR artifact_sha256 IS NULL AND artifact_size_bytes IS NULL",
+    "ck_app_releases_status": "status::text = ANY (ARRAY['published'::character varying, 'withdrawn'::character varying]::text[])",
+    "ck_app_releases_withdrawal_state": "status::text = 'published'::text AND withdrawn_at IS NULL AND withdrawal_reason IS NULL OR status::text = 'withdrawn'::text AND withdrawn_at IS NOT NULL AND withdrawal_reason IS NOT NULL",
+    "ck_app_releases_eas_update_id_delivery": "delivery_method::text = 'eas_update'::text OR eas_update_id IS NULL",
+}
+
+
+def _pg_column_contract(
+    columns: Mapping[str, tuple[str, int | None, bool, str | None]]
+) -> dict[str, tuple[str, bool, str | None, str | None]]:
+    names = {
+        "varchar": "character varying",
+        "char": "character",
+        "timestamptz": "timestamp with time zone",
+    }
+    contract = {}
+    for name, (kind, length, nullable, default) in columns.items():
+        type_name = names.get(kind, kind)
+        if length is not None:
+            type_name += f"({length})"
+        collation = "default" if kind in {"varchar", "char"} else None
+        contract[name] = (type_name, not nullable, default, collation)
+    return contract
+
+
+_PG_LANE_COLUMNS = _pg_column_contract(_LANE_COLUMNS)
+_PG_RELEASE_BASE_COLUMNS = _pg_column_contract(_RELEASE_BASE_COLUMNS)
+_PG_RELEASE_INDEXES = {
+    "app_releases_pkey": (True, True, True, True, 1, 1, "CREATE UNIQUE INDEX app_releases_pkey ON app_releases USING btree (id)", None, None),
+    "ix_app_releases_latest_published": (True, True, False, False, 4, 4, "CREATE INDEX ix_app_releases_latest_published ON app_releases USING btree (platform, channel, version_code DESC, published_at DESC) WHERE status::text = 'published'::text", "status::text = 'published'::text", None),
+    "uq_app_releases_direct_version": (True, True, True, False, 3, 3, "CREATE UNIQUE INDEX uq_app_releases_direct_version ON app_releases USING btree (platform, channel, version_code) WHERE delivery_method::text = 'direct_apk'::text", "delivery_method::text = 'direct_apk'::text", None),
+    "uq_app_releases_eas_update_group_id": (True, True, True, False, 1, 1, "CREATE UNIQUE INDEX uq_app_releases_eas_update_group_id ON app_releases USING btree (eas_update_group_id)", None, None),
+    "uq_app_releases_idempotency_key": (True, True, True, False, 1, 1, "CREATE UNIQUE INDEX uq_app_releases_idempotency_key ON app_releases USING btree (idempotency_key)", None, None),
+}
+_PG_LANE_INDEXES = {
+    "app_release_lanes_pkey": (True, True, True, True, 2, 2, "CREATE UNIQUE INDEX app_release_lanes_pkey ON app_release_lanes USING btree (platform, channel)", None, None),
+}
 
 
 def _type_signature(type_: Any) -> tuple[str, int | None]:
@@ -152,6 +203,7 @@ def _sql_signature(value: Any) -> str | None:
         raise SchemaReconciliationError("unterminated SQL literal")
     normalized = "".join(pieces)
     normalized = re.sub(r"::(?:text|charactervarying|boolean|integer|bigint)", "", normalized)
+    normalized = re.sub(r"\(([a-z_][a-z0-9_]*)\)", r"\1", normalized)
     while normalized.startswith("(") and normalized.endswith(")"):
         depth = 0
         enclosed = True
@@ -193,21 +245,215 @@ def _named(items: Sequence[Mapping[str, Any]]) -> set[str]:
 
 def _require_exact_checks(inspector: Any, table: str, expected: Mapping[str, str]) -> None:
     checks = inspector.get_check_constraints(table)
-    if any(not item.get("name") or item.get("sqltext") is None for item in checks):
+    if any(
+        not item.get("name")
+        or item.get("sqltext") is None
+        or bool(item.get("dialect_options"))
+        for item in checks
+    ):
         raise SchemaReconciliationError(f"incompatible {table} check constraints")
     actual = {
         str(item.get("name")): _sql_signature(item.get("sqltext"))
         for item in checks
     }
-    wanted = {name: _sql_signature(sqltext) for name, sqltext in expected.items()}
-    if actual != wanted:
+    if set(actual) != set(expected):
         raise SchemaReconciliationError(f"incompatible {table} check constraints")
+    for name, sqltext in expected.items():
+        allowed = {
+            _sql_signature(sqltext),
+            _sql_signature(_PG_REFLECTED_CHECKS[name]),
+        }
+        if actual[name] not in allowed:
+            raise SchemaReconciliationError(f"incompatible {table} check constraints")
 
 
 def _predicate_signature(item: Mapping[str, Any]) -> str:
     return _sql_signature(
         (item.get("dialect_options") or {}).get("postgresql_where")
     ) or ""
+
+
+def _has_only_default_index_options(
+    item: Mapping[str, Any], *, allow_predicate: bool
+) -> bool:
+    options = dict(item.get("dialect_options") or {})
+    include = options.pop("postgresql_include", [])
+    predicate = options.pop("postgresql_where", None) if allow_predicate else None
+    if include or options:
+        return False
+    if not allow_predicate and "postgresql_where" in (item.get("dialect_options") or {}):
+        return False
+    return predicate is None or allow_predicate
+
+
+def _has_only_default_constraint_options(
+    item: Mapping[str, Any], *, unique: bool = False
+) -> bool:
+    options = dict(item.get("dialect_options") or {})
+    if options.pop("postgresql_include", []):
+        return False
+    if unique and options.pop("postgresql_nulls_not_distinct", False):
+        return False
+    return not options
+
+
+def _catalog_rows(bind: Any, sql: str) -> list[Mapping[str, Any]]:
+    return list(bind.execute(sa.text(sql)).mappings())
+
+
+def _require_postgresql_catalog_contract(bind: Any, *, include_eas: bool) -> None:
+    version = int(bind.execute(sa.text("SHOW server_version_num")).scalar_one())
+    if not 160000 <= version < 180000:
+        raise SchemaReconciliationError("unsupported PostgreSQL catalog version")
+
+    column_rows = _catalog_rows(
+        bind,
+        """
+        SELECT c.relname AS table_name, a.attname AS column_name,
+               format_type(a.atttypid, a.atttypmod) AS type_name,
+               a.attnotnull AS not_null, pg_get_expr(d.adbin, d.adrelid) AS default_sql,
+               coll.collname AS collation_name
+        FROM pg_attribute a
+        JOIN pg_class c ON c.oid = a.attrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+        LEFT JOIN pg_collation coll ON coll.oid = a.attcollation
+        WHERE n.nspname = current_schema()
+          AND c.relname IN ('app_release_lanes', 'app_releases')
+          AND a.attnum > 0 AND NOT a.attisdropped
+        ORDER BY c.relname, a.attnum
+        """,
+    )
+    actual_columns: dict[str, dict[str, tuple[Any, ...]]] = {}
+    for row in column_rows:
+        actual_columns.setdefault(row["table_name"], {})[row["column_name"]] = (
+            row["type_name"],
+            bool(row["not_null"]),
+            _sql_signature(row["default_sql"]),
+            row["collation_name"],
+        )
+    release_columns = dict(_PG_RELEASE_BASE_COLUMNS)
+    if include_eas:
+        release_columns["eas_update_id"] = ("character varying(128)", False, None, "default")
+    expected_columns = {
+        "app_release_lanes": _PG_LANE_COLUMNS,
+        "app_releases": release_columns,
+    }
+    expected_columns = {
+        table: {
+            name: (type_name, not_null, _sql_signature(default), collation)
+            for name, (type_name, not_null, default, collation) in columns.items()
+        }
+        for table, columns in expected_columns.items()
+    }
+    if actual_columns != expected_columns:
+        raise SchemaReconciliationError("incompatible release column catalog")
+
+    constraint_rows = _catalog_rows(
+        bind,
+        """
+        SELECT c.relname AS table_name, con.conname, con.contype,
+               con.convalidated, con.connoinherit, con.condeferrable, con.condeferred,
+               pg_get_constraintdef(con.oid, true) AS definition
+        FROM pg_constraint con
+        JOIN pg_class c ON c.oid = con.conrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = current_schema()
+          AND c.relname IN ('app_release_lanes', 'app_releases')
+        ORDER BY c.relname, con.conname
+        """,
+    )
+    actual_constraints: dict[str, dict[str, tuple[Any, ...]]] = {}
+    for row in constraint_rows:
+        actual_constraints.setdefault(row["table_name"], {})[row["conname"]] = (
+            row["contype"], bool(row["convalidated"]), bool(row["connoinherit"]),
+            bool(row["condeferrable"]), bool(row["condeferred"]), row["definition"],
+        )
+    lane_constraints = {
+        name: ("c", True, False, False, False, f"CHECK ({_PG_REFLECTED_CHECKS[name]})")
+        for name in _LANE_CHECKS
+    }
+    lane_constraints["app_release_lanes_pkey"] = (
+        "p", True, True, False, False, "PRIMARY KEY (platform, channel)"
+    )
+    release_check_names = set(_RELEASE_BASE_CHECKS)
+    if include_eas:
+        release_check_names.add("ck_app_releases_eas_update_id_delivery")
+    release_constraints = {
+        name: ("c", True, False, False, False, f"CHECK ({_PG_REFLECTED_CHECKS[name]})")
+        for name in release_check_names
+    }
+    release_constraints.update({
+        "app_releases_pkey": ("p", True, True, False, False, "PRIMARY KEY (id)"),
+        "uq_app_releases_eas_update_group_id": ("u", True, True, False, False, "UNIQUE (eas_update_group_id)"),
+        "uq_app_releases_idempotency_key": ("u", True, True, False, False, "UNIQUE (idempotency_key)"),
+    })
+    if include_eas:
+        release_constraints["uq_app_releases_eas_update_id"] = (
+            "u", True, True, False, False, "UNIQUE (eas_update_id)"
+        )
+    if actual_constraints != {
+        "app_release_lanes": lane_constraints,
+        "app_releases": release_constraints,
+    }:
+        raise SchemaReconciliationError("incompatible release constraint catalog")
+
+    index_rows = _catalog_rows(
+        bind,
+        """
+        SELECT t.relname AS table_name, i.relname AS index_name,
+               x.indisvalid, x.indisready, x.indisunique, x.indisprimary,
+               x.indnkeyatts, x.indnatts, pg_get_indexdef(x.indexrelid, 0, true) AS definition,
+               pg_get_expr(x.indpred, x.indrelid, true) AS predicate, i.reloptions
+        FROM pg_index x
+        JOIN pg_class i ON i.oid = x.indexrelid
+        JOIN pg_class t ON t.oid = x.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = current_schema()
+          AND t.relname IN ('app_release_lanes', 'app_releases')
+        ORDER BY t.relname, i.relname
+        """,
+    )
+    actual_indexes: dict[str, dict[str, tuple[Any, ...]]] = {}
+    for row in index_rows:
+        actual_indexes.setdefault(row["table_name"], {})[row["index_name"]] = (
+            bool(row["indisvalid"]), bool(row["indisready"]), bool(row["indisunique"]),
+            bool(row["indisprimary"]), row["indnkeyatts"], row["indnatts"],
+            row["definition"], row["predicate"], row["reloptions"],
+        )
+    release_indexes = dict(_PG_RELEASE_INDEXES)
+    if include_eas:
+        release_indexes["uq_app_releases_eas_update_id"] = (
+            True, True, True, False, 1, 1,
+            "CREATE UNIQUE INDEX uq_app_releases_eas_update_id ON app_releases USING btree (eas_update_id)",
+            None, None,
+        )
+    if actual_indexes != {
+        "app_release_lanes": _PG_LANE_INDEXES,
+        "app_releases": release_indexes,
+    }:
+        raise SchemaReconciliationError("incompatible release index catalog")
+
+
+def _require_exercise_index_catalog(bind: Any) -> None:
+    rows = _catalog_rows(
+        bind,
+        """
+        SELECT x.indisvalid, x.indisready, x.indisunique, x.indisprimary,
+               x.indnkeyatts, x.indnatts, pg_get_indexdef(x.indexrelid, 0, true) AS definition,
+               pg_get_expr(x.indpred, x.indrelid, true) AS predicate, i.reloptions
+        FROM pg_index x
+        JOIN pg_class i ON i.oid = x.indexrelid
+        JOIN pg_class t ON t.oid = x.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = current_schema() AND t.relname = 'exercises'
+          AND i.relname = 'ix_exercises_name_en'
+        """,
+    )
+    signature = tuple(rows[0].values()) if len(rows) == 1 else None
+    expected = (True, True, False, False, 1, 1, "CREATE INDEX ix_exercises_name_en ON exercises USING btree (name_en)", None, None)
+    if signature != expected:
+        raise SchemaReconciliationError("incompatible localization index catalog")
 
 
 def _plan_optional_columns(
@@ -238,12 +484,14 @@ def _validate_release_base(inspector: Any) -> None:
     if release_columns != allowed:
         raise SchemaReconciliationError("incompatible app_releases columns")
 
-    if inspector.get_pk_constraint("app_release_lanes").get("constrained_columns") != [
+    lane_pk = inspector.get_pk_constraint("app_release_lanes")
+    release_pk = inspector.get_pk_constraint("app_releases")
+    if lane_pk.get("constrained_columns") != [
         "platform",
         "channel",
-    ]:
+    ] or not _has_only_default_constraint_options(lane_pk):
         raise SchemaReconciliationError("incompatible app_release_lanes primary key")
-    if inspector.get_pk_constraint("app_releases").get("constrained_columns") != ["id"]:
+    if release_pk.get("constrained_columns") != ["id"] or not _has_only_default_constraint_options(release_pk):
         raise SchemaReconciliationError("incompatible app_releases primary key")
     _require_exact_checks(inspector, "app_release_lanes", _LANE_CHECKS)
     release_checks = dict(_RELEASE_BASE_CHECKS)
@@ -255,10 +503,10 @@ def _validate_release_base(inspector: Any) -> None:
     if inspector.get_unique_constraints("app_release_lanes") or inspector.get_indexes("app_release_lanes"):
         raise SchemaReconciliationError("unexpected app_release_lanes index or unique constraint")
 
-    uniques = {
-        item.get("name"): tuple(item.get("column_names") or ())
-        for item in inspector.get_unique_constraints("app_releases")
-    }
+    unique_items = inspector.get_unique_constraints("app_releases")
+    if any(not _has_only_default_constraint_options(item, unique=True) for item in unique_items):
+        raise SchemaReconciliationError("incompatible release unique constraints")
+    uniques = {item.get("name"): tuple(item.get("column_names") or ()) for item in unique_items}
     expected_uniques = {
         "uq_app_releases_idempotency_key": ("idempotency_key",),
         "uq_app_releases_eas_update_group_id": ("eas_update_group_id",),
@@ -274,7 +522,7 @@ def _validate_release_base(inspector: Any) -> None:
     ]
     for item in index_items:
         dialect_options = item.get("dialect_options") or {}
-        if set(dialect_options) - {"postgresql_where"}:
+        if item.get("include_columns") or not _has_only_default_index_options(item, allow_predicate=True):
             raise SchemaReconciliationError("incompatible release index options")
     indexes = {
         item.get("name"): (
@@ -328,7 +576,7 @@ def _plan_eas_extension(inspector: Any) -> list[str]:
     return []
 
 
-def plan_reconciliation(inspector: Any) -> tuple[str, ...]:
+def plan_reconciliation(inspector: Any, *, bind: Any | None = None) -> tuple[str, ...]:
     """Return safe additive migrations after validating all relevant objects."""
     tables = set(inspector.get_table_names())
     for required in ("app_notifications", "exercises"):
@@ -363,8 +611,13 @@ def plan_reconciliation(inspector: Any) -> tuple[str, ...]:
             exercise_index is None
             or exercise_index.get("column_names") != ["name_en"]
             or bool(exercise_index.get("unique"))
+            or bool(exercise_index.get("column_sorting"))
+            or bool(exercise_index.get("include_columns"))
+            or not _has_only_default_index_options(exercise_index, allow_predicate=False)
         ):
             raise SchemaReconciliationError("missing or incompatible localization index")
+        if bind is not None:
+            _require_exercise_index_catalog(bind)
     actions.extend(exercise_actions)
 
     release_tables = tables.intersection({"app_release_lanes", "app_releases"})
@@ -375,7 +628,10 @@ def plan_reconciliation(inspector: Any) -> tuple[str, ...]:
         raise SchemaReconciliationError("partial release registry tables")
 
     _validate_release_base(inspector)
-    actions.extend(_plan_eas_extension(inspector))
+    eas_actions = _plan_eas_extension(inspector)
+    if bind is not None:
+        _require_postgresql_catalog_contract(bind, include_eas=not eas_actions)
+    actions.extend(eas_actions)
     return tuple(actions)
 
 
@@ -407,8 +663,11 @@ def apply_reconciliation(
 
 
 def upgrade() -> None:
-    actions = plan_reconciliation(sa.inspect(op.get_bind()))
+    bind = op.get_bind()
+    actions = plan_reconciliation(sa.inspect(bind), bind=bind)
     apply_reconciliation(actions)
+    if plan_reconciliation(sa.inspect(bind), bind=bind):
+        raise SchemaReconciliationError("reconciliation did not reach the exact target schema")
 
 
 def downgrade() -> None:
