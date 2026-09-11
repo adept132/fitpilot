@@ -67,6 +67,7 @@ def test_deploy_orders_irreversible_work_behind_all_preflight_gates() -> None:
         "verify_switched_container_stability",
         "run_public_canaries",
         "review_runtime_logs",
+        "cleanup_rehearsal_inputs",
         "write_mobile_gate",
     ]
     positions = [script.index(f"CURRENT_STAGE={name}") for name in ordered]
@@ -290,11 +291,24 @@ def test_migration_rehearsal_is_mandatory_and_fail_closed_before_production_muta
     assert '|| die target_migration_rehearsal_failed' in script
     assert '|| die target_schema_rehearsal_failed' in script
     assert '|| die old_backend_compatibility_rehearsal_failed' in script
+    probe_command = '--workdir /app -e PYTHONPATH=/app api python /tmp/eurith-rehearse-release-db.py "$EXPECTED_ALEMBIC_HEAD"'
+    assert script.count(probe_command) == 2
     assert script.index("CURRENT_STAGE=rehearse_migration_compatibility") < script.index("CURRENT_STAGE=apply_migration_once")
     assert script.index("SCHEMA_ROLLBACK_COMPATIBLE=1") < script.index("CURRENT_STAGE=apply_migration_once")
     probe = _text(REHEARSAL_PROBE)
     for contract in ("health_check", "alembic_version", "Base.metadata.sorted_tables", "missing_table", "missing_column"):
         assert contract in probe
+
+
+def test_rehearsal_secret_cleanup_precedes_durable_mobile_gate_and_failure_fsync() -> None:
+    script = _text(DEPLOY)
+    cleanup_stage = script.index("CURRENT_STAGE=cleanup_rehearsal_inputs")
+    mobile_stage = script.index("CURRENT_STAGE=write_mobile_gate")
+    assert cleanup_stage < mobile_stage
+    assert "evidence rehearsal_input_cleanup passed" in script[cleanup_stage:mobile_stage]
+    on_exit = script[script.index("on_exit() {"):script.index("trap on_exit EXIT")]
+    assert on_exit.index("evidence rehearsal_input_cleanup failed") < on_exit.index("os.fsync(handle.fileno())")
+    assert "cleanup_rehearsal_inputs" not in script[mobile_stage:]
 
 
 def test_rehearsal_database_url_is_snapshotted_once_and_yaml_paths_are_serialized_safely() -> None:

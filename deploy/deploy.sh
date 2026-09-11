@@ -221,7 +221,7 @@ rehearse_migration_compatibility() {
   "${target_rehearsal_compose[@]}" run --rm --no-deps api alembic upgrade head || die target_migration_rehearsal_failed
   target_current="$("${target_rehearsal_compose[@]}" run --rm --no-deps api alembic current 2>/dev/null | sed -n 's/^\([0-9A-Za-z_]*\).*/\1/p' | tail -n1)" || die target_schema_rehearsal_failed
   [[ "$target_current" == "$EXPECTED_ALEMBIC_HEAD" ]] || die target_schema_rehearsal_failed
-  "${target_rehearsal_compose[@]}" run --rm --no-deps api python /tmp/eurith-rehearse-release-db.py "$EXPECTED_ALEMBIC_HEAD" || die target_schema_rehearsal_failed
+  "${target_rehearsal_compose[@]}" run --rm --no-deps --workdir /app -e PYTHONPATH=/app api python /tmp/eurith-rehearse-release-db.py "$EXPECTED_ALEMBIC_HEAD" || die target_schema_rehearsal_failed
   evidence target_migration_rehearsal passed
   git -C "$SOURCE_DIR" checkout --detach "$OLD_COMMIT" >/dev/null || die old_rehearsal_checkout_failed
   [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" == "$OLD_COMMIT" && -z "$(git -C "$SOURCE_DIR" status --porcelain)" ]] || die old_rehearsal_checkout_invalid
@@ -230,7 +230,7 @@ rehearse_migration_compatibility() {
   old_rehearsal_compose+=(-f "$REHEARSAL_OVERLAY")
   "${old_rehearsal_compose[@]}" config >/dev/null || die old_backend_compatibility_rehearsal_failed
   "${old_rehearsal_compose[@]}" build api >/dev/null || die old_backend_compatibility_rehearsal_failed
-  "${old_rehearsal_compose[@]}" run --rm --no-deps api python /tmp/eurith-rehearse-release-db.py "$EXPECTED_ALEMBIC_HEAD" || die old_backend_compatibility_rehearsal_failed
+  "${old_rehearsal_compose[@]}" run --rm --no-deps --workdir /app -e PYTHONPATH=/app api python /tmp/eurith-rehearse-release-db.py "$EXPECTED_ALEMBIC_HEAD" || die old_backend_compatibility_rehearsal_failed
   evidence old_backend_compatibility_rehearsal passed
   git -C "$SOURCE_DIR" checkout --detach "$TARGET_SHA" >/dev/null || die target_rehearsal_restore_failed
   [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" == "$TARGET_SHA" && -z "$(git -C "$SOURCE_DIR" status --porcelain)" ]] || die target_rehearsal_restore_invalid
@@ -364,6 +364,7 @@ on_exit() {
       fi
       if [[ "$MIGRATION_ATTEMPTED" == 1 && "$MIGRATION_STATE" == unknown ]]; then evidence rollback_result manual_required; else evidence rollback_result not_required; fi
     fi
+    if ! cleanup_rehearsal_inputs; then evidence rehearsal_input_cleanup failed; fi
     python3 - "$EVIDENCE_DIR/deploy.env" <<'PY'
 import os, pathlib, sys
 path = pathlib.Path(sys.argv[1])
@@ -374,7 +375,6 @@ for durable_directory in (path.parent, path.parent.parent):
     finally: os.close(directory_fd)
 PY
   fi
-  if ! cleanup_rehearsal_inputs; then evidence rehearsal_input_cleanup failed; fi
   exit "$status"
 }
 trap on_exit EXIT
@@ -396,6 +396,6 @@ CURRENT_STAGE=verify_switched_container_stability; verify_switched_container_sta
 CURRENT_STAGE=run_public_canaries; run_public_canaries; evidence run_public_canaries_exit 0
 CURRENT_STAGE=review_runtime_logs; review_runtime_logs; evidence review_runtime_logs_exit 0
 CURRENT_STAGE=verify_switched_container_stability_final; verify_switched_container_stability; evidence verify_switched_container_stability_final_exit 0
+CURRENT_STAGE=cleanup_rehearsal_inputs; cleanup_rehearsal_inputs; evidence rehearsal_input_cleanup passed; evidence cleanup_rehearsal_inputs_exit 0
 CURRENT_STAGE=write_mobile_gate; write_mobile_gate
-cleanup_rehearsal_inputs
 trap - EXIT
