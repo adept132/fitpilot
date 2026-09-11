@@ -47,6 +47,7 @@ ALLOWED_CONSTRUCTORS = {
     "text",
 }
 CONSTRUCTOR_ROOTS = {"sa", "sqlalchemy", "postgresql"}
+RESERVED_BINDINGS = {"op", "sa", "postgresql", "upgrade"}
 
 
 def _call_path(node: ast.expr) -> tuple[str, ...] | None:
@@ -60,19 +61,71 @@ def _call_path(node: ast.expr) -> tuple[str, ...] | None:
     return tuple(reversed(parts))
 
 
+def _targets_reserved_binding(node: ast.AST) -> bool:
+    return any(
+        isinstance(child, ast.Name) and child.id in RESERVED_BINDINGS
+        for child in ast.walk(node)
+    )
+
+
 def validate(path: Path) -> None:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     upgrades = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "upgrade"]
     if len(upgrades) != 1:
         raise ValueError("upgrade_function_invalid")
     upgrade = upgrades[0]
+    alembic_imports = 0
+    sqlalchemy_imports = 0
     for statement in tree.body:
-        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if isinstance(statement, ast.ImportFrom):
+            if statement.module == "alembic" and [(item.name, item.asname) for item in statement.names] == [("op", None)]:
+                alembic_imports += 1
+            elif statement.module == "sqlalchemy.dialects" and [(item.name, item.asname) for item in statement.names] == [("postgresql", None)]:
+                pass
+            elif statement.module not in {"typing", "__future__"}:
+                raise ValueError("import_not_allowlisted")
+        elif isinstance(statement, ast.Import):
+            if [(item.name, item.asname) for item in statement.names] == [("sqlalchemy", "sa")]:
+                sqlalchemy_imports += 1
+            else:
+                raise ValueError("import_not_allowlisted")
+        elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not isinstance(statement, ast.FunctionDef) or statement.name not in {"upgrade", "downgrade"}:
+                raise ValueError("helper_function_rejected")
             exposed = [*statement.decorator_list, *statement.args.defaults, *statement.args.kw_defaults]
             if any(isinstance(node, ast.Call) for value in exposed if value is not None for node in ast.walk(value)):
                 raise ValueError("module_scope_call_rejected")
-        elif any(isinstance(node, ast.Call) for node in ast.walk(statement)):
-            raise ValueError("module_scope_call_rejected")
+        elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            if any(isinstance(node, ast.Call) for node in ast.walk(statement)):
+                raise ValueError("module_scope_call_rejected")
+            if any(isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in RESERVED_BINDINGS for node in ast.walk(statement)):
+                raise ValueError("canonical_binding_aliased")
+            targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+            if any(_targets_reserved_binding(target) for target in targets):
+                raise ValueError("canonical_binding_reassigned")
+        elif not (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant) and isinstance(statement.value.value, str)):
+            raise ValueError("module_statement_rejected")
+    if alembic_imports != 1 or sqlalchemy_imports != 1:
+        raise ValueError("canonical_import_missing")
+    parents = {child: parent for parent in ast.walk(upgrade) for child in ast.iter_child_nodes(parent)}
+    for node in ast.walk(upgrade):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)) and node.id in RESERVED_BINDINGS:
+            raise ValueError("canonical_binding_reassigned")
+        if isinstance(node, ast.arg) and node.arg in RESERVED_BINDINGS:
+            raise ValueError("canonical_binding_shadowed")
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)):
+            targets = node.targets if isinstance(node, ast.Assign) else [getattr(node, "target", None)]
+            for target in targets:
+                if target is not None and _targets_reserved_binding(target):
+                    raise ValueError("canonical_binding_reassigned")
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in {"op", "sa", "postgresql"}:
+            expression: ast.AST = node
+            parent = parents.get(expression)
+            while isinstance(parent, ast.Attribute) and parent.value is expression:
+                expression = parent
+                parent = parents.get(expression)
+            if not isinstance(parent, ast.Call) or parent.func is not expression:
+                raise ValueError("canonical_binding_aliased")
     for node in ast.walk(upgrade):
         if not isinstance(node, ast.Call):
             continue

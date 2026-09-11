@@ -135,7 +135,9 @@ one-head and migration-path gate; exact API build; one migration; coordinated
 API+Caddy switch with image pulls disabled; immediate zero-restart identity
 capture; bounded readiness retries; public canaries; Compose-native bounded log
 review; final identity/restart proof; mobile gate. Rollback injects and verifies
-the exact immutable image ID used by the prior Caddy container.
+the exact immutable image ID used by the prior Caddy container. If Caddy was not
+part of the prior running topology, rollback removes the newly introduced Caddy
+container and restores the old API with the base Compose file only.
 
 Run canaries independently with the same protected inputs:
 

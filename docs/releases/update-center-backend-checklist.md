@@ -152,6 +152,9 @@ restart delta, or timeout is fatal. Capture the new container identities and
 zero restart counts immediately after the switch, verify them after readiness
 and again after canaries/log review, and retain the exact prior Caddy image ID
 so rollback both injects and verifies that immutable identity.
+If the prior topology had no Caddy container, rollback must remove the newly
+introduced Caddy container and restore only the old base-Compose API; an
+overlay file merely present in the old checkout is not evidence that Caddy ran.
 
 Store evidence outside checkout and release storage in a root-owned mode `0700`
 directory. The mobile gate must be an absolute nonexistent direct child. Publish

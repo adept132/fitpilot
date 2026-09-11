@@ -221,10 +221,26 @@ def test_migration_gate_allows_only_known_additive_operations_and_rejects_dynami
         "rename": "def upgrade():\n    op.rename_table('items', 'gone')\n",
         "drop-index": "def upgrade():\n    op.drop_index('ix_items')\n",
         "truncate": "def upgrade():\n    op.execute('TRUNCATE items')\n",
+        "monkeypatch-op": (
+            "from alembic import op\nimport sqlalchemy as sa\n"
+            "def destructive(*args):\n    op.execute('TRUNCATE app_releases')\n"
+            "op.add_column = destructive\n"
+            "def upgrade():\n    op.add_column('items', sa.Column('label', sa.String(20), nullable=True))\n"
+        ),
     }
     for name, source in invalid_sources.items():
         candidate = tmp_path / f"{name}.py"; candidate.write_text(source, encoding="utf-8")
         assert subprocess.run([sys.executable, MIGRATION_GATE, candidate], capture_output=True).returncode != 0, name
+
+
+def test_rollback_restores_both_prior_caddy_topologies() -> None:
+    script = _text(DEPLOY)
+    assert 'if [[ "$PRIOR_CADDY_PRESENT" == 1 ]]' in script
+    assert 'rollback_compose+=(-f "$rollback_image_overlay")' in script
+    assert '"$rollback_caddy_image" == "$OLD_CADDY_IMAGE_ID"' in script
+    assert 'if [[ "$PRIOR_CADDY_PRESENT" == 0 ]]' in script
+    assert '"${compose[@]}" rm -f caddy' in script
+    assert 'rollback_compose=(docker compose -f "$EURITH_BASE_COMPOSE")' in script
 
 
 def test_nginx_artifact_and_instructions_are_removed_together() -> None:

@@ -80,7 +80,7 @@ require_safe_absolute_path "$EURITH_MIGRATION_APPROVAL_FILE" secret "$SOURCE_DIR
 require_safe_absolute_path "$MOBILE_GATE_FILE" backup "$SOURCE_DIR"
 case "$(_canonical_path "$EURITH_EVIDENCE_ROOT")/" in "$(_canonical_path "$EURITH_RELEASE_VOLUME_ROOT")"/*) die evidence_below_release_storage ;; esac
 compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY")
-OLD_COMMIT=''; EVIDENCE_DIR=''; BACKUP_GENERATION=''; BACKUP_MANIFEST_SHA256=''; EXPECTED_ALEMBIC_HEAD=''; MIGRATION_ATTEMPTED=0; MIGRATION_STATE=not_attempted; MIGRATION_EVIDENCE_WRITTEN=0; SWITCH_ATTEMPTED=0; SOURCE_SWITCHED=0; SCHEMA_ROLLBACK_COMPATIBLE=0; ROLLBACK_ATTEMPTED=0; ROLLBACK_EVIDENCE_WRITTEN=0; OLD_CADDY_IMAGE_ID=''; CURRENT_STAGE=preflight
+OLD_COMMIT=''; EVIDENCE_DIR=''; BACKUP_GENERATION=''; BACKUP_MANIFEST_SHA256=''; EXPECTED_ALEMBIC_HEAD=''; MIGRATION_ATTEMPTED=0; MIGRATION_STATE=not_attempted; MIGRATION_EVIDENCE_WRITTEN=0; SWITCH_ATTEMPTED=0; SOURCE_SWITCHED=0; SCHEMA_ROLLBACK_COMPATIBLE=0; ROLLBACK_ATTEMPTED=0; ROLLBACK_EVIDENCE_WRITTEN=0; PRIOR_CADDY_PRESENT=0; OLD_CADDY_IMAGE_ID=''; CURRENT_STAGE=preflight
 declare -A SWITCH_CONTAINER_IDS=()
 evidence() {
   local key="$1" value="$2"
@@ -234,17 +234,22 @@ rollback_infrastructure() {
   ROLLBACK_ATTEMPTED=1
   if [[ "$SWITCH_ATTEMPTED" == 1 ]]; then
     "${compose[@]}" stop caddy >/dev/null 2>&1 || true
+    if [[ "$PRIOR_CADDY_PRESENT" == 0 ]]; then
+      if "${compose[@]}" rm -f caddy >/dev/null 2>&1; then evidence rollback_caddy_absent passed; else evidence rollback_caddy_absent failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; fi
+    fi
     if ! git -C "$SOURCE_DIR" checkout --detach "$OLD_COMMIT" >/dev/null 2>&1; then evidence rollback_checkout failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; fi
     if [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null)" != "$OLD_COMMIT" ]]; then evidence rollback_checkout failed; evidence rollback_checkout_mismatch yes; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; fi
     if [[ -n "$(git -C "$SOURCE_DIR" status --porcelain 2>/dev/null)" ]]; then evidence rollback_checkout failed; evidence rollback_checkout_dirty yes; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; fi
     evidence rollback_checkout passed
     if [[ "$MIGRATION_ATTEMPTED" == 0 || ( "$MIGRATION_STATE" == applied && "$SCHEMA_ROLLBACK_COMPATIBLE" == 1 ) ]]; then
-      if [[ -f "$OLD_RELEASE_OVERLAY" ]]; then
+      if [[ "$PRIOR_CADDY_PRESENT" == 1 ]]; then
         [[ "$OLD_CADDY_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || { evidence rollback_caddy_image failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; }
         rollback_image_overlay="$(mktemp)" || { evidence rollback_caddy_image failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; }
         chmod 0600 "$rollback_image_overlay" || { rm -f -- "$rollback_image_overlay"; evidence rollback_caddy_image failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; }
         printf 'services:\n  caddy:\n    image: "%s"\n' "$OLD_CADDY_IMAGE_ID" >"$rollback_image_overlay" || { rm -f -- "$rollback_image_overlay"; evidence rollback_caddy_image failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; }
-        rollback_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$OLD_RELEASE_OVERLAY" -f "$rollback_image_overlay")
+        rollback_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE")
+        [[ -f "$OLD_RELEASE_OVERLAY" ]] && rollback_compose+=(-f "$OLD_RELEASE_OVERLAY")
+        rollback_compose+=(-f "$rollback_image_overlay")
         if "${rollback_compose[@]}" build api >/dev/null 2>&1 && "${rollback_compose[@]}" up -d --no-deps --pull never api caddy >/dev/null 2>&1; then
           rollback_caddy_id="$("${rollback_compose[@]}" ps -q caddy 2>/dev/null)"
           rollback_caddy_image="$(docker inspect "$rollback_caddy_id" --format '{{.Image}}' 2>/dev/null || true)"
@@ -252,6 +257,7 @@ rollback_infrastructure() {
         fi
         rm -f -- "$rollback_image_overlay"
       else
+        evidence rollback_caddy_image not_applicable
         rollback_compose=(docker compose -f "$EURITH_BASE_COMPOSE")
         "${rollback_compose[@]}" build api >/dev/null 2>&1 && "${rollback_compose[@]}" up -d --no-deps api >/dev/null 2>&1 && result=passed
       fi
@@ -264,10 +270,12 @@ switch_api_and_caddy() {
   local service old_caddy_id container_id restarts
   old_caddy_id="$("${compose[@]}" ps -q caddy 2>/dev/null || true)"
   if [[ -n "$old_caddy_id" ]]; then
+    PRIOR_CADDY_PRESENT=1
     OLD_CADDY_IMAGE_ID="$(docker inspect "$old_caddy_id" --format '{{.Image}}' 2>/dev/null || true)"
     [[ "$OLD_CADDY_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die prior_caddy_image_unknown
     evidence prior_caddy_image_id "$OLD_CADDY_IMAGE_ID"
   fi
+  evidence prior_caddy_present "$PRIOR_CADDY_PRESENT"
   SWITCH_ATTEMPTED=1
   "${compose[@]}" up -d --no-deps --pull never api caddy || rollback_infrastructure
   for service in api caddy; do
