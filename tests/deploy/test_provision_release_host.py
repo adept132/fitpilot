@@ -183,6 +183,10 @@ elif command == "find":
 elif command == "docker":
     joined = " ".join(args)
     if "--entrypoint id api -u" in joined:
+        if os.environ.get("FAKE_DOCKER_AUTOCREATE_STORAGE") == "1" and joined.count(" -f ") > 1:
+            storage = pathlib.Path(os.environ["FAKE_STORAGE_ROOT"])
+            if not storage.exists():
+                storage.mkdir(parents=True); metadata_set(storage, "755", "0", "0")
         print("1234"); sys.exit(0)
     passed_env = {args[i + 1].split("=", 1)[0]: args[i + 1].split("=", 1)[1] for i, value in enumerate(args[:-1]) if value == "-e" and "=" in args[i + 1]}
     action = passed_env.get("EURITH_PROBE_ACTION", "")
@@ -272,6 +276,7 @@ class Host:
             "FAKE_STATE_DIR": str(self.state),
             "FAKE_FINAL_DIR": str(self.storage / "android" / "sha256"),
             "FAKE_STAGING_DIR": str(self.storage / ".staging"),
+            "FAKE_STORAGE_ROOT": str(self.storage),
             "FAKE_FINAL_VIEW": str(self.final_view),
             "FAKE_PROBE_VIEW": str(self.probe_view),
             "EURITH_FAKE_SYMLINKS": "1",
@@ -309,6 +314,16 @@ def test_scripts_exist() -> None:
     assert SCRIPT.is_file()
 
 
+def test_storage_exists_before_any_release_overlay_compose_probe() -> None:
+    script = SCRIPT.read_text(encoding="utf-8")
+    base_probe = script.index("BASE_API_UID=")
+    storage_create = script.index('install -d -m 2770 -o "$BASE_API_UID"')
+    overlay_compose = script.index('compose=(docker compose --env-file "$DEPLOY_ENV" -f "$BASE_COMPOSE" -f "$RELEASE_OVERLAY")')
+    target_probe = script.index("\nAPI_UID=", base_probe + 1)
+    assert base_probe < storage_create < overlay_compose < target_probe
+    assert "api_uid_changed_across_overlay" in script
+
+
 def test_first_use_and_repeat_are_idempotent_and_redacted(host: Host) -> None:
     first = host.run()
     assert first.returncode == 0, first.stderr
@@ -329,6 +344,15 @@ def test_first_use_and_repeat_are_idempotent_and_redacted(host: Host) -> None:
     assert host.deploy_env.read_text() == "RELEASE_SHARED_GID=4321\nEURITH_SITE_ADDRESS=https://api.eurith.app\n"
     assert not list((host.storage / ".staging").iterdir())
     assert not list((host.storage / "android" / "sha256").iterdir())
+
+
+def test_first_use_survives_real_compose_short_bind_autocreate_side_effect(host: Host) -> None:
+    result = host.run(FAKE_DOCKER_AUTOCREATE_STORAGE="1")
+    assert result.returncode == 0, result.stderr
+    metadata = json.loads((host.state / "metadata.json").read_text())
+    assert metadata[str(host.storage.resolve())] == {
+        "mode": "2770", "owner": "1234", "group": "4321"
+    }
 
 
 def test_env_files_have_exact_keys_and_storage_roots(host: Host) -> None:

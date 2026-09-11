@@ -147,15 +147,21 @@ atomic_install_text() {
 
 atomic_install_text "$DEPLOY_ENV" 0640 0 "$GROUP_GID" "RELEASE_SHARED_GID=${GROUP_GID}"$'\n'"EURITH_SITE_ADDRESS=${SITE_ADDRESS}"$'\n' 1
 assert_mode_owner_group "$DEPLOY_ENV" 640 0 "$GROUP_GID"
-compose=(docker compose --env-file "$DEPLOY_ENV" -f "$BASE_COMPOSE" -f "$RELEASE_OVERLAY")
-API_UID="$("${compose[@]}" run --rm --no-deps --entrypoint id api -u 2>/dev/null)" || die api_uid_resolution_failed
-[[ "$API_UID" =~ ^[1-9][0-9]*$ ]] || die api_uid_invalid
+
+base_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$BASE_COMPOSE")
+BASE_API_UID="$("${base_compose[@]}" run --rm --no-deps --entrypoint id api -u 2>/dev/null)" || die base_api_uid_resolution_failed
+[[ "$BASE_API_UID" =~ ^[1-9][0-9]*$ ]] || die base_api_uid_invalid
 
 storage_state=verified
 if [[ ! -e "$STORAGE_ROOT" ]]; then
-  install -d -m 2770 -o "$API_UID" -g "$GROUP_GID" -- "$STORAGE_ROOT" "$STAGING_DIR" "$(dirname -- "$FINAL_DIR")" "$FINAL_DIR" || die storage_create_failed
+  install -d -m 2770 -o "$BASE_API_UID" -g "$GROUP_GID" -- "$STORAGE_ROOT" "$STAGING_DIR" "$(dirname -- "$FINAL_DIR")" "$FINAL_DIR" || die storage_create_failed
   storage_state=created
 fi
+
+compose=(docker compose --env-file "$DEPLOY_ENV" -f "$BASE_COMPOSE" -f "$RELEASE_OVERLAY")
+API_UID="$("${compose[@]}" run --rm --no-deps --entrypoint id api -u 2>/dev/null)" || die api_uid_resolution_failed
+[[ "$API_UID" =~ ^[1-9][0-9]*$ ]] || die api_uid_invalid
+[[ "$API_UID" == "$BASE_API_UID" ]] || die api_uid_changed_across_overlay
 
 for directory in "$STORAGE_ROOT" "$STAGING_DIR" "$(dirname -- "$FINAL_DIR")" "$FINAL_DIR"; do
   [[ -d "$directory" && ! -L "$directory" ]] || die storage_tree_invalid

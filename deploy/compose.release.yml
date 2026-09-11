@@ -7,7 +7,12 @@ services:
     group_add:
       - "${RELEASE_SHARED_GID:?set in /etc/eurith/release-deploy.env}"
     volumes:
-      - /opt/eurith/releases:/var/lib/eurith/releases:rw
+      - type: bind
+        source: /opt/eurith/releases
+        target: /var/lib/eurith/releases
+        read_only: false
+        bind:
+          create_host_path: false
     expose:
       - "8000"
 

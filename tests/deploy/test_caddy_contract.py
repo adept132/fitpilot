@@ -63,7 +63,13 @@ def test_compose_keeps_api_private_and_mounts_only_required_release_paths() -> N
     assert api["env_file"] == ["/etc/eurith/api-release.env"]
     assert api["group_add"] == [SHARED_GID]
     assert api["volumes"] == [
-        "/opt/eurith/releases:/var/lib/eurith/releases:rw",
+        {
+            "type": "bind",
+            "source": "/opt/eurith/releases",
+            "target": "/var/lib/eurith/releases",
+            "read_only": False,
+            "bind": {"create_host_path": False},
+        },
     ]
 
     caddy = compose["services"]["caddy"]

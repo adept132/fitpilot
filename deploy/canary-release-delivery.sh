@@ -79,6 +79,13 @@ registry_scalar() {
   [[ "$value" =~ ^[0-9]+$ ]] || die release_registry_probe_failed
   printf '%s' "$value"
 }
+registry_uuid_count() {
+  local release_id="$1" query="$2" value
+  [[ "$release_id" =~ $uuid ]] || die release_registry_probe_failed
+  value="$("${compose[@]}" exec -T postgres sh -c 'exec psql --no-psqlrc --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only --no-align --set=release_id="$1" --command "$2"' sh "$release_id" "$query" 2>/dev/null | sed '/^[[:space:]]*$/d')" || die release_registry_probe_failed
+  [[ "$value" =~ ^[0-9]+$ ]] || die release_registry_probe_failed
+  printf '%s' "$value"
+}
 declare -A restart_baseline container_ids
 for service in "$API_CONTAINER" "$CADDY_CONTAINER"; do
   running="$("${compose[@]}" ps --status running --services | grep -cx "$service" || true)"; [[ "$running" == 1 ]] || die container_not_running
@@ -100,17 +107,20 @@ status="$(request operator_absent PATCH "$base/internal/app-releases/$missing_re
 status="$(request operator_wrong PATCH "$base/internal/app-releases/$missing_release_id/mandatory" -H 'Authorization: Bearer invalid-canary-token' -H 'Content-Type: application/json' --data '{"mandatory":false}')"; expect_status "$status" 401
 status="$(request webhook_wrong POST "$base/webhooks/github/mobile-push" -H 'X-Hub-Signature-256: sha256=0000000000000000000000000000000000000000000000000000000000000000' -H 'X-GitHub-Event: push' -H 'X-GitHub-Delivery: canary-invalid-signature' -H 'Content-Type: application/json' --data '{}')"; expect_status "$status" 401
 
+[[ "$(registry_uuid_count "$missing_release_id" "SELECT count(*) FROM app_releases WHERE id = :'release_id'::uuid")" == 0 ]] || die missing_release_id_present
 status="$(request missing GET "$base/app-releases/$missing_release_id/download")"; expect_status "$status" 404; no_internal_header "$tmp/missing.headers"
 if [[ "$withdrawn_release_id" == not_applicable ]]; then
   [[ "$(registry_scalar "SELECT count(*) FROM app_releases WHERE delivery_method='direct_apk' AND status='withdrawn'")" == 0 ]] || die withdrawn_category_not_empty
   printf 'withdrawn_release=not_applicable\n'
 else
+  [[ "$(registry_uuid_count "$withdrawn_release_id" "SELECT count(*) FROM app_releases WHERE id = :'release_id'::uuid AND delivery_method='direct_apk' AND status='withdrawn'")" == 1 ]] || die withdrawn_release_id_category_mismatch
   status="$(request withdrawn GET "$base/app-releases/$withdrawn_release_id/download")"; expect_status "$status" 410; no_internal_header "$tmp/withdrawn.headers"
 fi
 if [[ "$non_direct_release_id" == not_applicable ]]; then
   [[ "$(registry_scalar "SELECT count(*) FROM app_releases WHERE delivery_method <> 'direct_apk'")" == 0 ]] || die non_direct_category_not_empty
   printf 'non_direct_release=not_applicable\n'
 else
+  [[ "$(registry_uuid_count "$non_direct_release_id" "SELECT count(*) FROM app_releases WHERE id = :'release_id'::uuid AND delivery_method <> 'direct_apk'")" == 1 ]] || die non_direct_release_id_category_mismatch
   status="$(request non_direct GET "$base/app-releases/$non_direct_release_id/download")"; expect_status "$status" 404; no_internal_header "$tmp/non_direct.headers"
 fi
 status="$(request internal GET "$base/_release_files/android/sha256/$(printf 0%.0s {1..64}).apk")"; expect_status "$status" 404; no_internal_header "$tmp/internal.headers"

@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import sys
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "deploy" / "deploy.sh"
@@ -203,6 +205,24 @@ def test_canary_allows_category_sentinel_only_after_zero_row_database_proof() ->
     assert "delivery_method <> 'direct_apk'" in script
     assert "category_not_empty" in script
     assert script.index("category_not_empty") < script.index("canary_result=passed")
+
+
+def test_canary_proves_each_concrete_uuid_registry_semantics_before_http() -> None:
+    script = _text(CANARY)
+    assert "registry_uuid_count" in script
+    assert "missing_release_id_present" in script
+    assert "withdrawn_release_id_category_mismatch" in script
+    assert "non_direct_release_id_category_mismatch" in script
+    assert "id = :'release_id'::uuid" in script
+    missing_proof = script.index("missing_release_id_present")
+    missing_http = script.index("request missing GET")
+    withdrawn_proof = script.index("withdrawn_release_id_category_mismatch")
+    withdrawn_http = script.index("request withdrawn GET")
+    non_direct_proof = script.index("non_direct_release_id_category_mismatch")
+    non_direct_http = script.index("request non_direct GET")
+    assert missing_proof < missing_http
+    assert withdrawn_proof < withdrawn_http
+    assert non_direct_proof < non_direct_http
 
 
 def test_header_gate_rejects_duplicate_folded_malformed_and_injected_headers(tmp_path: Path) -> None:
@@ -501,3 +521,55 @@ esac''')
     assert " logs " not in docker_calls
     assert " exec " not in docker_calls
     assert " up " not in docker_calls
+
+
+@pytest.mark.parametrize("non_direct_case", ["nonexistent", "wrong_existing_category"])
+def test_canary_rejects_non_direct_uuid_without_matching_registry_row(
+    tmp_path: Path, non_direct_case: str
+) -> None:
+    bin_dir = tmp_path / "bin"; bin_dir.mkdir(); calls = tmp_path / "calls.log"
+    ids = tmp_path / "ids.env"
+    ids.write_bytes((
+        "missing_release_id=11111111-1111-4111-8111-111111111111\n"
+        "withdrawn_release_id=22222222-2222-4222-8222-222222222222\n"
+        "non_direct_release_id=33333333-3333-4333-8333-333333333333\n"
+    ).encode("ascii"))
+    driver = tmp_path / "curl_driver.py"
+    driver.write_text(
+        "import pathlib,sys\nargs=sys.argv[1:]\n"
+        "h=pathlib.Path(args[args.index('--dump-header')+1]); b=pathlib.Path(args[args.index('--output')+1]); u=args[-1]\n"
+        "status=200\n"
+        "if 'lanes/android' in u or '/mandatory' in u or '/webhooks/' in u: status=401\n"
+        "elif '11111111-' in u or '33333333-' in u: status=404\n"
+        "elif '22222222-' in u: status=410\n"
+        "headers=b'HTTP/2 '+str(status).encode()+b'\\r\\n'+(b'Cache-Control: no-store\\r\\n' if 'latest?' in u else b'')+b'\\r\\n'\n"
+        "h.write_bytes(headers); b.write_text('{\"database\":\"connected\"}' if '/health' in u else '{}')\n"
+        "print(status,end='')\n",
+        encoding="utf-8",
+    )
+    _wrapper(bin_dir, "curl", f'exec "{_shell(Path(sys.executable))}" "{_shell(driver)}" "$@"')
+    _wrapper(bin_dir, "python3", f'exec "{_shell(Path(sys.executable))}" "$@"')
+    _wrapper(bin_dir, "stat", 'if [[ "$*" == *"%a:%u:%g"* ]]; then printf "400:0:0\\n"; else exec /usr/bin/stat "$@"; fi')
+    _wrapper(bin_dir, "docker", '''printf "docker %s\n" "$*" >>"$FAKE_CALLS"
+case "$*" in
+  *" ps --status running --services") printf "api\ncaddy\n" ;;
+  *" ps -q api") printf "api-id\n" ;;
+  *" ps -q caddy") printf "caddy-id\n" ;;
+  "inspect api-id --format {{.RestartCount}}"|"inspect caddy-id --format {{.RestartCount}}") printf "2\n" ;;
+  *"id = :'release_id'::uuid AND delivery_method='direct_apk' AND status='withdrawn'"*) printf "1\n" ;;
+  *"id = :'release_id'::uuid AND delivery_method <> 'direct_apk'"*) printf "0\n" ;;
+  *"id = :'release_id'::uuid"*) printf "0\n" ;;
+  *) exit 99 ;;
+esac''')
+    env = os.environ.copy(); env.update({
+        "PATH": _shell(bin_dir) + ":/usr/bin:/bin", "FAKE_CALLS": _shell(calls),
+        "EURITH_PUBLIC_API_URL": "https://example.invalid", "EURITH_CANARY_IDS_FILE": _shell(ids),
+        "NON_DIRECT_CASE": non_direct_case,
+    })
+    result = subprocess.run(
+        [BASH, _shell(CANARY)], cwd=ROOT, env=env,
+        capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode != 0
+    assert "error=non_direct_release_id_category_mismatch" in result.stderr
+    assert " logs " not in calls.read_text()
