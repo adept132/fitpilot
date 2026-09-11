@@ -16,6 +16,7 @@ PUBLISH_GATE = ROOT / "deploy" / "publish-mobile-gate.py"
 MIGRATION_MANIFEST = ROOT / "deploy" / "migration-path-manifest.py"
 MIGRATION_APPROVAL = ROOT / "deploy" / "validate-migration-approval.py"
 REHEARSAL_PROBE = ROOT / "deploy" / "rehearse-release-db.py"
+REHEARSAL_INPUTS = ROOT / "deploy" / "prepare-rehearsal-inputs.py"
 README = ROOT / "deploy" / "README.md"
 CHECKLIST = ROOT / "docs" / "releases" / "update-center-backend-checklist.md"
 BASH = shutil.which("bash") or "D:/Git/usr/bin/bash.exe"
@@ -52,6 +53,7 @@ def test_deploy_orders_irreversible_work_behind_all_preflight_gates() -> None:
     ordered = [
         "gate_checkout",
         "gate_pause",
+        "snapshot_rehearsal_inputs",
         "create_paired_backup",
         "verify_isolated_restore",
         "validate_caddy",
@@ -293,6 +295,42 @@ def test_migration_rehearsal_is_mandatory_and_fail_closed_before_production_muta
     probe = _text(REHEARSAL_PROBE)
     for contract in ("health_check", "alembic_version", "Base.metadata.sorted_tables", "missing_table", "missing_column"):
         assert contract in probe
+
+
+def test_rehearsal_database_url_is_snapshotted_once_and_yaml_paths_are_serialized_safely() -> None:
+    spec = importlib.util.spec_from_file_location("rehearsal_inputs", REHEARSAL_INPUTS)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    local = b"DATABASE_URL=postgresql+asyncpg://restore@127.0.0.1/eurith_restore_release_1\n"
+    assert module.validate_database_url(local) == local
+    for unsafe in (
+        b"DATABASE_URL=postgresql+asyncpg://prod@db.internal/eurith\n",
+        b"DATABASE_URL=postgresql+asyncpg://restore@127.0.0.1/production\n",
+        local + b"DATABASE_URL=postgresql+asyncpg://prod@db.internal/eurith\n",
+    ):
+        try:
+            module.validate_database_url(unsafe)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("unsafe rehearsal database target must be rejected")
+    injected = '/tmp/probe": privileged: true #'
+    overlay = module.overlay_bytes("/tmp/private/restore-db.env", injected).decode("ascii")
+    assert '\\"' in overlay
+    try:
+        module.overlay_bytes("/tmp/private/restore-db.env", "/tmp/probe\n    privileged: true")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("control characters in overlay paths must be rejected")
+    helper = _text(REHEARSAL_INPUTS)
+    for contract in ("O_NOFOLLOW", "dir_fd", "database_url_parent_untrusted", "os.fstat", "_write_all", "os.fsync", "tempfile.mkdtemp", "json.dumps"):
+        assert contract in helper
+    script = _text(DEPLOY)
+    assert 'require_safe_absolute_path "$EURITH_RESTORE_DB_URL_FILE" secret "$SOURCE_DIR"' in script
+    assert '"$REHEARSAL_DB_URL_SNAPSHOT" "$EURITH_RESTORE_VOLUME_ROOT"' in script
+    assert '"$EURITH_BACKUP_ROOT/$BACKUP_GENERATION" "$EURITH_RESTORE_DB_URL_FILE"' not in script
+    assert script.index("CURRENT_STAGE=snapshot_rehearsal_inputs") < script.index("CURRENT_STAGE=create_paired_backup")
 
 
 def test_rollback_restores_both_prior_caddy_topologies() -> None:

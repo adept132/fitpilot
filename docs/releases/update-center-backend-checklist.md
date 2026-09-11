@@ -138,6 +138,8 @@ exact files, and install the exact seven-line root-owned mode `0400`
 `EURITH_MIGRATION_APPROVAL_FILE` described in `deploy/README.md`, outside the
 checkout. Missing/mismatched identity, SHA, Alembic head, path hash, owner, mode,
 symlink status, rollback decision, or reviewer identity is fatal. The deployment
+reads the loopback-only restore URL once through trusted ancestor descriptors and
+uses only a private root-owned snapshot plus safely serialized Compose overlay,
 then upgrades only the isolated `eurith_restore_*` database, runs the target
 health/full ORM schema probe, and runs the exact old backend against that upgraded
 isolated database. Only explicit `rollback_compatible=true` and successful target

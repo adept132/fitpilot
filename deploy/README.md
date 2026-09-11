@@ -76,11 +76,13 @@ sudo ./backend/deploy/verify-release-restore.sh \
 
 Both commands must report matching manifest SHA-256 and zero missing or mismatched
 artifacts. A database dump and release archive are never restored separately.
-The database URL file is root-owned mode `0400` or `0600` and contains exactly
+The database URL file is root-owned mode `0400` and contains exactly
 one `DATABASE_URL=postgresql+asyncpg://.../eurith_restore_*` line for a unique
 loopback-only database. Raw URL-only files are not accepted for deployment
 rehearsal because Compose must inject this isolated URL after the production
-environment file.
+environment file. Deployment opens it through trusted, non-symlink ancestor
+descriptors exactly once, copies the validated bytes into an invocation-private
+root-owned snapshot, and uses only that snapshot for restore and rehearsal.
 
 ## Exact-SHA deployment
 
