@@ -117,26 +117,54 @@ require_catalog_zero() {
 # can make an otherwise disposable restore target non-pristine. PostgreSQL's
 # built-in objects live in system schemas or below FirstNormalObjectId (16384);
 # public and plpgsql are the only allowed initialized-database objects.
-require_catalog_zero "WITH database_objects(object_kind, object_oid) AS (
+require_catalog_zero "WITH allowed_extension_members(class_oid, object_oid) AS (
+  SELECT d.classid, d.objid
+  FROM pg_catalog.pg_depend d
+  JOIN pg_catalog.pg_extension e
+    ON d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass
+   AND d.refobjid=e.oid
+  WHERE d.deptype='e' AND e.extname='plpgsql'
+), database_objects(object_kind, object_oid) AS (
   SELECT 'schema', n.oid FROM pg_catalog.pg_namespace n
-    WHERE n.nspname NOT IN ('public','pg_catalog','information_schema','pg_toast')
-      AND n.nspname !~ '^pg_(temp|toast_temp)_[0-9]+$'
+    WHERE n.oid >= 16384 AND NOT EXISTS (
+      SELECT 1 FROM allowed_extension_members a WHERE a.class_oid='pg_catalog.pg_namespace'::pg_catalog.regclass AND a.object_oid=n.oid)
   UNION ALL SELECT 'relation', c.oid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
-    WHERE n.nspname='public' OR (n.nspname NOT IN ('pg_catalog','information_schema','pg_toast') AND n.nspname !~ '^pg_(temp|toast_temp)_[0-9]+$')
+    WHERE c.oid >= 16384 AND NOT EXISTS (
+      SELECT 1 FROM allowed_extension_members a WHERE a.class_oid='pg_catalog.pg_class'::pg_catalog.regclass AND a.object_oid=c.oid)
   UNION ALL SELECT 'routine', p.oid FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
-    WHERE n.nspname='public' OR (n.nspname NOT IN ('pg_catalog','information_schema','pg_toast') AND n.nspname !~ '^pg_(temp|toast_temp)_[0-9]+$')
+    WHERE p.oid >= 16384 AND NOT EXISTS (
+      SELECT 1 FROM allowed_extension_members a WHERE a.class_oid='pg_catalog.pg_proc'::pg_catalog.regclass AND a.object_oid=p.oid)
   UNION ALL SELECT 'type', t.oid FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace
-    WHERE n.nspname='public' OR (n.nspname NOT IN ('pg_catalog','information_schema','pg_toast') AND n.nspname !~ '^pg_(temp|toast_temp)_[0-9]+$')
+    WHERE t.oid >= 16384 AND NOT EXISTS (
+      SELECT 1 FROM allowed_extension_members a WHERE a.class_oid='pg_catalog.pg_type'::pg_catalog.regclass AND a.object_oid=t.oid)
   UNION ALL SELECT 'extension', e.oid FROM pg_catalog.pg_extension e WHERE e.extname <> 'plpgsql'
-  UNION ALL SELECT 'operator', o.oid FROM pg_catalog.pg_operator o JOIN pg_catalog.pg_namespace n ON n.oid=o.oprnamespace WHERE n.nspname='public'
-  UNION ALL SELECT 'collation', c.oid FROM pg_catalog.pg_collation c JOIN pg_catalog.pg_namespace n ON n.oid=c.collnamespace WHERE n.nspname='public'
-  UNION ALL SELECT 'conversion', c.oid FROM pg_catalog.pg_conversion c JOIN pg_catalog.pg_namespace n ON n.oid=c.connamespace WHERE n.nspname='public'
-  UNION ALL SELECT 'operator_class', o.oid FROM pg_catalog.pg_opclass o JOIN pg_catalog.pg_namespace n ON n.oid=o.opcnamespace WHERE n.nspname='public'
-  UNION ALL SELECT 'operator_family', o.oid FROM pg_catalog.pg_opfamily o JOIN pg_catalog.pg_namespace n ON n.oid=o.opfnamespace WHERE n.nspname='public'
-  UNION ALL SELECT 'text_search_parser', t.oid FROM pg_catalog.pg_ts_parser t JOIN pg_catalog.pg_namespace n ON n.oid=t.prsnamespace WHERE n.nspname='public'
-  UNION ALL SELECT 'text_search_config', t.oid FROM pg_catalog.pg_ts_config t JOIN pg_catalog.pg_namespace n ON n.oid=t.cfgnamespace WHERE n.nspname='public'
-  UNION ALL SELECT 'text_search_dictionary', t.oid FROM pg_catalog.pg_ts_dict t JOIN pg_catalog.pg_namespace n ON n.oid=t.dictnamespace WHERE n.nspname='public'
-  UNION ALL SELECT 'text_search_template', t.oid FROM pg_catalog.pg_ts_template t JOIN pg_catalog.pg_namespace n ON n.oid=t.tmplnamespace WHERE n.nspname='public'
+  UNION ALL SELECT 'operator', o.oid FROM pg_catalog.pg_operator o JOIN pg_catalog.pg_namespace n ON n.oid=o.oprnamespace
+    WHERE o.oid >= 16384 AND NOT EXISTS (
+      SELECT 1 FROM allowed_extension_members a WHERE a.class_oid='pg_catalog.pg_operator'::pg_catalog.regclass AND a.object_oid=o.oid)
+  UNION ALL SELECT 'collation', c.oid FROM pg_catalog.pg_collation c JOIN pg_catalog.pg_namespace n ON n.oid=c.collnamespace
+    WHERE c.oid >= 16384 AND NOT EXISTS (
+      SELECT 1 FROM allowed_extension_members a WHERE a.class_oid='pg_catalog.pg_collation'::pg_catalog.regclass AND a.object_oid=c.oid)
+  UNION ALL SELECT 'conversion', c.oid FROM pg_catalog.pg_conversion c JOIN pg_catalog.pg_namespace n ON n.oid=c.connamespace
+    WHERE c.oid >= 16384 AND NOT EXISTS (
+      SELECT 1 FROM allowed_extension_members a WHERE a.class_oid='pg_catalog.pg_conversion'::pg_catalog.regclass AND a.object_oid=c.oid)
+  UNION ALL SELECT 'operator_class', o.oid FROM pg_catalog.pg_opclass o JOIN pg_catalog.pg_namespace n ON n.oid=o.opcnamespace
+    WHERE o.oid >= 16384 AND NOT EXISTS (
+      SELECT 1 FROM allowed_extension_members a WHERE a.class_oid='pg_catalog.pg_opclass'::pg_catalog.regclass AND a.object_oid=o.oid)
+  UNION ALL SELECT 'operator_family', o.oid FROM pg_catalog.pg_opfamily o JOIN pg_catalog.pg_namespace n ON n.oid=o.opfnamespace
+    WHERE o.oid >= 16384 AND NOT EXISTS (
+      SELECT 1 FROM allowed_extension_members a WHERE a.class_oid='pg_catalog.pg_opfamily'::pg_catalog.regclass AND a.object_oid=o.oid)
+  UNION ALL SELECT 'text_search_parser', t.oid FROM pg_catalog.pg_ts_parser t JOIN pg_catalog.pg_namespace n ON n.oid=t.prsnamespace
+    WHERE t.oid >= 16384 AND NOT EXISTS (
+      SELECT 1 FROM allowed_extension_members a WHERE a.class_oid='pg_catalog.pg_ts_parser'::pg_catalog.regclass AND a.object_oid=t.oid)
+  UNION ALL SELECT 'text_search_config', t.oid FROM pg_catalog.pg_ts_config t JOIN pg_catalog.pg_namespace n ON n.oid=t.cfgnamespace
+    WHERE t.oid >= 16384 AND NOT EXISTS (
+      SELECT 1 FROM allowed_extension_members a WHERE a.class_oid='pg_catalog.pg_ts_config'::pg_catalog.regclass AND a.object_oid=t.oid)
+  UNION ALL SELECT 'text_search_dictionary', t.oid FROM pg_catalog.pg_ts_dict t JOIN pg_catalog.pg_namespace n ON n.oid=t.dictnamespace
+    WHERE t.oid >= 16384 AND NOT EXISTS (
+      SELECT 1 FROM allowed_extension_members a WHERE a.class_oid='pg_catalog.pg_ts_dict'::pg_catalog.regclass AND a.object_oid=t.oid)
+  UNION ALL SELECT 'text_search_template', t.oid FROM pg_catalog.pg_ts_template t JOIN pg_catalog.pg_namespace n ON n.oid=t.tmplnamespace
+    WHERE t.oid >= 16384 AND NOT EXISTS (
+      SELECT 1 FROM allowed_extension_members a WHERE a.class_oid='pg_catalog.pg_ts_template'::pg_catalog.regclass AND a.object_oid=t.oid)
   UNION ALL SELECT 'foreign_data_wrapper', f.oid FROM pg_catalog.pg_foreign_data_wrapper f
   UNION ALL SELECT 'foreign_server', s.oid FROM pg_catalog.pg_foreign_server s
   UNION ALL SELECT 'user_mapping', u.oid FROM pg_catalog.pg_user_mapping u
@@ -144,7 +172,9 @@ require_catalog_zero "WITH database_objects(object_kind, object_oid) AS (
   UNION ALL SELECT 'large_object', l.oid FROM pg_catalog.pg_largeobject_metadata l
   UNION ALL SELECT 'event_trigger', e.oid FROM pg_catalog.pg_event_trigger e
   UNION ALL SELECT 'default_acl', d.oid FROM pg_catalog.pg_default_acl d
-  UNION ALL SELECT 'extended_statistics', s.oid FROM pg_catalog.pg_statistic_ext s JOIN pg_catalog.pg_namespace n ON n.oid=s.stxnamespace WHERE n.nspname='public'
+  UNION ALL SELECT 'extended_statistics', s.oid FROM pg_catalog.pg_statistic_ext s JOIN pg_catalog.pg_namespace n ON n.oid=s.stxnamespace
+    WHERE s.oid >= 16384 AND NOT EXISTS (
+      SELECT 1 FROM allowed_extension_members a WHERE a.class_oid='pg_catalog.pg_statistic_ext'::pg_catalog.regclass AND a.object_oid=s.oid)
   UNION ALL SELECT 'language', l.oid FROM pg_catalog.pg_language l WHERE l.lanname NOT IN ('internal','c','sql','plpgsql')
   UNION ALL SELECT 'cast', c.oid FROM pg_catalog.pg_cast c WHERE c.oid >= 16384
   UNION ALL SELECT 'transform', t.oid FROM pg_catalog.pg_transform t WHERE t.oid >= 16384

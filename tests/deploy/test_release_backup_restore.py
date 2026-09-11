@@ -657,6 +657,21 @@ def test_real_disposable_postgresql_paired_roundtrip(tmp_path: Path) -> None:
         assert backup.returncode == 0, backup.stderr
         generations = list(output.iterdir())
         assert len(generations) == 1
+
+        # A restore target is disposable only when it still matches the
+        # initialized-database baseline.  Namespace allowlists are unsafe:
+        # a privileged user can create ordinary objects in pg_catalog too.
+        sql(
+            "CREATE FUNCTION pg_catalog.eurith_restore_pristine_probe() "
+            "RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$",
+            restore_database,
+        )
+        contaminated_restore = run_script(RESTORE, generations[0], restore_url_file, restore_root)
+        assert contaminated_restore.returncode != 0, contaminated_restore.stdout
+        assert "restore_database_not_empty" in contaminated_restore.stderr
+        assert not any(restore_root.iterdir())
+        sql("DROP FUNCTION pg_catalog.eurith_restore_pristine_probe()", restore_database)
+
         restore = run_script(RESTORE, generations[0], restore_url_file, restore_root)
         assert restore.returncode == 0, restore.stderr
         assert "rows=2" in restore.stdout and "files=1" in restore.stdout
