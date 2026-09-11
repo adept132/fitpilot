@@ -227,6 +227,24 @@ def test_migration_gate_allows_only_known_additive_operations_and_rejects_dynami
             "op.add_column = destructive\n"
             "def upgrade():\n    op.add_column('items', sa.Column('label', sa.String(20), nullable=True))\n"
         ),
+        "upgrade-import-shadow": (
+            "from alembic import op\nimport sqlalchemy as sa\n"
+            "def upgrade():\n"
+            "    import api.destructive_migration as op\n"
+            "    op.add_column('items', sa.Column('label', sa.String(20), nullable=True))\n"
+        ),
+        "nested-helper": (
+            "from alembic import op\nimport sqlalchemy as sa\n"
+            "def upgrade():\n    def helper():\n        op.add_column('x', sa.Column('y', sa.String()))\n    helper()\n"
+        ),
+        "lambda-helper": (
+            "from alembic import op\nimport sqlalchemy as sa\n"
+            "def upgrade():\n    helper = lambda: op.add_column('x', sa.Column('y', sa.String()))\n    helper()\n"
+        ),
+        "comprehension-shadow": (
+            "from alembic import op\nimport sqlalchemy as sa\n"
+            "def upgrade():\n    [op.add_column('x', sa.Column('y', sa.String())) for op in [object()]]\n"
+        ),
     }
     for name, source in invalid_sources.items():
         candidate = tmp_path / f"{name}.py"; candidate.write_text(source, encoding="utf-8")

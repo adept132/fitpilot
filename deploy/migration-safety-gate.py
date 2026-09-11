@@ -109,6 +109,26 @@ def validate(path: Path) -> None:
         raise ValueError("canonical_import_missing")
     parents = {child: parent for parent in ast.walk(upgrade) for child in ast.iter_child_nodes(parent)}
     for node in ast.walk(upgrade):
+        if node is not upgrade and isinstance(
+            node,
+            (
+                ast.AsyncFunctionDef,
+                ast.ClassDef,
+                ast.FunctionDef,
+                ast.Global,
+                ast.Import,
+                ast.ImportFrom,
+                ast.Lambda,
+                ast.Nonlocal,
+            ),
+        ):
+            raise ValueError("nested_scope_or_import_rejected")
+        if isinstance(node, (ast.AsyncFor, ast.AsyncWith, ast.For, ast.If, ast.Match, ast.Try, ast.While, ast.With)):
+            raise ValueError("control_flow_rejected")
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            raise ValueError("comprehension_rejected")
+        if isinstance(node, ast.ExceptHandler) and node.name in RESERVED_BINDINGS:
+            raise ValueError("canonical_binding_shadowed")
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)) and node.id in RESERVED_BINDINGS:
             raise ValueError("canonical_binding_reassigned")
         if isinstance(node, ast.arg) and node.arg in RESERVED_BINDINGS:
