@@ -129,6 +129,29 @@ Compose hash, Caddy tag/digest, single Alembic head/path, backup-manifest hash,
 canary and log-review results, and rollback result. It must contain no secret,
 database URL, internal handoff path, or artifact filesystem path.
 
+Resolve the approved Caddy image to a digest and run Compose with
+`caddy:2.11.4@sha256:<approved-digest>` and pulls disabled during the switch.
+Before migration, restore the paired backup in isolation, compare its reported
+manifest hash to the backup result, rehearse the target upgrade plus exact old
+backend rollback, and install the exact four-line root-owned mode `0400`
+`EURITH_MIGRATION_APPROVAL_FILE` described in `deploy/README.md`. Missing or
+mismatched approval is fatal. Any partial migration attempt is
+`migration_state=unknown`, requires manual investigation, and forbids automatic
+database restore/downgrade.
+
+The public URL must be a structurally valid HTTPS origin with no credentials,
+query, or fragment. Canary IDs are an exact three-key root-owned mode `0400`
+file; the ordinary public probe is the fixed `/openapi.json` status-`200` route.
+After bounded readiness retries, verify exact parsed headers, at most 250 MiB
+artifact metadata, container identity/restart delta, and Compose-native bounded
+logs. Header ambiguity, redirects leaking an internal header, malformed headers,
+restart delta, or timeout is fatal.
+
+Store evidence outside checkout and release storage in a root-owned mode `0700`
+directory. The mobile gate must be an absolute nonexistent direct child. Publish
+it last, atomically and exclusively, only after fsync of evidence containing UTC
+completion time, evidence hash inputs, named stage results, and rollback result.
+
 Monitor framing failures, internal-handoff `502`, unavailable-artifact `503`,
 download `5xx`, unexpected `404`/`413`, permission denials, restarts, range
 failures, and free space below 20%. A failed check keeps mobile blocked and may

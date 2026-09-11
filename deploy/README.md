@@ -34,7 +34,9 @@ than overwrites `/etc/eurith/api-release.env`,
 It resolves the API UID and `eurith-releases` GID, enforces setgid directories,
 creates the dedicated final-artifact view, and proves API atomic finalize plus
 Caddy read-only and `nosymfollow` behavior. Caddy is exactly `caddy:2.11.4`;
-record its immutable digest at deployment.
+resolve and approve its immutable digest before deployment. The deployer pulls,
+validates, and starts `caddy:2.11.4@sha256:<approved-digest>`; the mutable tag is
+never used to start the release service.
 
 Credential rotation is one credential at a time: pause publication, withdrawal,
 mandatory changes, and cleanup; update the named external consumer and protected
@@ -42,18 +44,19 @@ source together; atomically replace the complete API env file as root; run
 provisioning verification and negative-auth canaries; then resume. Never silently
 regenerate a partial or unexpected protected installation.
 
-Create `/etc/eurith/release-canary-ids.env` as root-owned `0400` (or `0640`) with
-known existing records and one unrelated safe public route:
+Create `/etc/eurith/release-canary-ids.env` as root-owned `root:root` mode `0400`
+with exactly these three known records:
 
 ```text
 missing_release_id=<uuid-known-not-to-exist>
 withdrawn_release_id=<existing-withdrawn-direct-uuid>
 non_direct_release_id=<existing-eas-or-play-uuid>
-unrelated_public_path=/openapi.json
 ```
 
 These rows are operational fixtures retained in the registry; the canary never
-creates or changes a release.
+creates or changes a release. The ordinary public probe is fixed to the
+allowlisted `/openapi.json` route with expected status `200`; arbitrary paths or
+expected statuses are rejected.
 
 ## Backup and isolated restore
 
@@ -88,6 +91,22 @@ the exact previous production checkout while the new versioned deployment code
 runs; invoking the old checkout's script or pre-switching production source is
 rejected.
 
+After restoring a production snapshot into isolation, rehearse the target
+upgrade and prove that the exact old backend can still run against the upgraded
+schema. Only then create a root-owned `root:root` mode `0400` approval file:
+
+```text
+old_backend_sha=<previous-backend-full-sha>
+new_backend_sha=<backend-full-sha>
+classification=additive
+rollback_rehearsal=passed
+```
+
+The file must contain exactly those four lines. A missing/mismatched approval,
+destructive migration, failed rehearsal, or any partially attempted migration
+is fail-closed. A partial attempt is recorded as `migration_state=unknown` and
+requires manual database investigation; it never triggers an automatic restore.
+
 ```bash
 git -C /opt/eurith/backend fetch --prune origin
 git -C /opt/eurith/backend worktree add --detach \
@@ -97,6 +116,7 @@ sudo RELEASE_MUTATIONS_PAUSED=1 \
   EURITH_BASE_COMPOSE=/opt/eurith/docker-compose.yml \
   EURITH_PUBLIC_API_URL=https://api.eurith.app \
   EURITH_APPROVED_CADDY_DIGEST=sha256:<reviewed-64-hex-digest> \
+  EURITH_MIGRATION_APPROVAL_FILE=/etc/eurith/migration-approval-<backend-full-sha>.env \
   EURITH_RESTORE_DB_URL_FILE=/etc/eurith/restore-database-url \
   EURITH_RESTORE_VOLUME_ROOT=/opt/eurith/restore-drill/<unique-empty-generation> \
   TEST_DATABASE_URL=postgresql+asyncpg://localhost/fitpilot_task_caddy_<unique> \
@@ -107,7 +127,8 @@ sudo RELEASE_MUTATIONS_PAUSED=1 \
 The sequence is: provenance and pause gates; paired backup; isolated restore;
 Compose and Caddy fmt/adapt/validate; required real loopback Caddy integration;
 one-head and migration-path gate; exact API build; one migration; coordinated
-API+Caddy switch; public canaries; bounded log review; mobile gate.
+API+Caddy switch with image pulls disabled; bounded readiness retries; public
+canaries; Compose-native bounded log review; mobile gate.
 
 Run canaries independently with the same protected inputs:
 
@@ -120,9 +141,16 @@ sudo EURITH_PUBLIC_API_URL=https://api.eurith.app \
 The canary checks health/database, `Cache-Control: no-store`, absent and wrong
 publisher/operator credentials, bad webhook signature, missing/withdrawn/non-direct
 downloads, internal-path denial and header leakage, unrelated API behavior,
-container restarts, free space, and—when one already exists—full and one-byte range
+container identity and restart-count delta, free space, and—when one already exists—full and one-byte range
 delivery of a published direct APK. With no published direct APK it records
 `existing_direct_apk=not_applicable` and inserts nothing.
+
+Keep `EURITH_EVIDENCE_ROOT` outside both the checkout and release storage, owned
+by `root:root` mode `0700`. `MOBILE_GATE_FILE` must be an absolute, nonexistent
+file directly below that directory. The deployer fsyncs the completed evidence,
+records named stage failures, rollback outcome, UTC completion timestamp, and
+evidence SHA-256, then publishes the root-only gate exactly once with an atomic
+exclusive link. A pre-existing gate or failed durability step blocks mobile.
 
 ## Monitoring, rollback, and withdrawal
 

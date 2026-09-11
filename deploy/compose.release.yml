@@ -10,7 +10,7 @@ services:
       - "8000"
 
   caddy:
-    image: caddy:2.11.4
+    image: "${CADDY_IMAGE_REF:-caddy:2.11.4}"
     restart: unless-stopped
     depends_on:
       api:

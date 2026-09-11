@@ -67,7 +67,7 @@ def test_compose_keeps_api_private_and_mounts_only_required_release_paths() -> N
 
     caddy = compose["services"]["caddy"]
     assert caddy == {
-        "image": "caddy:2.11.4",
+        "image": "${CADDY_IMAGE_REF:-caddy:2.11.4}",
         "restart": "unless-stopped",
         "depends_on": {"api": {"condition": "service_started"}},
         "entrypoint": ["/bin/sh", "/usr/local/bin/caddy-entrypoint.sh"],
