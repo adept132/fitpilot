@@ -14,6 +14,7 @@ Revises: 20260909_02
 from __future__ import annotations
 
 import importlib
+import re
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -33,22 +34,22 @@ class SchemaReconciliationError(RuntimeError):
 
 
 _NOTIFICATION_COLUMNS = {
-    "message_key": ("varchar", 128, True),
-    "message_params": ("jsonb", None, True),
+    "message_key": ("varchar", 128, True, None),
+    "message_params": ("jsonb", None, True, None),
 }
 _EXERCISE_COLUMNS = {
-    "name_en": ("varchar", 200, True),
-    "description_en": ("text", None, True),
+    "name_en": ("varchar", 200, True, None),
+    "description_en": ("text", None, True, None),
 }
 _LANE_COLUMNS = {
-    "platform": ("varchar", 16, False),
-    "channel": ("varchar", 32, False),
-    "expected_source_commit": ("char", 40, False),
-    "expected_ci_run_id": ("varchar", 128, True),
-    "updated_at": ("timestamptz", None, False),
+    "platform": ("varchar", 16, False, None),
+    "channel": ("varchar", 32, False, None),
+    "expected_source_commit": ("char", 40, False, None),
+    "expected_ci_run_id": ("varchar", 128, True, None),
+    "updated_at": ("timestamptz", None, False, "now()"),
 }
 _RELEASE_BASE_COLUMNS = {
-    "id": ("uuid", None, False),
+    "id": ("uuid", None, False, None),
     "platform": ("varchar", 16, False),
     "channel": ("varchar", 32, False),
     "delivery_method": ("varchar", 24, False),
@@ -57,8 +58,8 @@ _RELEASE_BASE_COLUMNS = {
     "runtime_version": ("varchar", 255, True),
     "fingerprint": ("varchar", 128, True),
     "release_notes": ("jsonb", None, False),
-    "status": ("varchar", 16, False),
-    "is_mandatory": ("boolean", None, False),
+    "status": ("varchar", 16, False, "'published'"),
+    "is_mandatory": ("boolean", None, False, "false"),
     "min_supported_version_code": ("integer", None, True),
     "artifact_storage_key": ("varchar", 255, True),
     "artifact_sha256": ("char", 64, True),
@@ -68,34 +69,38 @@ _RELEASE_BASE_COLUMNS = {
     "idempotency_key": ("varchar", 128, False),
     "eas_build_id": ("varchar", 128, True),
     "eas_update_group_id": ("varchar", 128, True),
-    "published_at": ("timestamptz", None, False),
+    "published_at": ("timestamptz", None, False, "now()"),
     "withdrawn_at": ("timestamptz", None, True),
     "withdrawal_reason": ("varchar", 500, True),
     "mandatory_changed_at": ("timestamptz", None, True),
     "artifact_deleted_at": ("timestamptz", None, True),
-    "created_at": ("timestamptz", None, False),
-    "updated_at": ("timestamptz", None, False),
+    "created_at": ("timestamptz", None, False, "now()"),
+    "updated_at": ("timestamptz", None, False, "now()"),
 }
+for _column_name, _signature in tuple(_RELEASE_BASE_COLUMNS.items()):
+    if len(_signature) == 3:
+        _RELEASE_BASE_COLUMNS[_column_name] = (*_signature, None)
 _LANE_CHECKS = {
-    "ck_app_release_lanes_platform",
-    "ck_app_release_lanes_channel",
-    "ck_app_release_lanes_expected_source_commit",
+    "ck_app_release_lanes_platform": "platform = 'android'",
+    "ck_app_release_lanes_channel": "channel IN ('production-direct', 'production-play')",
+    "ck_app_release_lanes_expected_source_commit": "expected_source_commit::text ~ '^[0-9a-f]{40}$'",
 }
 _RELEASE_BASE_CHECKS = {
-    "ck_app_releases_platform",
-    "ck_app_releases_channel",
-    "ck_app_releases_delivery_method",
-    "ck_app_releases_version_code_positive",
-    "ck_app_releases_version_name",
-    "ck_app_releases_min_supported_version",
-    "ck_app_releases_artifact_sha256",
-    "ck_app_releases_source_commit",
-    "ck_app_releases_release_notes",
-    "ck_app_releases_delivery_payload",
-    "ck_app_releases_non_apk_artifact_fields",
-    "ck_app_releases_status",
-    "ck_app_releases_withdrawal_state",
+    "ck_app_releases_platform": "platform = 'android'",
+    "ck_app_releases_channel": "channel IN ('production-direct', 'production-play')",
+    "ck_app_releases_delivery_method": "delivery_method IN ('direct_apk', 'eas_update', 'google_play')",
+    "ck_app_releases_version_code_positive": "version_code > 0",
+    "ck_app_releases_version_name": "version_name ~ '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$'",
+    "ck_app_releases_min_supported_version": "min_supported_version_code IS NULL OR min_supported_version_code <= version_code",
+    "ck_app_releases_artifact_sha256": "artifact_sha256 IS NULL OR artifact_sha256::text ~ '^[0-9a-f]{64}$'",
+    "ck_app_releases_source_commit": "source_commit::text ~ '^[0-9a-f]{40}$'",
+    "ck_app_releases_release_notes": "release_notes ? 'ru' AND release_notes ? 'en' AND jsonb_typeof(release_notes) = 'object' AND jsonb_typeof(release_notes->'ru') = 'string' AND btrim(release_notes->>'ru') <> '' AND jsonb_typeof(release_notes->'en') = 'string' AND btrim(release_notes->>'en') <> ''",
+    "ck_app_releases_delivery_payload": "(delivery_method = 'direct_apk' AND artifact_storage_key IS NOT NULL AND artifact_sha256 IS NOT NULL AND artifact_size_bytes > 0) OR (delivery_method = 'eas_update' AND eas_update_group_id IS NOT NULL AND runtime_version IS NOT NULL AND artifact_storage_key IS NULL) OR (delivery_method = 'google_play' AND artifact_storage_key IS NULL)",
+    "ck_app_releases_non_apk_artifact_fields": "delivery_method = 'direct_apk' OR (artifact_sha256 IS NULL AND artifact_size_bytes IS NULL)",
+    "ck_app_releases_status": "status IN ('published', 'withdrawn')",
+    "ck_app_releases_withdrawal_state": "(status = 'published' AND withdrawn_at IS NULL AND withdrawal_reason IS NULL) OR (status = 'withdrawn' AND withdrawn_at IS NOT NULL AND withdrawal_reason IS NOT NULL)",
 }
+_EAS_CHECK = "delivery_method = 'eas_update' OR eas_update_id IS NULL"
 
 
 def _type_signature(type_: Any) -> tuple[str, int | None]:
@@ -120,9 +125,51 @@ def _type_signature(type_: Any) -> tuple[str, int | None]:
     return (type(type_).__name__.lower(), getattr(type_, "length", None))
 
 
-def _columns(inspector: Any, table: str) -> dict[str, tuple[str, int | None, bool]]:
+def _sql_signature(value: Any) -> str | None:
+    if value is None:
+        return None
+    raw = str(value)
+    pieces: list[str] = []
+    index = 0
+    in_literal = False
+    while index < len(raw):
+        character = raw[index]
+        if in_literal:
+            pieces.append(character)
+            if character == "'":
+                if index + 1 < len(raw) and raw[index + 1] == "'":
+                    pieces.append("'")
+                    index += 1
+                else:
+                    in_literal = False
+        elif character == "'":
+            in_literal = True
+            pieces.append(character)
+        elif not character.isspace():
+            pieces.append(character.lower())
+        index += 1
+    if in_literal:
+        raise SchemaReconciliationError("unterminated SQL literal")
+    normalized = "".join(pieces)
+    normalized = re.sub(r"::(?:text|charactervarying|boolean|integer|bigint)", "", normalized)
+    while normalized.startswith("(") and normalized.endswith(")"):
+        depth = 0
+        enclosed = True
+        for index, character in enumerate(normalized):
+            depth += character == "("
+            depth -= character == ")"
+            if depth == 0 and index != len(normalized) - 1:
+                enclosed = False
+                break
+        if not enclosed:
+            break
+        normalized = normalized[1:-1]
+    return normalized
+
+
+def _columns(inspector: Any, table: str) -> dict[str, tuple[str, int | None, bool, str | None]]:
     return {
-        item["name"]: (*_type_signature(item["type"]), bool(item["nullable"]))
+        item["name"]: (*_type_signature(item["type"]), bool(item["nullable"]), _sql_signature(item.get("default")))
         for item in inspector.get_columns(table)
     }
 
@@ -130,7 +177,7 @@ def _columns(inspector: Any, table: str) -> dict[str, tuple[str, int | None, boo
 def _require_exact_columns(
     inspector: Any,
     table: str,
-    expected: Mapping[str, tuple[str, int | None, bool]],
+    expected: Mapping[str, tuple[str, int | None, bool, str | None]],
 ) -> None:
     actual = _columns(inspector, table)
     if actual != dict(expected):
@@ -144,19 +191,30 @@ def _named(items: Sequence[Mapping[str, Any]]) -> set[str]:
     return {str(item["name"]) for item in items if item.get("name")}
 
 
+def _require_exact_checks(inspector: Any, table: str, expected: Mapping[str, str]) -> None:
+    checks = inspector.get_check_constraints(table)
+    if any(not item.get("name") or item.get("sqltext") is None for item in checks):
+        raise SchemaReconciliationError(f"incompatible {table} check constraints")
+    actual = {
+        str(item.get("name")): _sql_signature(item.get("sqltext"))
+        for item in checks
+    }
+    wanted = {name: _sql_signature(sqltext) for name, sqltext in expected.items()}
+    if actual != wanted:
+        raise SchemaReconciliationError(f"incompatible {table} check constraints")
+
+
 def _predicate_signature(item: Mapping[str, Any]) -> str:
-    value = str((item.get("dialect_options") or {}).get("postgresql_where") or "")
-    value = "".join(value.lower().split()).replace("::text", "")
-    while value.startswith("(") and value.endswith(")"):
-        value = value[1:-1]
-    return value
+    return _sql_signature(
+        (item.get("dialect_options") or {}).get("postgresql_where")
+    ) or ""
 
 
 def _plan_optional_columns(
     inspector: Any,
     *,
     table: str,
-    expected: Mapping[str, tuple[str, int | None, bool]],
+    expected: Mapping[str, tuple[str, int | None, bool, str | None]],
     action: str,
 ) -> list[str]:
     actual = _columns(inspector, table)
@@ -176,7 +234,7 @@ def _validate_release_base(inspector: Any) -> None:
     release_columns = _columns(inspector, "app_releases")
     allowed = dict(_RELEASE_BASE_COLUMNS)
     if "eas_update_id" in release_columns:
-        allowed["eas_update_id"] = ("varchar", 128, True)
+        allowed["eas_update_id"] = ("varchar", 128, True, None)
     if release_columns != allowed:
         raise SchemaReconciliationError("incompatible app_releases columns")
 
@@ -187,39 +245,62 @@ def _validate_release_base(inspector: Any) -> None:
         raise SchemaReconciliationError("incompatible app_release_lanes primary key")
     if inspector.get_pk_constraint("app_releases").get("constrained_columns") != ["id"]:
         raise SchemaReconciliationError("incompatible app_releases primary key")
-    if not _LANE_CHECKS.issubset(_named(inspector.get_check_constraints("app_release_lanes"))):
-        raise SchemaReconciliationError("missing app_release_lanes checks")
-    if not _RELEASE_BASE_CHECKS.issubset(_named(inspector.get_check_constraints("app_releases"))):
-        raise SchemaReconciliationError("missing app_releases checks")
+    _require_exact_checks(inspector, "app_release_lanes", _LANE_CHECKS)
+    release_checks = dict(_RELEASE_BASE_CHECKS)
+    if "eas_update_id" in release_columns:
+        release_checks["ck_app_releases_eas_update_id_delivery"] = _EAS_CHECK
+    _require_exact_checks(inspector, "app_releases", release_checks)
+    if inspector.get_foreign_keys("app_release_lanes") or inspector.get_foreign_keys("app_releases"):
+        raise SchemaReconciliationError("unexpected release foreign key")
+    if inspector.get_unique_constraints("app_release_lanes") or inspector.get_indexes("app_release_lanes"):
+        raise SchemaReconciliationError("unexpected app_release_lanes index or unique constraint")
 
     uniques = {
         item.get("name"): tuple(item.get("column_names") or ())
         for item in inspector.get_unique_constraints("app_releases")
     }
-    if uniques.get("uq_app_releases_idempotency_key") != ("idempotency_key",):
-        raise SchemaReconciliationError("missing release idempotency constraint")
-    if uniques.get("uq_app_releases_eas_update_group_id") != ("eas_update_group_id",):
-        raise SchemaReconciliationError("missing EAS group constraint")
+    expected_uniques = {
+        "uq_app_releases_idempotency_key": ("idempotency_key",),
+        "uq_app_releases_eas_update_group_id": ("eas_update_group_id",),
+    }
+    if "eas_update_id" in release_columns:
+        expected_uniques["uq_app_releases_eas_update_id"] = ("eas_update_id",)
+    if uniques != expected_uniques:
+        raise SchemaReconciliationError("incompatible release unique constraints")
+    index_items = [
+        item
+        for item in inspector.get_indexes("app_releases")
+        if not item.get("duplicates_constraint")
+    ]
+    for item in index_items:
+        dialect_options = item.get("dialect_options") or {}
+        if set(dialect_options) - {"postgresql_where"}:
+            raise SchemaReconciliationError("incompatible release index options")
     indexes = {
         item.get("name"): (
             bool(item.get("unique")),
             tuple(item.get("column_names") or ()),
             _predicate_signature(item),
+            tuple(
+                sorted(
+                    (str(column), tuple(options))
+                    for column, options in (item.get("column_sorting") or {}).items()
+                )
+            ),
         )
-        for item in inspector.get_indexes("app_releases")
+        for item in index_items
     }
-    if indexes.get("uq_app_releases_direct_version") != (
-        True,
-        ("platform", "channel", "version_code"),
-        "delivery_method='direct_apk'",
-    ):
-        raise SchemaReconciliationError("missing direct release unique index")
-    if indexes.get("ix_app_releases_latest_published") != (
-        False,
-        ("platform", "channel", "version_code", "published_at"),
-        "status='published'",
-    ):
-        raise SchemaReconciliationError("missing latest release index")
+    expected_indexes = {
+        "uq_app_releases_direct_version": (True, ("platform", "channel", "version_code"), "delivery_method='direct_apk'", ()),
+        "ix_app_releases_latest_published": (
+            False,
+            ("platform", "channel", "version_code", "published_at"),
+            "status='published'",
+            (("published_at", ("desc",)), ("version_code", ("desc",))),
+        ),
+    }
+    if indexes != expected_indexes:
+        raise SchemaReconciliationError("incompatible release indexes")
 
 
 def _plan_eas_extension(inspector: Any) -> list[str]:
@@ -237,7 +318,7 @@ def _plan_eas_extension(inspector: Any) -> list[str]:
         return ["eas_update_id"]
     if state != (True, True, True):
         raise SchemaReconciliationError("partial EAS update ID schema")
-    if columns["eas_update_id"] != ("varchar", 128, True):
+    if columns["eas_update_id"] != ("varchar", 128, True, None):
         raise SchemaReconciliationError("incompatible app_releases.eas_update_id")
     eas_unique = next(
         item for item in unique_items if item.get("name") == "uq_app_releases_eas_update_id"
