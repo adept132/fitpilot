@@ -255,6 +255,14 @@ def test_migration_gate_allows_only_known_additive_operations_and_rejects_dynami
             "def downgrade() -> op.execute('TRUNCATE app_releases'):\n    pass\n"
             "def upgrade():\n    op.add_column('items', sa.Column('label', sa.String(20), nullable=True))\n"
         ),
+        "generator-upgrade": (
+            "from alembic import op\nimport sqlalchemy as sa\n"
+            "def upgrade():\n    yield op.add_column('items', sa.Column('label', sa.String(20)))\n"
+        ),
+        "unreachable-upgrade": (
+            "from alembic import op\nimport sqlalchemy as sa\n"
+            "def upgrade():\n    return\n    op.add_column('items', sa.Column('label', sa.String(20)))\n"
+        ),
     }
     for name, source in invalid_sources.items():
         candidate = tmp_path / f"{name}.py"; candidate.write_text(source, encoding="utf-8")

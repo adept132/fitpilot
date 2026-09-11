@@ -120,6 +120,14 @@ def validate(path: Path) -> None:
             raise ValueError("module_statement_rejected")
     if alembic_imports != 1 or sqlalchemy_imports != 1:
         raise ValueError("canonical_import_missing")
+    if not upgrade.body:
+        raise ValueError("upgrade_body_empty")
+    for statement in upgrade.body:
+        if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+            raise ValueError("upgrade_statement_rejected")
+        operation = _call_path(statement.value.func)
+        if operation is None or len(operation) != 2 or operation[0] != "op" or operation[1] not in ALLOWED_OP_CALLS:
+            raise ValueError("upgrade_operation_rejected")
     parents = {child: parent for parent in ast.walk(upgrade) for child in ast.iter_child_nodes(parent)}
     for node in ast.walk(upgrade):
         if node is not upgrade and isinstance(
