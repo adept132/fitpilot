@@ -285,6 +285,19 @@ def test_migration_gate_allows_only_known_additive_operations_and_rejects_dynami
             "    op.create_index('ix_items_x', 'items', ['x'], "
             "postgresql_ops={'x': 'int4_ops); DROP TABLE app_releases; --'})\n"
         ),
+        "nested-index-postgresql-ops-injection": (
+            "from alembic import op\nimport sqlalchemy as sa\n"
+            "def upgrade():\n"
+            "    op.create_table('items', sa.Column('x', sa.Integer()), "
+            "sa.Index('ix_items_x', 'x', "
+            "postgresql_ops={'x': 'int4_ops); DROP TABLE app_releases; --'}))\n"
+        ),
+        "nested-index-benign": (
+            "from alembic import op\nimport sqlalchemy as sa\n"
+            "def upgrade():\n"
+            "    op.create_table('items', sa.Column('x', sa.Integer()), "
+            "sa.Index('ix_items_x', 'x'))\n"
+        ),
         "unreachable-upgrade": (
             "from alembic import op\nimport sqlalchemy as sa\n"
             "def upgrade():\n    return\n    op.add_column('items', sa.Column('label', sa.String(20)))\n"

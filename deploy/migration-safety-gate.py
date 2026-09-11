@@ -30,7 +30,6 @@ ALLOWED_CONSTRUCTORS = {
     "Float",
     "ForeignKey",
     "ForeignKeyConstraint",
-    "Index",
     "Integer",
     "JSON",
     "JSONB",
