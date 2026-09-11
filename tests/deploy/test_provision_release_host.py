@@ -186,7 +186,17 @@ elif command == "docker":
         if os.environ.get("FAKE_DOCKER_BUILD_FAIL") == "1": sys.exit(13)
         print(os.environ.get("FAKE_TARGET_IMAGE_ID", "sha256:" + "a" * 64)); sys.exit(0)
     if "--entrypoint id" in joined and joined.endswith(" -u") and " compose " not in (" " + joined + " "):
-        print(os.environ.get("FAKE_TARGET_API_UID", "1234")); sys.exit(0)
+        count_path = state_dir / "api-uid-probe-count"
+        count = int(count_path.read_text()) if count_path.exists() else 0
+        count_path.write_text(str(count + 1))
+        uid_key = "FAKE_COMPOSE_API_UID" if count else "FAKE_TARGET_API_UID"
+        print(os.environ.get(uid_key, os.environ.get("FAKE_TARGET_API_UID", "1234"))); sys.exit(0)
+    if args[:2] == ["image", "inspect"]:
+        output = os.environ.get(
+            "FAKE_COMPOSE_IMAGE_ID_OUTPUT",
+            os.environ.get("FAKE_TARGET_IMAGE_ID", "sha256:" + "a" * 64),
+        )
+        sys.stdout.write(output + ("\n" if output else "")); sys.exit(0)
     is_overlay = args[:1] == ["compose"] and joined.count(" -f ") > 1
     if is_overlay and os.environ.get("FAKE_FAIL_OVERLAY_WITHOUT_API_ENV") == "1" and not pathlib.Path(os.environ["FAKE_API_ENV"]).exists():
         sys.exit(14)
@@ -196,6 +206,9 @@ elif command == "docker":
             storage.mkdir(parents=True); metadata_set(storage, "755", "0", "0")
     if is_overlay and joined.endswith(" build api"):
         sys.exit(0)
+    if is_overlay and joined.endswith(" config --images api"):
+        ref_output = os.environ.get("FAKE_COMPOSE_IMAGE_REF_OUTPUT", "eurith-api")
+        sys.stdout.write(ref_output + ("\n" if ref_output else "")); sys.exit(0)
     if "--entrypoint id api -u" in joined:
         print(os.environ.get("FAKE_TARGET_API_UID", "1234") if is_overlay else "1234"); sys.exit(0)
     passed_env = {args[i + 1].split("=", 1)[0]: args[i + 1].split("=", 1)[1] for i, value in enumerate(args[:-1]) if value == "-e" and "=" in args[i + 1]}
@@ -333,7 +346,7 @@ def test_target_uid_is_resolved_before_storage_and_any_release_overlay() -> None
     storage_verify = script.index('for directory in "$STORAGE_ROOT"')
     overlay_compose = script.index('compose=(docker compose --env-file "$DEPLOY_ENV" -f "$BASE_COMPOSE" -f "$RELEASE_OVERLAY")')
     assert target_build < target_probe < storage_create < storage_verify < overlay_compose
-    assert '[[ "$TARGET_API_IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]]' in script
+    assert '[[ "$TARGET_API_IMAGE" =~ ^(sha256:)?[0-9a-f]{64}$ ]]' in script
 
 
 def test_first_use_and_repeat_are_idempotent_and_redacted(host: Host) -> None:
@@ -411,6 +424,46 @@ def test_target_image_uid_is_authoritative_for_new_storage(host: Host) -> None:
     assert result.returncode == 0, result.stderr
     metadata = json.loads((host.state / "metadata.json").read_text())
     assert metadata[str(host.storage.resolve())]["owner"] == "2345"
+    assert "permissions=verified" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("extra_env", "expected_error"),
+    [
+        ({"FAKE_COMPOSE_IMAGE_ID_OUTPUT": "sha256:" + "b" * 64}, "compose_api_image_mismatch"),
+        ({"FAKE_COMPOSE_IMAGE_REF_OUTPUT": ""}, "compose_api_image_ref_invalid"),
+        (
+            {"FAKE_COMPOSE_IMAGE_REF_OUTPUT": "eurith-api\nother-api"},
+            "compose_api_image_ref_invalid",
+        ),
+        ({"FAKE_COMPOSE_IMAGE_ID_OUTPUT": ""}, "compose_api_image_id_invalid"),
+        (
+            {"FAKE_COMPOSE_IMAGE_ID_OUTPUT": "sha256:" + "a" * 64 + "\nsha256:" + "b" * 64},
+            "compose_api_image_id_invalid",
+        ),
+        ({"FAKE_COMPOSE_API_UID": "2345"}, "compose_api_uid_mismatch"),
+    ],
+)
+def test_compose_image_identity_fails_closed_before_permission_probes(
+    host: Host, extra_env: dict[str, str], expected_error: str
+) -> None:
+    result = host.run(**extra_env)
+
+    assert result.returncode != 0
+    assert f"error={expected_error}" in result.stderr
+    assert "permissions=verified" not in result.stdout
+    calls = (host.state / "calls.log").read_text()
+    assert "EURITH_PROBE_ACTION=" not in calls
+
+
+def test_compose_image_id_without_prefix_is_normalized(host: Host) -> None:
+    result = host.run(
+        FAKE_TARGET_IMAGE_ID="a" * 64,
+        FAKE_COMPOSE_IMAGE_REF_OUTPUT="registry.example:5000/team/api:production",
+        FAKE_COMPOSE_IMAGE_ID_OUTPUT="a" * 64,
+    )
+
+    assert result.returncode == 0, result.stderr
     assert "permissions=verified" in result.stdout
 
 
