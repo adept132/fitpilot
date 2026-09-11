@@ -22,6 +22,7 @@ ALLOWED_CONSTRUCTORS = {
     "BigInteger",
     "Boolean",
     "CheckConstraint",
+    "CHAR",
     "Column",
     "Date",
     "DateTime",
@@ -48,6 +49,30 @@ ALLOWED_CONSTRUCTORS = {
 }
 CONSTRUCTOR_ROOTS = {"sa", "sqlalchemy", "postgresql"}
 RESERVED_BINDINGS = {"op", "sa", "postgresql", "upgrade"}
+SAFE_SQL_FRAGMENTS = {
+    "now()",
+    "'published'",
+    "false",
+    "platform = 'android'",
+    "channel IN ('production-direct', 'production-play')",
+    "expected_source_commit::text ~ '^[0-9a-f]{40}$'",
+    "delivery_method IN ('direct_apk', 'eas_update', 'google_play')",
+    "version_code > 0",
+    "version_name ~ '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$'",
+    "min_supported_version_code IS NULL OR min_supported_version_code <= version_code",
+    "artifact_sha256 IS NULL OR artifact_sha256::text ~ '^[0-9a-f]{64}$'",
+    "source_commit::text ~ '^[0-9a-f]{40}$'",
+    "release_notes ? 'ru' AND release_notes ? 'en' AND jsonb_typeof(release_notes) = 'object' AND jsonb_typeof(release_notes->'ru') = 'string' AND btrim(release_notes->>'ru') <> '' AND jsonb_typeof(release_notes->'en') = 'string' AND btrim(release_notes->>'en') <> ''",
+    "(delivery_method = 'direct_apk' AND artifact_storage_key IS NOT NULL AND artifact_sha256 IS NOT NULL AND artifact_size_bytes > 0) OR (delivery_method = 'eas_update' AND eas_update_group_id IS NOT NULL AND runtime_version IS NOT NULL AND artifact_storage_key IS NULL) OR (delivery_method = 'google_play' AND artifact_storage_key IS NULL)",
+    "delivery_method = 'direct_apk' OR (artifact_sha256 IS NULL AND artifact_size_bytes IS NULL)",
+    "status IN ('published', 'withdrawn')",
+    "(status = 'published' AND withdrawn_at IS NULL AND withdrawal_reason IS NULL) OR (status = 'withdrawn' AND withdrawn_at IS NOT NULL AND withdrawal_reason IS NOT NULL)",
+    "delivery_method = 'direct_apk'",
+    "version_code DESC",
+    "published_at DESC",
+    "status = 'published'",
+    "delivery_method = 'eas_update' OR eas_update_id IS NULL",
+}
 
 
 def _call_path(node: ast.expr) -> tuple[str, ...] | None:
@@ -66,6 +91,14 @@ def _targets_reserved_binding(node: ast.AST) -> bool:
         isinstance(child, ast.Name) and child.id in RESERVED_BINDINGS
         for child in ast.walk(node)
     )
+
+
+def _validate_sql_fragment(node: ast.expr) -> None:
+    if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+        raise ValueError("raw_sql_must_be_constant")
+    value = node.value
+    if not value.isascii() or len(value) > 4096 or value not in SAFE_SQL_FRAGMENTS:
+        raise ValueError("raw_sql_not_reviewed")
 
 
 def validate(path: Path) -> None:
@@ -171,6 +204,20 @@ def validate(path: Path) -> None:
         if not isinstance(node, ast.Call):
             continue
         path_parts = _call_path(node.func)
+        if path_parts in {("sa", "text"), ("sqlalchemy", "text"), ("sa", "CheckConstraint"), ("sqlalchemy", "CheckConstraint")}:
+            if not node.args:
+                raise ValueError("raw_sql_missing")
+            _validate_sql_fragment(node.args[0])
+        if path_parts == ("op", "create_check_constraint"):
+            if len(node.args) < 3:
+                raise ValueError("raw_sql_missing")
+            condition = node.args[2]
+            if isinstance(condition, ast.Call) and _call_path(condition.func) in {("sa", "text"), ("sqlalchemy", "text")}:
+                if not condition.args:
+                    raise ValueError("raw_sql_missing")
+                _validate_sql_fragment(condition.args[0])
+            else:
+                _validate_sql_fragment(condition)
         if path_parts and len(path_parts) == 2 and path_parts[0] == "op" and path_parts[1] in ALLOWED_OP_CALLS:
             continue
         if path_parts and path_parts[0] in CONSTRUCTOR_ROOTS and path_parts[-1] in ALLOWED_CONSTRUCTORS:

@@ -263,10 +263,26 @@ def test_migration_gate_allows_only_known_additive_operations_and_rejects_dynami
             "from alembic import op\nimport sqlalchemy as sa\n"
             "def upgrade():\n    return\n    op.add_column('items', sa.Column('label', sa.String(20)))\n"
         ),
+        "side-effect-check-expression": (
+            "from alembic import op\nimport sqlalchemy as sa\n"
+            "def upgrade():\n"
+            "    op.create_check_constraint('ck_seq', 'items', sa.text(\"setval('critical_seq', 1, false) > 0\"))\n"
+        ),
+        "side-effect-table-check": (
+            "from alembic import op\nimport sqlalchemy as sa\n"
+            "def upgrade():\n"
+            "    op.create_table('items', sa.Column('id', sa.Integer()), sa.CheckConstraint(\"setval('critical_seq', 1, false) > 0\"))\n"
+        ),
     }
     for name, source in invalid_sources.items():
         candidate = tmp_path / f"{name}.py"; candidate.write_text(source, encoding="utf-8")
         assert subprocess.run([sys.executable, MIGRATION_GATE, candidate], capture_output=True).returncode != 0, name
+
+
+def test_migration_gate_accepts_reviewed_release_schema_fragments() -> None:
+    for name in ("20260902_01_app_releases.py", "20260906_01_eas_update_id.py"):
+        migration = ROOT / "migrations" / "versions" / name
+        assert subprocess.run([sys.executable, MIGRATION_GATE, migration], capture_output=True).returncode == 0, name
 
 
 def test_rollback_restores_both_prior_caddy_topologies() -> None:
