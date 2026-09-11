@@ -117,14 +117,70 @@ require_catalog_zero() {
 # can make an otherwise disposable restore target non-pristine. PostgreSQL's
 # built-in objects live in system schemas or below FirstNormalObjectId (16384);
 # public and plpgsql are the only allowed initialized-database objects.
-require_catalog_zero "WITH allowed_extension_members(class_oid, object_oid) AS (
+require_catalog_zero "WITH plpgsql_members(class_oid, object_oid) AS (
   SELECT d.classid, d.objid
   FROM pg_catalog.pg_depend d
   JOIN pg_catalog.pg_extension e
     ON d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass
    AND d.refobjid=e.oid
   WHERE d.deptype='e' AND e.extname='plpgsql'
+), stock_plpgsql_members(class_oid, object_oid) AS (
+  SELECT 'pg_catalog.pg_proc'::pg_catalog.regclass, p.oid
+  FROM pg_catalog.pg_proc p
+  JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+  JOIN pg_catalog.pg_language l ON l.oid=p.prolang
+  JOIN (VALUES
+    ('plpgsql_call_handler', '', 'language_handler'::pg_catalog.regtype::pg_catalog.oid, false),
+    ('plpgsql_inline_handler', 'internal', 'void'::pg_catalog.regtype::pg_catalog.oid, true),
+    ('plpgsql_validator', 'oid', 'void'::pg_catalog.regtype::pg_catalog.oid, true)
+  ) expected(name, arguments, result_oid, is_strict)
+    ON expected.name=p.proname
+   AND expected.arguments=pg_catalog.pg_get_function_identity_arguments(p.oid)
+   AND expected.result_oid=p.prorettype
+   AND expected.is_strict=p.proisstrict
+  WHERE p.oid < 16384
+    AND n.nspname='pg_catalog'
+    AND l.lanname='c'
+    AND p.prosrc=p.proname
+    AND p.probin='\$libdir/plpgsql'
+    AND p.prokind='f'
+    AND p.provolatile='v'
+    AND p.proparallel='u'
+    AND NOT p.prosecdef
+    AND NOT p.proleakproof
+    AND p.procost=1
+    AND p.prorows=0
+    AND p.proconfig IS NULL
+    AND p.proacl IS NULL
+    AND p.proowner=(SELECT e.extowner FROM pg_catalog.pg_extension e WHERE e.extname='plpgsql')
+  UNION ALL
+  SELECT 'pg_catalog.pg_language'::pg_catalog.regclass, l.oid
+  FROM pg_catalog.pg_language l
+  WHERE l.oid < 16384
+    AND l.lanname='plpgsql'
+    AND l.lanispl
+    AND l.lanpltrusted
+    AND l.lanplcallfoid='pg_catalog.plpgsql_call_handler()'::pg_catalog.regprocedure
+    AND l.laninline='pg_catalog.plpgsql_inline_handler(internal)'::pg_catalog.regprocedure
+    AND l.lanvalidator='pg_catalog.plpgsql_validator(oid)'::pg_catalog.regprocedure
+    AND l.lanacl IS NULL
+    AND l.lanowner=(SELECT e.extowner FROM pg_catalog.pg_extension e WHERE e.extname='plpgsql')
+), allowed_extension_members(class_oid, object_oid) AS (
+  SELECT m.class_oid, m.object_oid
+  FROM plpgsql_members m
+  JOIN stock_plpgsql_members s USING (class_oid, object_oid)
+), plpgsql_baseline_invalid(object_oid) AS (
+  SELECT 1::pg_catalog.oid
+  WHERE (SELECT count(*) FROM pg_catalog.pg_extension e
+         JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace
+         WHERE e.extname='plpgsql' AND e.extversion='1.0' AND NOT e.extrelocatable
+           AND n.nspname='pg_catalog' AND e.extconfig IS NULL AND e.extcondition IS NULL) <> 1
+     OR (SELECT count(*) FROM plpgsql_members) <> 4
+     OR (SELECT count(*) FROM stock_plpgsql_members) <> 4
+     OR (SELECT count(*) FROM allowed_extension_members) <> 4
 ), database_objects(object_kind, object_oid) AS (
+  SELECT 'plpgsql_baseline', p.object_oid FROM plpgsql_baseline_invalid p
+  UNION ALL
   SELECT 'schema', n.oid FROM pg_catalog.pg_namespace n
     WHERE n.oid >= 16384 AND NOT EXISTS (
       SELECT 1 FROM allowed_extension_members a WHERE a.class_oid='pg_catalog.pg_namespace'::pg_catalog.regclass AND a.object_oid=n.oid)

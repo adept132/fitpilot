@@ -666,10 +666,20 @@ def test_real_disposable_postgresql_paired_roundtrip(tmp_path: Path) -> None:
             "RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$",
             restore_database,
         )
+        sql(
+            "ALTER EXTENSION plpgsql ADD FUNCTION "
+            "pg_catalog.eurith_restore_pristine_probe()",
+            restore_database,
+        )
         contaminated_restore = run_script(RESTORE, generations[0], restore_url_file, restore_root)
         assert contaminated_restore.returncode != 0, contaminated_restore.stdout
         assert "restore_database_not_empty" in contaminated_restore.stderr
         assert not any(restore_root.iterdir())
+        sql(
+            "ALTER EXTENSION plpgsql DROP FUNCTION "
+            "pg_catalog.eurith_restore_pristine_probe()",
+            restore_database,
+        )
         sql("DROP FUNCTION pg_catalog.eurith_restore_pristine_probe()", restore_database)
 
         restore = run_script(RESTORE, generations[0], restore_url_file, restore_root)
