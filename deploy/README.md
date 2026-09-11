@@ -1,221 +1,144 @@
-# Развёртывание Eurith API
+# Eurith production deployment
 
-Сервер разворачивает только уже проверенный commit или tag из GitHub. Рабочие
-файлы на сервере вручную не редактируются.
+Production is deployed only from two reviewed, full 40-character commit SHAs:
+the backend commit being installed and the frozen mobile candidate it unlocks.
+A successful push is not deployment. A successful backend deployment is not APK publication.
+Mobile remains blocked until `backend_gate=passed` is written after
+all runtime canaries and the bounded log review pass.
 
-После одноразовой настройки обновление выполняется из `/opt/eurith`. Скрипт
-намеренно не имеет версии по умолчанию: нужно передать проверенный commit или tag:
+## Protected inputs and first use
+
+Install four independent root-owned `0400` source files under
+`/etc/eurith/release-secret-source`: `publisher-token`, `operator-token`,
+`webhook-secret`, and `cleanup-database-url`. The three tokens are independently
+generated 64-character lowercase hexadecimal values. They are consumed as follows:
+
+- publisher: server API and protected GitHub production environment only;
+- operator: server API and the operator vault only;
+- webhook: server API and the GitHub webhook Secret field only;
+- cleanup database URL: host cleanup/backup tooling only.
+
+Never paste values into command arguments, logs, evidence, or Git. Run first-use
+provisioning from the reviewed checkout:
 
 ```bash
-./backend/deploy/deploy.sh 0123456789abcdef
-# или
-./backend/deploy/deploy.sh v1.2.0
+sudo ./backend/deploy/provision-release-host.sh \
+  --secret-source-dir /etc/eurith/release-secret-source \
+  --base-compose /opt/eurith/docker-compose.yml \
+  --release-overlay /opt/eurith/backend/deploy/compose.release.yml
 ```
 
-Скрипт останавливается при незакоммиченных серверных изменениях, делает дамп
-PostgreSQL, собирает новый образ, применяет Alembic-миграции, проверяет публичный
-`/health` и возвращает предыдущий commit, если проверка не прошла.
+The same command is the existing-host verification command. It verifies rather
+than overwrites `/etc/eurith/api-release.env`,
+`/etc/eurith/release-cleanup.env`, and `/etc/eurith/release-deploy.env`.
+It resolves the API UID and `eurith-releases` GID, enforces setgid directories,
+creates the dedicated final-artifact view, and proves API atomic finalize plus
+Caddy read-only and `nosymfollow` behavior. Caddy is exactly `caddy:2.11.4`;
+record its immutable digest at deployment.
 
-## Новое изменение схемы БД
+Credential rotation is one credential at a time: pause publication, withdrawal,
+mandatory changes, and cleanup; update the named external consumer and protected
+source together; atomically replace the complete API env file as root; run
+provisioning verification and negative-auth canaries; then resume. Never silently
+regenerate a partial or unexpected protected installation.
 
-Модель SQLAlchemy и миграция меняются в одном commit. Локально, с запущенной
-тестовой PostgreSQL:
-
-```bash
-alembic revision --autogenerate -m "add example field"
-alembic upgrade head
-```
-
-Автоматически созданную миграцию нужно прочитать и проверить до commit. Миграции
-production выполняет `deploy.sh` после резервной копии и до перезапуска API.
-
-Пароли, `.env` и Firebase service account не хранятся в GitHub.
-
-## Центр обновлений Android: volume, nginx и recovery
-
-APK не является частью Docker image: он хранится в постоянном host-volume.
-Создайте его до первого выпуска и не заменяйте при `docker compose up`:
+Create `/etc/eurith/release-canary-ids.env` as root-owned `0400` (or `0640`) with
+known existing records and one unrelated safe public route:
 
 ```text
-host:  /opt/eurith/releases
-api:   /var/lib/eurith/releases:rw
-nginx: /srv/eurith/releases:ro
+missing_release_id=<uuid-known-not-to-exist>
+withdrawn_release_id=<existing-withdrawn-direct-uuid>
+non_direct_release_id=<existing-eas-or-play-uuid>
+unrelated_public_path=/openapi.json
 ```
 
-Пример Docker mounts: `/opt/eurith/releases:/var/lib/eurith/releases:rw` для
-API и `/opt/eurith/releases:/srv/eurith/releases:ro` для nginx. На хосте:
+These rows are operational fixtures retained in the registry; the canary never
+creates or changes a release.
 
-Use a dedicated shared group. Never assume that an image UID/GID equals a host
-account with the same number. Resolve the API UID from the built image and the
-shared GID from the host, then create the volume with those actual numeric IDs:
+## Backup and isolated restore
+
+Keep publisher/withdrawal operations paused and stop the cleanup timer. Back up
+the database and complete release volume as one generation, then restore that
+same generation into an empty isolated volume and a new local
+`eurith_restore_*` database:
 
 ```bash
-groupadd --system eurith-releases
-export RELEASE_SHARED_GID="$(getent group eurith-releases | cut -d: -f3)"
-API_UID="$(docker compose run --rm --no-deps --entrypoint id api -u)"
-install -d -o "$API_UID" -g "$RELEASE_SHARED_GID" -m 2770 /opt/eurith/releases
-install -d -o "$API_UID" -g "$RELEASE_SHARED_GID" -m 2770 /opt/eurith/releases/.staging
-install -d -o "$API_UID" -g "$RELEASE_SHARED_GID" -m 2770 /opt/eurith/releases/android/sha256
-usermod -aG eurith-releases eurith
-usermod -aG eurith-releases www-data
+sudo RELEASE_MUTATIONS_PAUSED=1 ./backend/deploy/backup-release-state.sh \
+  <previous-backend-full-sha> /opt/eurith/backups/releases
+sudo ./backend/deploy/verify-release-restore.sh \
+  /opt/eurith/backups/releases/<generation> \
+  /etc/eurith/restore-database-url \
+  /opt/eurith/restore-drill/<generation>
 ```
 
-Use the resolved GID in Compose for every process that touches the volume:
+Both commands must report matching manifest SHA-256 and zero missing or mismatched
+artifacts. A database dump and release archive are never restored separately.
 
-```yaml
-services:
-  api:
-    group_add:
-      - "${RELEASE_SHARED_GID:?set RELEASE_SHARED_GID from getent}"
-    volumes:
-      - /opt/eurith/releases:/var/lib/eurith/releases:rw
-  nginx:
-    group_add:
-      - "${RELEASE_SHARED_GID:?set RELEASE_SHARED_GID from getent}"
-    volumes:
-      - /opt/eurith/releases:/srv/eurith/releases:ro
-```
+## Exact-SHA deployment
 
-For host nginx, add its actual service user (`www-data` above; often `nginx` on
-RPM-based systems) to `eurith-releases` and expose the release tree read-only
-inside its service mount namespace (for example with systemd
-`BindReadOnlyPaths=/opt/eurith/releases:/srv/eurith/releases`). Restart nginx and verify with
-`sudo -u www-data test -r /opt/eurith/releases/android/sha256/<digest>.apk`.
-Directories are `2770`: group members can traverse/write and setgid preserves
-the shared GID. Staging files stay `0600` while validation is in progress;
-after atomic finalization the API sets the final APK to `0640`, so nginx can
-read it but cannot change it. The API runtime identity owns writes; the host
-cleanup service runs as `eurith` with `SupplementaryGroups=eurith-releases`.
-Paths deliberately differ by mount namespace: the API/container uses
-`RELEASE_STORAGE_ROOT=/var/lib/eurith/releases`, while host cleanup uses
-`RELEASE_STORAGE_ROOT=/opt/eurith/releases`.
+Export only non-secret runtime paths and the guarded disposable Caddy integration
+database URL. Create that unique local `fitpilot_task_caddy_*` database before
+running the deployment and drop it afterward. The deploy script refuses a dirty
+checkout, non-full SHA, unapproved remote commit, multiple Alembic heads,
+destructive migration, missing Caddy digest, failed restore, skipped required
+runtime test, or failed canary.
 
-### Release secrets and environment files
-
-Generate three independent 256-bit values directly into the protected API
-EnvironmentFile. Do this once on the server as root; never replace them with
-shared or human-created passwords:
+Create a clean detached runner worktree at the target SHA first. This preserves
+the exact previous production checkout while the new versioned deployment code
+runs; invoking the old checkout's script or pre-switching production source is
+rejected.
 
 ```bash
-install -o root -g eurith -m 0640 /dev/null /etc/eurith/api-release.env
-{
-  printf 'RELEASE_PUBLISHER_TOKEN='
-  openssl rand -hex 32
-  printf 'RELEASE_OPERATOR_TOKEN='
-  openssl rand -hex 32
-  printf 'GITHUB_WEBHOOK_SECRET='
-  openssl rand -hex 32
-  printf 'RELEASE_STORAGE_ROOT=/var/lib/eurith/releases\n'
-} > /etc/eurith/api-release.env
-chown root:eurith /etc/eurith/api-release.env
-chmod 0640 /etc/eurith/api-release.env
+git -C /opt/eurith/backend fetch --prune origin
+git -C /opt/eurith/backend worktree add --detach \
+  /opt/eurith/deploy-run/<backend-full-sha> <backend-full-sha>
+sudo RELEASE_MUTATIONS_PAUSED=1 \
+  SOURCE_DIR=/opt/eurith/backend \
+  EURITH_BASE_COMPOSE=/opt/eurith/docker-compose.yml \
+  EURITH_PUBLIC_API_URL=https://api.eurith.app \
+  EURITH_APPROVED_CADDY_DIGEST=sha256:<reviewed-64-hex-digest> \
+  EURITH_RESTORE_DB_URL_FILE=/etc/eurith/restore-database-url \
+  EURITH_RESTORE_VOLUME_ROOT=/opt/eurith/restore-drill/<unique-empty-generation> \
+  TEST_DATABASE_URL=postgresql+asyncpg://localhost/fitpilot_task_caddy_<unique> \
+  /opt/eurith/deploy-run/<backend-full-sha>/deploy/deploy.sh \
+  <backend-full-sha> <mobile-candidate-full-sha>
 ```
 
-- `RELEASE_PUBLISHER_TOKEN` authenticates CI publication, CI-run binding and
-  withdrawal endpoints. Store the matching value as a masked GitHub Actions
-  repository/environment secret and in `/etc/eurith/api-release.env`; do not
-  give it to cleanup.
-- `RELEASE_OPERATOR_TOKEN` controls the manual mandatory-update endpoint.
-  Store its client copy in the operator password manager/secret vault and its
-  server copy only in `/etc/eurith/api-release.env`; do not put it in GitHub
-  Actions or cleanup.
-- `GITHUB_WEBHOOK_SECRET` verifies `X-Hub-Signature-256` on push webhooks.
-  Copy the matching value into the GitHub repository webhook **Secret** field
-  and keep its server copy only in `/etc/eurith/api-release.env`; it is not a
-  bearer token and must not be reused as either release token.
+The sequence is: provenance and pause gates; paired backup; isolated restore;
+Compose and Caddy fmt/adapt/validate; required real loopback Caddy integration;
+one-head and migration-path gate; exact API build; one migration; coordinated
+API+Caddy switch; public canaries; bounded log review; mobile gate.
 
-### CI retry binding contract
-
-The protected `POST /internal/app-releases/lanes/android/{channel}/ci-run`
-endpoint is **latest-attempt-wins for the lane's current webhook target SHA**.
-The workflow must bind its own CI run immediately before publishing. A retry
-for the exact same `source_commit` atomically replaces the earlier run ID; the
-earlier run then receives `409` from every subsequent publish attempt, while an
-idempotent repeat of the newest binding remains successful. A bind for any SHA
-other than the lane's current webhook target receives `409` and cannot change
-the lane. The next accepted GitHub push advances the target SHA and clears the
-run binding before a new workflow binds.
-
-Keep GitHub workflow concurrency serialized per release lane. The backend also
-serializes bind and publish decisions with the same PostgreSQL lane lock, so a
-late request can never publish after a newer binding has committed. Only the
-trusted release workflow may receive `RELEASE_PUBLISHER_TOKEN`; never expose
-the binding endpoint or token to an artifact, pull-request job, or mobile
-client.
-
-Create `/etc/eurith/release-cleanup.env` separately. It contains only
-`DATABASE_URL` and host-visible
-`RELEASE_STORAGE_ROOT=/opt/eurith/releases`; it never receives publisher,
-operator or webhook secrets. Both EnvironmentFiles are `root:eurith` mode
-`0640`; never copy them into checkout, image, command output, logs or unit
-files. Point only the API/container service at `api-release.env`, and only the
-host cleanup unit below at `release-cleanup.env`.
-
-Подключите `deploy/nginx/releases.conf` к HTTPS virtual host. До reload проверьте
-конфигурацию, затем примените её:
+Run canaries independently with the same protected inputs:
 
 ```bash
-nginx -t && systemctl reload nginx
+sudo EURITH_PUBLIC_API_URL=https://api.eurith.app \
+  EURITH_CANARY_IDS_FILE=/etc/eurith/release-canary-ids.env \
+  ./backend/deploy/canary-release-delivery.sh
 ```
 
-`/_release_files/` — internal location: внешний HTTP-клиент не получает доступ к
-пути volume напрямую. Nginx допускает запрос multipart до 256 MiB, чтобы вместить
-обёртку multipart; API по-прежнему отклоняет сам APK payload больше 250 MiB.
-Request buffering выключен, к Uvicorn/container port извне доступа быть не должно.
+The canary checks health/database, `Cache-Control: no-store`, absent and wrong
+publisher/operator credentials, bad webhook signature, missing/withdrawn/non-direct
+downloads, internal-path denial and header leakage, unrelated API behavior,
+container restarts, free space, and—when one already exists—full and one-byte range
+delivery of a published direct APK. With no published direct APK it records
+`existing_direct_apk=not_applicable` and inserts nothing.
 
-### Ежедневная очистка и контроль места
+## Monitoring, rollback, and withdrawal
 
-Timer запускает только dry-run. Создайте `/etc/systemd/system/eurith-release-cleanup.service`:
+Alert on framing (`LocalProtocolError` or declared-length mismatch), handoff `502`,
+artifact `503`, sustained download `5xx`, permission denial, unexpected `404` or
+`413`, internal-header leakage, container restarts, failed range responses, and
+release-volume free space below 20%.
 
-```ini
-[Service]
-Type=oneshot
-User=eurith
-Group=eurith
-SupplementaryGroups=eurith-releases
-UMask=0007
-WorkingDirectory=/opt/eurith/backend
-EnvironmentFile=/etc/eurith/release-cleanup.env
-ExecStart=/opt/eurith/venv/bin/python -m scripts.cleanup_app_releases
-```
+On a failed post-switch check, deployment automatically restores the exact old
+source/container revision only when the additive migration path is affirmed.
+It retains the paired backup and never performs automatic database restore or
+Alembic downgrade. A destructive change requires a separate expand/contract plan.
 
-и `/etc/systemd/system/eurith-release-cleanup.timer`:
-
-```ini
-[Timer]
-OnCalendar=*-*-* 02:10:00 UTC
-Persistent=true
-[Install]
-WantedBy=timers.target
-```
-
-После `systemctl daemon-reload && systemctl enable --now eurith-release-cleanup.timer`
-оператор читает JSON-lines из `journalctl -u eurith-release-cleanup.service` и лишь
-затем запускает явный apply с тем же защищённым EnvironmentFile. Автоматический
-`--apply` в timer/cron запрещён. Оставляйте alert при свободном месте volume
-ниже 20% и расследуйте любой unexpected candidate. Скрипт не следует symlink,
-не удаляет свежие staging parts, shared SHA, published/latest или mandatory APK.
-Старый withdrawn APK удаляется только после retention, его DB row остаётся с
-`artifact_deleted_at` сначала фиксируется как deletion intent для аудита, затем
-файл удаляется; следующий запуск устраняет файл, оставшийся после сбоя между
-этими фазами. Cleanup и direct publication используют один session advisory
-lock на закреплённом PostgreSQL connection, поэтому финализация APK не
-соревнуется с orphan scan.
-
-### Backup, restore и rollback
-
-Бэкап состоит из согласованных PostgreSQL dump и `/opt/eurith/releases`.
-При восстановлении сначала восстановите volume в закрытый путь, затем для каждого
-APK сравните `sha256sum` с `app_releases.artifact_sha256`, и лишь затем замените
-production mount. Missing artifact у published release — operational incident,
-а не повод перепубликовать тот же versionCode.
-
-Withdraw выполняется защищённым release endpoint: latest перестаёт предлагать
-релиз, download отвечает `410`; для direct APK исправление выпускают с большим
-versionCode. EAS OTA откатывают средствами EAS rollout/rollback, не удалением
-истории release registry. Direct и Google Play — разные delivery lanes: Play
-клиент не получает APK с нашего сервера.
-
-Текущая migration реестра additive: rollback кода допустим только после проверки
-совместимости со схемой. Любая будущая destructive migration требует отдельного
-expand/contract плана, backup и явного production gate.
+Before disabling Caddy delivery or storage for an affected APK, withdraw the
+release through the protected endpoint so discovery stops advertising it and
+downloads return `410`. Retain its row, artifact, and version code. Publish a fix
+only with a larger version code. Resume publication and cleanup only after the
+backend gate and the first real release closure (hash, size, ETag, Digest, signing
+certificate, package, install, and smoke checks) all pass.

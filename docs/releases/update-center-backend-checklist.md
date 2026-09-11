@@ -75,7 +75,9 @@ observed.
   this pre-existing integration fixture/locking stall before using the entire
   suite as a production gate.
 - **Linux cleanup mutation/concurrency: NOT RUN on this host.** Windows correctly skips the secure descriptor-relative deletion path.
-- **Native nginx validation: NOT RUN.** `nginx` is not installed on this workstation. Static inspection confirms `internal`, the `/srv/eurith/releases/` alias, `client_max_body_size 256m`, and `proxy_request_buffering off`; run `nginx -t` on the target Linux host before reload.
+- **Native Caddy validation: NOT RUN on the production host.** Before switching,
+  run fmt/adapt/validate and the required loopback integration suite against the
+  pinned `caddy:2.11.4` image and record its immutable digest.
 - No real GitHub webhook, CI run, EAS build, production token, release volume, or release publication was used.
 
 ## Static security, storage, and operations review
@@ -85,8 +87,9 @@ observed.
 - APK staging/finalization, path containment, digest layout, size/integrity,
   idempotency, withdrawal and unavailable-artifact paths are covered by the
   focused suite.
-- Nginx exposes release files only via an internal alias; the upload limit leaves
-  multipart overhead above the API's 250 MiB payload limit.
+- Caddy rejects direct `/_release_files/*` access, consumes only the exact
+  successful internal handoff, and applies `256MiB` only to the direct APK
+  publisher route while the API keeps its 250 MiB payload limit.
 - `/.gitignore` and `/.dockerignore` use root-anchored `/releases/` patterns.
 - The runbook separates API and cleanup environment files, documents distinct
   secrets, read/write versus read-only mounts, resolved UID/shared GID, setgid
@@ -99,8 +102,8 @@ observed.
 | Gate | Status | Required production evidence |
 | --- | --- | --- |
 | Publisher/operator/webhook token generation or rotation | NOT RUN | Generate three independent secrets, install protected environment files, configure the matching GitHub boundaries, and record rotation ownership/date without exposing values. |
-| Release volume mounts and permissions | NOT RUN | Verify actual image UID, shared host GID, API `rw` mount, nginx `ro` mount, setgid directories, staging `0600`, final APK `0640`, and service-user read access. |
-| Nginx configuration | NOT RUN | Install/include the reviewed snippet, run `nginx -t`, then controlled reload and external access-denial/download checks. |
+| Release volume mounts and permissions | NOT RUN | Run `provision-release-host.sh`; verify actual API UID/shared GID, API `rw`, the dedicated Caddy view `ro,nosymfollow`, setgid directories, staging `0600`, final APK `0640`, and all negative mutation/symlink probes. |
+| Caddy configuration and delivery | NOT RUN | Record the `caddy:2.11.4` digest; run fmt/adapt/validate, required real loopback tests, direct-prefix/header-denial checks, and public full/range checks when an existing direct APK is available. |
 | Disk threshold/alert | NOT RUN | Configure and trigger-test the alert below 20% free space on the release volume. |
 | Backup/restore drill | NOT RUN | Take a consistent DB + artifact backup, restore to an isolated target, and verify every restored APK SHA against the registry. |
 | Production migration compatibility | NOT RUN | Back up production, verify its current Alembic revision/schema, rehearse upgrade and code rollback against a production snapshot, and retain the exact recovery procedure. |
@@ -110,6 +113,35 @@ observed.
 
 Release publication and production deployment remain prohibited until every
 applicable gate above has explicit evidence and operator approval.
+
+## Caddy rollout and backend-before-mobile closure
+
+On first use and every existing-host verification, run
+`deploy/provision-release-host.sh`. While release mutations and cleanup are
+paused, create a paired generation with `deploy/backup-release-state.sh` and
+prove it through `deploy/verify-release-restore.sh` in an empty volume and local
+`eurith_restore_*` database. Run deployment only as
+`deploy/deploy.sh <backend-full-sha> <mobile-candidate-full-sha>` and rerun
+`deploy/canary-release-delivery.sh` independently before releasing the gate.
+
+The production record must contain exact old/new backend SHA, frozen mobile SHA,
+Compose hash, Caddy tag/digest, single Alembic head/path, backup-manifest hash,
+canary and log-review results, and rollback result. It must contain no secret,
+database URL, internal handoff path, or artifact filesystem path.
+
+Monitor framing failures, internal-handoff `502`, unavailable-artifact `503`,
+download `5xx`, unexpected `404`/`413`, permission denials, restarts, range
+failures, and free space below 20%. A failed check keeps mobile blocked and may
+roll back only source/containers after additive schema compatibility is affirmed;
+database restore and downgrade are always manual. Withdraw an advertised direct
+release before disabling its delivery infrastructure.
+
+Publisher, operator, and webhook rotation remains consumer-specific and one at
+a time, with publication/cleanup paused and the full protected API environment
+installed atomically. Successful push is not deployment. Successful backend
+deployment is not APK publication. Advance mobile only after the evidence says
+`backend_gate=passed`; close the first real APK release with byte/hash/size,
+ETag/Digest, certificate/package, install, and smoke evidence.
 
 ## Release automation idempotency preflight
 
