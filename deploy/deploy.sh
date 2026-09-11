@@ -286,6 +286,10 @@ evidence, gate = map(pathlib.Path, sys.argv[1:3])
 backend, mobile, completed = sys.argv[3:6]
 with evidence.open("rb") as handle:
     payload = handle.read(); os.fsync(handle.fileno())
+for durable_directory in (evidence.parent, evidence.parent.parent):
+    directory_fd = os.open(durable_directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try: os.fsync(directory_fd)
+    finally: os.close(directory_fd)
 evidence_sha256 = hashlib.sha256(payload).hexdigest()
 directory = gate.parent
 fd, temporary = tempfile.mkstemp(prefix=".backend-gate.", dir=directory)
@@ -334,6 +338,10 @@ on_exit() {
 import os, pathlib, sys
 path = pathlib.Path(sys.argv[1])
 with path.open("rb") as handle: os.fsync(handle.fileno())
+for durable_directory in (path.parent, path.parent.parent):
+    directory_fd = os.open(durable_directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try: os.fsync(directory_fd)
+    finally: os.close(directory_fd)
 PY
   fi
   exit "$status"

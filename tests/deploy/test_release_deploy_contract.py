@@ -103,6 +103,7 @@ def test_deploy_records_required_redacted_evidence_and_pins_caddy_digest() -> No
         "wait_for_readiness",
         "deploy_completed_at",
         "evidence_sha256",
+        "evidence.parent.parent",
         "os.link",
         "fsync",
         "--pull never",
