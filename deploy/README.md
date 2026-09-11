@@ -117,6 +117,7 @@ a root-owned `root:root` mode `0400` approval file outside the checkout:
 ```text
 old_backend_sha=<previous-backend-full-sha>
 target_backend_sha=<backend-full-sha>
+rollback_backend_sha=<reviewed-rollback-backend-full-sha>
 old_alembic_head=<production-head>
 target_alembic_head=<target-head>
 migration_path_sha256=<sha256-of-ordered-revision-path-and-exact-file-bytes>
@@ -124,16 +125,19 @@ rollback_compatible=true
 approval_identity=<reviewer-id>
 ```
 
-The file must contain exactly those seven lines. Its identity hash is calculated
+The file must contain exactly those eight lines. Its identity hash is calculated
 from the ordered migration path and the exact bytes of each path file; any byte,
 head, backend SHA, permission, owner, symlink, line, or reviewer-identity mismatch
 is fatal. This is an explicit human audit decision, not a semantic source-code
 classifier. After the approval is validated, deployment upgrades the isolated
 restored database, runs the target health and complete ORM table/column schema
-probe, then checks out and builds the exact old backend and runs the same
-versioned probe against that upgraded isolated database. Only explicit
+probe, then checks out and builds the separately reviewed rollback backend
+through the hardened target release overlay and runs the same versioned probe
+against that upgraded isolated database. The rollback SHA may equal the incumbent
+SHA, but it is approved independently and must be an ancestor of both the target
+and the approved remote ref. Only explicit
 `rollback_compatible=true` plus both successful rehearsals enables automatic
-old-code rollback. A failed or missing rehearsal stops before production
+application rollback. A failed or missing rehearsal stops before production
 migration. A partial production attempt is recorded as `migration_state=unknown`
 and requires manual database investigation; it never triggers automatic restore.
 
@@ -142,9 +146,10 @@ git -C /opt/eurith/backend fetch --prune origin
 git -C /opt/eurith/backend worktree add --detach \
   /opt/eurith/deploy-run/<backend-full-sha> <backend-full-sha>
 sudo RELEASE_MUTATIONS_PAUSED=1 \
+  EURITH_ROLLBACK_SHA=<reviewed-rollback-backend-full-sha> \
   SOURCE_DIR=/opt/eurith/backend \
   EURITH_DEPLOY_ASSET_ROOT=/opt/eurith/deploy-run/<backend-full-sha> \
-  EURITH_BASE_COMPOSE=/opt/eurith/docker-compose.yml \
+  EURITH_BASE_COMPOSE=/opt/eurith/compose.yaml \
   EURITH_PUBLIC_API_URL=https://api.eurith.app \
   EURITH_APPROVED_CADDY_DIGEST=sha256:<reviewed-64-hex-digest> \
   EURITH_MIGRATION_APPROVAL_FILE=/etc/eurith/migration-approval-<backend-full-sha>.env \
@@ -155,23 +160,28 @@ sudo RELEASE_MUTATIONS_PAUSED=1 \
   <backend-full-sha> <mobile-candidate-full-sha>
 ```
 
-Before production migration, the API image and Caddy assets come only from the
-validated detached target root through `EURITH_RUNTIME_SOURCE_ROOT` and
-`EURITH_RUNTIME_ASSET_ROOT`; operators do not set those internal variables.
-After both target and old-code rehearsals pass, the deployer checks out the exact
+Before production migration, the target API image and all Caddy assets come from
+the validated detached target root. The compatibility image alone uses the exact
+rollback checkout as `EURITH_RUNTIME_SOURCE_ROOT`, while still using the target
+overlay and target `EURITH_RUNTIME_ASSET_ROOT`; operators do not set those
+internal variables.
+After both target and rollback-candidate rehearsals pass, the deployer checks out the exact
 target in `SOURCE_DIR`, proves the runtime overlay/Caddy bytes and aggregate hash
 match the detached root, then points final Compose binds at `SOURCE_DIR`.
 
 The sequence is: provenance and pause gates; paired backup; isolated restore;
 Compose and Caddy fmt/adapt/validate; required real loopback Caddy integration;
 exact migration-path identity/approval; exact API build; isolated target-upgrade
-and old-backend compatibility rehearsal; one production migration; coordinated
+and rollback-candidate compatibility rehearsal; prior Caddy identity capture;
+one production migration; coordinated
 API+Caddy switch with image pulls disabled; immediate zero-restart identity
 capture; bounded readiness retries; public canaries; Compose-native bounded log
-review; final identity/restart proof; mobile gate. Rollback injects and verifies
-the exact immutable image ID used by the prior Caddy container. If Caddy was not
+review; final identity/restart proof; mobile gate. Application rollback checks
+out the approved SHA and builds it through the hardened target overlay, while
+Caddy rollback injects and verifies the exact immutable image ID used by the
+prior Caddy container. If Caddy was not
 part of the prior running topology, rollback removes the newly introduced Caddy
-container and restores the old API with the base Compose file only.
+container and restores the approved rollback API through the target overlay.
 
 Run canaries independently with the same protected inputs:
 

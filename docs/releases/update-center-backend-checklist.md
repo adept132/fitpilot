@@ -119,9 +119,11 @@ applicable gate above has explicit evidence and operator approval.
 On first use and every existing-host verification, run
 `deploy/provision-release-host.sh` from a clean detached exact-target
 `EURITH_DEPLOY_ASSET_ROOT`, passing `--deploy-asset-root` and `--target-sha`.
-Provisioning and pre-switch validation use `EURITH_RUNTIME_SOURCE_ROOT` and
-`EURITH_RUNTIME_ASSET_ROOT` internally so the old production checkout remains
-unchanged through backup, restore, and both compatibility rehearsals. After
+Provisioning and pre-switch validation set `EURITH_RUNTIME_SOURCE_ROOT` and
+`EURITH_RUNTIME_ASSET_ROOT` internally. The production checkout stays unchanged
+through backup, restore, and target rehearsal, then becomes the exact detached
+rollback candidate only for its compatibility build through the target overlay.
+After
 rehearsal, deployment checks out the target in `SOURCE_DIR`, verifies the final
 overlay and Caddy bytes/hash equal the detached root, and only then binds final
 runtime assets from `SOURCE_DIR`. While release mutations and cleanup are
@@ -131,7 +133,7 @@ prove it through `deploy/verify-release-restore.sh` in an empty volume and local
 `deploy/deploy.sh <backend-full-sha> <mobile-candidate-full-sha>` and rerun
 `deploy/canary-release-delivery.sh` independently before releasing the gate.
 
-The production record must contain exact old/new backend SHA, frozen mobile SHA,
+The production record must contain exact old/rollback/new backend SHA, frozen mobile SHA,
 Compose hash, Caddy tag/digest, single Alembic head/path, backup-manifest hash,
 canary and log-review results, and rollback result. It must contain no secret,
 database URL, internal handoff path, or artifact filesystem path.
@@ -141,17 +143,20 @@ Resolve the approved Caddy image to a digest and run Compose with
 Before migration, restore the paired backup in isolation and compare its reported
 manifest hash to the backup result. Generate the deterministic ordered migration
 path manifest (revision, file name, and SHA-256 of exact file bytes), review those
-exact files, and install the exact seven-line root-owned mode `0400`
+exact files, and install the exact eight-line root-owned mode `0400`
 `EURITH_MIGRATION_APPROVAL_FILE` described in `deploy/README.md`, outside the
 checkout. Missing/mismatched identity, SHA, Alembic head, path hash, owner, mode,
 symlink status, rollback decision, or reviewer identity is fatal. The deployment
 reads the loopback-only restore URL once through trusted ancestor descriptors and
 uses only a private root-owned snapshot plus safely serialized Compose overlay,
 then upgrades only the isolated `eurith_restore_*` database, runs the target
-health/full ORM schema probe, and runs the exact old backend against that upgraded
-isolated database. Only explicit `rollback_compatible=true` and successful target
-and old-backend rehearsals permit production migration and automatic code
-rollback. Any partial production migration attempt is `migration_state=unknown`,
+health/full ORM schema probe, and runs exact `EURITH_ROLLBACK_SHA` against that
+upgraded isolated database through the hardened target overlay. That separately
+approved SHA must be an ancestor of the target and approved remote ref, must
+recognize the target Alembic head, and may equal the incumbent. Only explicit
+`rollback_compatible=true` and successful target and rollback-candidate
+rehearsals permit production migration and automatic code rollback. Any partial
+production migration attempt is `migration_state=unknown`,
 requires manual investigation, and forbids automatic database restore/downgrade.
 
 The public URL must be a structurally valid HTTPS origin with no credentials,

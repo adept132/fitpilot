@@ -8,15 +8,16 @@ source "$SCRIPT_DIR/lib/release_common.sh"
 
 [[ $# == 2 ]] || die usage
 TARGET_SHA="${1,,}"; MOBILE_CANDIDATE_SHA="${2,,}"
+ROLLBACK_SHA="${EURITH_ROLLBACK_SHA:-}"; ROLLBACK_SHA="${ROLLBACK_SHA,,}"
 require_full_sha "$TARGET_SHA"
 require_full_sha "$MOBILE_CANDIDATE_SHA"
+require_full_sha "$ROLLBACK_SHA"
 
 APP_DIR="${APP_DIR:-/opt/eurith}"
 SOURCE_DIR="${SOURCE_DIR:-$APP_DIR/backend}"
 EURITH_DEPLOY_ASSET_ROOT="${EURITH_DEPLOY_ASSET_ROOT:-}"
 EURITH_BASE_COMPOSE="${EURITH_BASE_COMPOSE:-$APP_DIR/docker-compose.yml}"
 RELEASE_OVERLAY="${RELEASE_OVERLAY:-$EURITH_DEPLOY_ASSET_ROOT/deploy/compose.release.yml}"
-OLD_RELEASE_OVERLAY="$SOURCE_DIR/deploy/compose.release.yml"
 DEPLOY_ENV="${DEPLOY_ENV:-/etc/eurith/release-deploy.env}"
 EURITH_PUBLIC_API_URL="${EURITH_PUBLIC_API_URL:-}"
 EURITH_CANARY_IDS_FILE="${EURITH_CANARY_IDS_FILE:-/etc/eurith/release-canary-ids.env}"
@@ -111,8 +112,11 @@ gate_checkout() {
   if git -C "$EURITH_DEPLOY_ASSET_ROOT" symbolic-ref -q HEAD >/dev/null 2>&1; then die deploy_asset_root_not_detached; fi
   git fetch --prune origin >/dev/null || die fetch_failed
   [[ "$(git rev-parse --verify "${TARGET_SHA}^{commit}")" == "$TARGET_SHA" ]] || die target_sha_unresolved
+  [[ "$(git rev-parse --verify "${ROLLBACK_SHA}^{commit}")" == "$ROLLBACK_SHA" ]] || die rollback_sha_unresolved
   git rev-parse --verify "${APPROVED_REMOTE_REF}^{commit}" >/dev/null || die approved_remote_ref_missing
   git merge-base --is-ancestor "$TARGET_SHA" "$APPROVED_REMOTE_REF" || die target_not_in_approved_remote_ref
+  git merge-base --is-ancestor "$ROLLBACK_SHA" "$TARGET_SHA" || die rollback_not_ancestor_of_target
+  git merge-base --is-ancestor "$ROLLBACK_SHA" "$APPROVED_REMOTE_REF" || die rollback_not_in_approved_remote_ref
   if [[ ! -e "$EURITH_EVIDENCE_ROOT" ]]; then install -d -o 0 -g 0 -m 0700 -- "$EURITH_EVIDENCE_ROOT"; fi
   assert_mode_owner_group "$EURITH_EVIDENCE_ROOT" 700 0 0
   [[ "$(_canonical_path "$(dirname -- "$MOBILE_GATE_FILE")")" == "$(_canonical_path "$EURITH_EVIDENCE_ROOT")" ]] || die mobile_gate_parent_invalid
@@ -120,7 +124,7 @@ gate_checkout() {
   EVIDENCE_DIR="$EURITH_EVIDENCE_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-$TARGET_SHA"
   [[ ! -e "$EVIDENCE_DIR" && ! -L "$EVIDENCE_DIR" ]] || die evidence_generation_exists
   install -d -m 0700 -- "$EVIDENCE_DIR"; : >"$EVIDENCE_DIR/deploy.env"; chmod 0600 "$EVIDENCE_DIR/deploy.env"
-  evidence old_backend_sha "$OLD_COMMIT"; evidence new_backend_sha "$TARGET_SHA"; evidence mobile_candidate_sha "$MOBILE_CANDIDATE_SHA"
+  evidence old_backend_sha "$OLD_COMMIT"; evidence rollback_backend_sha "$ROLLBACK_SHA"; evidence new_backend_sha "$TARGET_SHA"; evidence mobile_candidate_sha "$MOBILE_CANDIDATE_SHA"
 }
 
 gate_pause() {
@@ -218,7 +222,7 @@ gate_migrations() {
   migration_path_hash="$(sed -n 's/^migration_path_sha256=//p' "$path_manifest")"
   [[ "$heads" =~ ^[0-9A-Za-z_]+$ && "$migration_path" == "$current->$heads" ]] || die alembic_path_unknown
   [[ "$migration_path_hash" =~ ^[0-9a-f]{64}$ ]] || die migration_path_hash_invalid
-  approval_output="$(python3 "$MIGRATION_APPROVAL_TOOL" "$EURITH_MIGRATION_APPROVAL_FILE" "$OLD_COMMIT" "$TARGET_SHA" "$current" "$heads" "$migration_path_hash")" || die migration_approval_file_invalid
+  approval_output="$(python3 "$MIGRATION_APPROVAL_TOOL" "$EURITH_MIGRATION_APPROVAL_FILE" "$OLD_COMMIT" "$TARGET_SHA" "$ROLLBACK_SHA" "$current" "$heads" "$migration_path_hash")" || die migration_approval_file_invalid
   approval_hash="$(sed -n 's/^approval_sha256=//p' <<<"$approval_output")"
   approval_identity="$(sed -n 's/^approval_identity=//p' <<<"$approval_output")"
   [[ "$approval_hash" =~ ^[0-9a-f]{64}$ && "$approval_identity" =~ ^[A-Za-z0-9][A-Za-z0-9._@-]{2,127}$ ]] || die migration_approval_output_invalid
@@ -236,8 +240,8 @@ build_target() {
 }
 
 rehearse_migration_compatibility() {
-  local target_current
-  local -a target_rehearsal_compose old_rehearsal_compose
+  local target_current rollback_heads
+  local -a target_rehearsal_compose rollback_candidate_compose
   target_rehearsal_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY" -f "$REHEARSAL_OVERLAY")
   "${target_rehearsal_compose[@]}" config >/dev/null || die target_rehearsal_compose_invalid
   "${target_rehearsal_compose[@]}" run --rm --no-deps api alembic upgrade head || die target_migration_rehearsal_failed
@@ -245,16 +249,19 @@ rehearse_migration_compatibility() {
   [[ "$target_current" == "$EXPECTED_ALEMBIC_HEAD" ]] || die target_schema_rehearsal_failed
   "${target_rehearsal_compose[@]}" run --rm --no-deps --workdir /app -e PYTHONPATH=/app api python /tmp/eurith-rehearse-release-db.py "$EXPECTED_ALEMBIC_HEAD" || die target_schema_rehearsal_failed
   evidence target_migration_rehearsal passed
-  [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" == "$OLD_COMMIT" && -z "$(git -C "$SOURCE_DIR" status --porcelain)" ]] || die old_rehearsal_checkout_invalid
+  git -C "$SOURCE_DIR" checkout --detach "$ROLLBACK_SHA" >/dev/null || die rollback_candidate_checkout_failed
+  SOURCE_SWITCHED=1
+  [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" == "$ROLLBACK_SHA" && -z "$(git -C "$SOURCE_DIR" status --porcelain)" ]] || die rollback_candidate_checkout_invalid
   export EURITH_RUNTIME_SOURCE_ROOT="$SOURCE_DIR"
-  export EURITH_RUNTIME_ASSET_ROOT="$SOURCE_DIR"
-  old_rehearsal_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE")
-  [[ -f "$OLD_RELEASE_OVERLAY" ]] && old_rehearsal_compose+=(-f "$OLD_RELEASE_OVERLAY")
-  old_rehearsal_compose+=(-f "$REHEARSAL_OVERLAY")
-  "${old_rehearsal_compose[@]}" config >/dev/null || die old_backend_compatibility_rehearsal_failed
-  "${old_rehearsal_compose[@]}" build api >/dev/null || die old_backend_compatibility_rehearsal_failed
-  "${old_rehearsal_compose[@]}" run --rm --no-deps --workdir /app -e PYTHONPATH=/app api python /tmp/eurith-rehearse-release-db.py "$EXPECTED_ALEMBIC_HEAD" || die old_backend_compatibility_rehearsal_failed
-  evidence old_backend_compatibility_rehearsal passed
+  export EURITH_RUNTIME_ASSET_ROOT="$EURITH_DEPLOY_ASSET_ROOT"
+  rollback_candidate_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY" -f "$REHEARSAL_OVERLAY")
+  "${rollback_candidate_compose[@]}" config >/dev/null || die rollback_candidate_compatibility_rehearsal_failed
+  "${rollback_candidate_compose[@]}" build api >/dev/null || die rollback_candidate_compatibility_rehearsal_failed
+  [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" == "$ROLLBACK_SHA" && -z "$(git -C "$SOURCE_DIR" status --porcelain)" ]] || die rollback_candidate_checkout_invalid
+  rollback_heads="$("${rollback_candidate_compose[@]}" run --rm --no-deps api alembic heads 2>/dev/null | sed -n 's/^\([0-9A-Za-z_]*\).*/\1/p')" || die rollback_candidate_compatibility_rehearsal_failed
+  [[ "$rollback_heads" == "$EXPECTED_ALEMBIC_HEAD" ]] || die rollback_candidate_alembic_head_mismatch
+  "${rollback_candidate_compose[@]}" run --rm --no-deps --workdir /app -e PYTHONPATH=/app api python /tmp/eurith-rehearse-release-db.py "$EXPECTED_ALEMBIC_HEAD" || die rollback_candidate_compatibility_rehearsal_failed
+  evidence rollback_candidate_compatibility_rehearsal passed
   export EURITH_RUNTIME_SOURCE_ROOT="$EURITH_DEPLOY_ASSET_ROOT"
   export EURITH_RUNTIME_ASSET_ROOT="$EURITH_DEPLOY_ASSET_ROOT"
   "${compose[@]}" build api >/dev/null || die target_rebuild_after_rehearsal_failed
@@ -271,28 +278,39 @@ apply_migration_once() {
   evidence migration_status passed
 }
 
+capture_prior_runtime() {
+  local old_caddy_id
+  old_caddy_id="$("${compose[@]}" ps -q caddy 2>/dev/null || true)"
+  if [[ -n "$old_caddy_id" ]]; then
+    PRIOR_CADDY_PRESENT=1
+    OLD_CADDY_IMAGE_ID="$(docker inspect "$old_caddy_id" --format '{{.Image}}' 2>/dev/null || true)"
+    [[ "$OLD_CADDY_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die prior_caddy_image_unknown
+    evidence prior_caddy_image_id "$OLD_CADDY_IMAGE_ID"
+  fi
+  evidence prior_caddy_present "$PRIOR_CADDY_PRESENT"
+}
+
 rollback_infrastructure() {
   local result=failed rollback_caddy_id rollback_caddy_image rollback_image_overlay
   ROLLBACK_ATTEMPTED=1
-  if [[ "$SWITCH_ATTEMPTED" == 1 ]]; then
-    "${compose[@]}" stop caddy >/dev/null 2>&1 || true
+  if [[ "$SWITCH_ATTEMPTED" == 1 || ( "$MIGRATION_ATTEMPTED" == 1 && "$MIGRATION_STATE" == applied ) ]]; then
+    if [[ "$SWITCH_ATTEMPTED" == 1 ]]; then "${compose[@]}" stop caddy >/dev/null 2>&1 || true; fi
     if [[ "$PRIOR_CADDY_PRESENT" == 0 ]]; then
       if "${compose[@]}" rm -f caddy >/dev/null 2>&1; then evidence rollback_caddy_absent passed; else evidence rollback_caddy_absent failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; fi
     fi
-    if ! git -C "$SOURCE_DIR" checkout --detach "$OLD_COMMIT" >/dev/null 2>&1; then evidence rollback_checkout failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; fi
-    if [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null)" != "$OLD_COMMIT" ]]; then evidence rollback_checkout failed; evidence rollback_checkout_mismatch yes; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; fi
+    if ! git -C "$SOURCE_DIR" checkout --detach "$ROLLBACK_SHA" >/dev/null 2>&1; then evidence rollback_checkout failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; fi
+    if [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null)" != "$ROLLBACK_SHA" ]]; then evidence rollback_checkout failed; evidence rollback_checkout_mismatch yes; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; fi
     if [[ -n "$(git -C "$SOURCE_DIR" status --porcelain 2>/dev/null)" ]]; then evidence rollback_checkout failed; evidence rollback_checkout_dirty yes; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; fi
     evidence rollback_checkout passed
     export EURITH_RUNTIME_SOURCE_ROOT="$SOURCE_DIR"
-    export EURITH_RUNTIME_ASSET_ROOT="$SOURCE_DIR"
+    export EURITH_RUNTIME_ASSET_ROOT="$EURITH_DEPLOY_ASSET_ROOT"
     if [[ "$MIGRATION_ATTEMPTED" == 0 || ( "$MIGRATION_STATE" == applied && "$SCHEMA_ROLLBACK_COMPATIBLE" == 1 ) ]]; then
       if [[ "$PRIOR_CADDY_PRESENT" == 1 ]]; then
         [[ "$OLD_CADDY_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || { evidence rollback_caddy_image failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; }
         rollback_image_overlay="$(mktemp)" || { evidence rollback_caddy_image failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; }
         chmod 0600 "$rollback_image_overlay" || { rm -f -- "$rollback_image_overlay"; evidence rollback_caddy_image failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; }
         printf 'services:\n  caddy:\n    image: "%s"\n' "$OLD_CADDY_IMAGE_ID" >"$rollback_image_overlay" || { rm -f -- "$rollback_image_overlay"; evidence rollback_caddy_image failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; }
-        rollback_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE")
-        [[ -f "$OLD_RELEASE_OVERLAY" ]] && rollback_compose+=(-f "$OLD_RELEASE_OVERLAY")
+        rollback_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY")
         rollback_compose+=(-f "$rollback_image_overlay")
         if "${rollback_compose[@]}" build api >/dev/null 2>&1 && "${rollback_compose[@]}" up -d --no-deps --pull never api caddy >/dev/null 2>&1; then
           rollback_caddy_id="$("${rollback_compose[@]}" ps -q caddy 2>/dev/null)"
@@ -302,7 +320,7 @@ rollback_infrastructure() {
         rm -f -- "$rollback_image_overlay"
       else
         evidence rollback_caddy_image not_applicable
-        rollback_compose=(docker compose -f "$EURITH_BASE_COMPOSE")
+        rollback_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY")
         "${rollback_compose[@]}" build api >/dev/null 2>&1 && "${rollback_compose[@]}" up -d --no-deps api >/dev/null 2>&1 && result=passed
       fi
     fi
@@ -311,15 +329,7 @@ rollback_infrastructure() {
 }
 
 switch_api_and_caddy() {
-  local service old_caddy_id container_id restarts
-  old_caddy_id="$("${compose[@]}" ps -q caddy 2>/dev/null || true)"
-  if [[ -n "$old_caddy_id" ]]; then
-    PRIOR_CADDY_PRESENT=1
-    OLD_CADDY_IMAGE_ID="$(docker inspect "$old_caddy_id" --format '{{.Image}}' 2>/dev/null || true)"
-    [[ "$OLD_CADDY_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die prior_caddy_image_unknown
-    evidence prior_caddy_image_id "$OLD_CADDY_IMAGE_ID"
-  fi
-  evidence prior_caddy_present "$PRIOR_CADDY_PRESENT"
+  local service container_id restarts
   SWITCH_ATTEMPTED=1
   "${compose[@]}" up -d --no-deps --pull never api caddy || rollback_infrastructure
   for service in api caddy; do
@@ -377,11 +387,12 @@ on_exit() {
     if [[ "$MIGRATION_ATTEMPTED" == 1 && "$MIGRATION_EVIDENCE_WRITTEN" == 0 ]]; then evidence migration_state unknown; evidence manual_intervention_required yes; fi
     evidence "${CURRENT_STAGE}_exit" "$status"
     evidence deployment_result failed
-    if [[ "$SWITCH_ATTEMPTED" == 1 && "$ROLLBACK_ATTEMPTED" == 0 ]]; then
+    if [[ "$ROLLBACK_ATTEMPTED" == 0 && ( "$SWITCH_ATTEMPTED" == 1 || ( "$MIGRATION_ATTEMPTED" == 1 && "$MIGRATION_STATE" == applied ) ) ]]; then
       rollback_infrastructure
     elif [[ "$SWITCH_ATTEMPTED" == 0 ]]; then
       if [[ "$SOURCE_SWITCHED" == 1 ]]; then
-        if git -C "$SOURCE_DIR" checkout --detach "$OLD_COMMIT" >/dev/null 2>&1 && [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null)" == "$OLD_COMMIT" ]] && [[ -z "$(git -C "$SOURCE_DIR" status --porcelain 2>/dev/null)" ]]; then
+        restore_sha="$OLD_COMMIT"; [[ "$MIGRATION_ATTEMPTED" == 1 ]] && restore_sha="$ROLLBACK_SHA"
+        if git -C "$SOURCE_DIR" checkout --detach "$restore_sha" >/dev/null 2>&1 && [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null)" == "$restore_sha" ]] && [[ -z "$(git -C "$SOURCE_DIR" status --porcelain 2>/dev/null)" ]]; then
           evidence rollback_checkout passed
         else
           evidence rollback_checkout failed
@@ -414,6 +425,7 @@ CURRENT_STAGE=gate_migrations; gate_migrations; evidence gate_migrations_exit 0
 CURRENT_STAGE=build_target; build_target; evidence build_target_exit 0
 CURRENT_STAGE=rehearse_migration_compatibility; rehearse_migration_compatibility; evidence rehearse_migration_compatibility_exit 0
 CURRENT_STAGE=checkout_target_source; checkout_target_source; evidence checkout_target_source_exit 0
+CURRENT_STAGE=capture_prior_runtime; capture_prior_runtime; evidence capture_prior_runtime_exit 0
 CURRENT_STAGE=apply_migration_once; apply_migration_once; evidence apply_migration_once_exit 0
 CURRENT_STAGE=switch_api_and_caddy; switch_api_and_caddy; evidence switch_api_and_caddy_exit 0
 CURRENT_STAGE=wait_for_readiness; wait_for_readiness; evidence wait_for_readiness_exit 0

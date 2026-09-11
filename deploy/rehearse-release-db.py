@@ -27,6 +27,32 @@ async def probe(expected_head: str) -> None:
         actual_head = (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
         if actual_head != expected_head:
             raise RuntimeError("alembic_version_mismatch")
+        unsafe_training_block_provenance = (await session.execute(text("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM training_blocks
+                WHERE phase_snapshot_trusted = false
+                  AND (
+                    mesocycle_id IS NOT NULL
+                    OR user_mesocycle_id IS NOT NULL
+                    OR status = 'active'
+                  )
+            )
+        """))).scalar_one()
+        if unsafe_training_block_provenance:
+            raise RuntimeError("unsafe_training_block_provenance")
+        invalid_release_registry_row = (await session.execute(text("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM app_releases
+                WHERE platform <> 'android'
+                   OR channel NOT IN ('production-direct', 'production-play')
+                   OR delivery_method NOT IN ('direct_apk', 'eas_update', 'google_play')
+                   OR status NOT IN ('published', 'withdrawn')
+            )
+        """))).scalar_one()
+        if invalid_release_registry_row:
+            raise RuntimeError("invalid_release_registry_row")
         for table in Base.metadata.sorted_tables:
             exists = (await session.execute(
                 text("SELECT to_regclass(:qualified) IS NOT NULL"),

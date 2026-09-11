@@ -39,15 +39,45 @@ def _wrapper(directory: Path, name: str, body: str) -> None:
     path.chmod(0o755)
 
 
-def test_deploy_requires_two_exact_shas_and_remote_containment() -> None:
+def test_deploy_requires_two_arguments_plus_protected_exact_rollback_sha_and_remote_containment() -> None:
     script = _text(DEPLOY)
     assert "[[ $# == 2 ]]" in script
     assert 'require_full_sha "$TARGET_SHA"' in script
     assert 'require_full_sha "$MOBILE_CANDIDATE_SHA"' in script
+    assert 'require_full_sha "$ROLLBACK_SHA"' in script
+    assert 'ROLLBACK_SHA="${EURITH_ROLLBACK_SHA:-}"' in script
     assert "git status --porcelain" in script
-    assert "git merge-base --is-ancestor" in script
+    assert 'git merge-base --is-ancestor "$ROLLBACK_SHA" "$TARGET_SHA"' in script
+    assert 'git merge-base --is-ancestor "$ROLLBACK_SHA" "$APPROVED_REMOTE_REF"' in script
     assert "APPROVED_REMOTE_REF" in script
     assert "deploy_asset_root_sha_mismatch" in script
+
+
+def test_rollback_candidate_rehearsal_and_recovery_are_exact_and_distinct_from_incumbent() -> None:
+    script = _text(DEPLOY)
+    rehearsal = script[script.index("rehearse_migration_compatibility()") : script.index("apply_migration_once()")]
+    rollback = script[script.index("rollback_infrastructure()") : script.index("switch_api_and_caddy()")]
+    assert 'checkout --detach "$ROLLBACK_SHA"' in rehearsal
+    assert 'rev-parse HEAD)" == "$ROLLBACK_SHA"' in rehearsal
+    assert 'EURITH_RUNTIME_SOURCE_ROOT="$SOURCE_DIR"' in rehearsal
+    assert 'EURITH_RUNTIME_ASSET_ROOT="$EURITH_DEPLOY_ASSET_ROOT"' in rehearsal
+    assert '-f "$RELEASE_OVERLAY"' in rehearsal
+    assert 'rollback_heads="$(' in rehearsal
+    assert '[[ "$rollback_heads" == "$EXPECTED_ALEMBIC_HEAD" ]]' in rehearsal
+    assert "rollback_candidate_compatibility_rehearsal_failed" in rehearsal
+    assert 'checkout --detach "$ROLLBACK_SHA"' in rollback
+    assert 'rev-parse HEAD 2>/dev/null)" != "$ROLLBACK_SHA"' in rollback
+    assert 'EURITH_RUNTIME_SOURCE_ROOT="$SOURCE_DIR"' in rollback
+    assert 'EURITH_RUNTIME_ASSET_ROOT="$EURITH_DEPLOY_ASSET_ROOT"' in rollback
+    assert 'rollback_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY")' in rollback
+    assert 'evidence rollback_backend_sha "$ROLLBACK_SHA"' in script
+    assert '"$ROLLBACK_SHA" == "$OLD_COMMIT"' not in script
+    assert script.index("CURRENT_STAGE=capture_prior_runtime") < script.index("CURRENT_STAGE=apply_migration_once")
+    capture = script[script.index("capture_prior_runtime()") : script.index("rollback_infrastructure()")]
+    assert "OLD_CADDY_IMAGE_ID" in capture
+    on_exit = script[script.index("on_exit() {") : script.index("trap on_exit EXIT")]
+    assert '"$MIGRATION_STATE" == applied' in on_exit
+    assert "rollback_infrastructure" in on_exit
 
 
 def test_exact_detached_asset_root_bootstraps_before_source_checkout() -> None:
@@ -96,6 +126,7 @@ def test_deploy_orders_irreversible_work_behind_all_preflight_gates() -> None:
         "gate_migrations",
         "build_target",
         "rehearse_migration_compatibility",
+        "capture_prior_runtime",
         "apply_migration_once",
         "switch_api_and_caddy",
         "wait_for_readiness",
@@ -127,6 +158,7 @@ def test_deploy_records_required_redacted_evidence_and_pins_caddy_digest() -> No
     publisher = _text(PUBLISH_GATE)
     for field in (
         "old_backend_sha",
+        "rollback_backend_sha",
         "new_backend_sha",
         "mobile_candidate_sha",
         "compose_sha256",
@@ -300,9 +332,10 @@ def test_migration_approval_is_exact_root_owned_mode_0400_and_identity_bound(tmp
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     approval = tmp_path / "approval.env"
-    old_sha, target_sha, path_hash = "a" * 40, "b" * 40, "c" * 64
+    old_sha, target_sha, rollback_sha, path_hash = "a" * 40, "b" * 40, "d" * 40, "c" * 64
     lines = [
         f"old_backend_sha={old_sha}", f"target_backend_sha={target_sha}",
+        f"rollback_backend_sha={rollback_sha}",
         "old_alembic_head=001", "target_alembic_head=002",
         f"migration_path_sha256={path_hash}", "rollback_compatible=true",
         "approval_identity=release-reviewer@example.invalid",
@@ -313,17 +346,17 @@ def test_migration_approval_is_exact_root_owned_mode_0400_and_identity_bound(tmp
         st_uid = 0
         st_gid = 0
     raw = approval.read_bytes()
-    assert module.validate_payload(Metadata(), raw, old_sha, target_sha, "001", "002", path_hash)[1] == "release-reviewer@example.invalid"
+    assert module.validate_payload(Metadata(), raw, old_sha, target_sha, rollback_sha, "001", "002", path_hash)[1] == "release-reviewer@example.invalid"
     Metadata.st_mode = 0o100600
     try:
-        module.validate_payload(Metadata(), raw, old_sha, target_sha, "001", "002", path_hash)
+        module.validate_payload(Metadata(), raw, old_sha, target_sha, rollback_sha, "001", "002", path_hash)
     except ValueError:
         pass
     else:
         raise AssertionError("mode 0600 must be rejected")
     Metadata.st_mode = 0o120400
     try:
-        module.validate_payload(Metadata(), raw, old_sha, target_sha, "001", "002", path_hash)
+        module.validate_payload(Metadata(), raw, old_sha, target_sha, rollback_sha, "001", "002", path_hash)
     except ValueError:
         pass
     else:
@@ -331,7 +364,7 @@ def test_migration_approval_is_exact_root_owned_mode_0400_and_identity_bound(tmp
     Metadata.st_mode = 0o100400
     approval.write_bytes(("\n".join(lines[:-1] + ["approval_identity=bad identity"]) + "\n").encode("ascii"))
     try:
-        module.validate_payload(Metadata(), approval.read_bytes(), old_sha, target_sha, "001", "002", path_hash)
+        module.validate_payload(Metadata(), approval.read_bytes(), old_sha, target_sha, rollback_sha, "001", "002", path_hash)
     except ValueError:
         pass
     else:
@@ -339,7 +372,7 @@ def test_migration_approval_is_exact_root_owned_mode_0400_and_identity_bound(tmp
     mismatch = ("\n".join(lines) + "\n").replace("target_alembic_head=002", "target_alembic_head=evil")
     approval.write_bytes(mismatch.encode("ascii"))
     try:
-        module.validate_payload(Metadata(), approval.read_bytes(), old_sha, target_sha, "001", "002", path_hash)
+        module.validate_payload(Metadata(), approval.read_bytes(), old_sha, target_sha, rollback_sha, "001", "002", path_hash)
     except ValueError:
         pass
     else:
@@ -355,13 +388,23 @@ def test_migration_rehearsal_is_mandatory_and_fail_closed_before_production_muta
     assert 'CURRENT_STAGE=rehearse_migration_compatibility; rehearse_migration_compatibility' in script
     assert '|| die target_migration_rehearsal_failed' in script
     assert '|| die target_schema_rehearsal_failed' in script
-    assert '|| die old_backend_compatibility_rehearsal_failed' in script
+    assert '|| die rollback_candidate_compatibility_rehearsal_failed' in script
     probe_command = '--workdir /app -e PYTHONPATH=/app api python /tmp/eurith-rehearse-release-db.py "$EXPECTED_ALEMBIC_HEAD"'
     assert script.count(probe_command) == 2
     assert script.index("CURRENT_STAGE=rehearse_migration_compatibility") < script.index("CURRENT_STAGE=apply_migration_once")
     assert script.index("SCHEMA_ROLLBACK_COMPATIBLE=1") < script.index("CURRENT_STAGE=apply_migration_once")
     probe = _text(REHEARSAL_PROBE)
-    for contract in ("health_check", "alembic_version", "Base.metadata.sorted_tables", "missing_table", "missing_column"):
+    for contract in (
+        "health_check",
+        "alembic_version",
+        "Base.metadata.sorted_tables",
+        "missing_table",
+        "missing_column",
+        "unsafe_training_block_provenance",
+        "invalid_release_registry_row",
+        "phase_snapshot_trusted = false",
+        "FROM app_releases",
+    ):
         assert contract in probe
 
 
@@ -419,7 +462,7 @@ def test_rollback_restores_both_prior_caddy_topologies() -> None:
     assert '"$rollback_caddy_image" == "$OLD_CADDY_IMAGE_ID"' in script
     assert 'if [[ "$PRIOR_CADDY_PRESENT" == 0 ]]' in script
     assert '"${compose[@]}" rm -f caddy' in script
-    assert 'rollback_compose=(docker compose -f "$EURITH_BASE_COMPOSE")' in script
+    assert 'rollback_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY")' in script
 
 
 def test_nginx_artifact_and_instructions_are_removed_together() -> None:
@@ -478,6 +521,7 @@ def test_dirty_checkout_stops_before_any_mutating_command(tmp_path: Path) -> Non
         "EURITH_MIGRATION_APPROVAL_FILE": _shell(migration_approval),
         "EURITH_EVIDENCE_ROOT": _shell(tmp_path / "evidence"), "MOBILE_GATE_FILE": _shell(tmp_path / "gate.env"),
         "EURITH_APPROVED_CADDY_DIGEST": "sha256:" + "c" * 64,
+        "EURITH_ROLLBACK_SHA": "d" * 40,
     })
     result = subprocess.run([BASH, _shell(DEPLOY), "a" * 40, "b" * 40], cwd=ROOT, env=env, capture_output=True, text=True, timeout=15)
     assert result.returncode != 0
