@@ -52,6 +52,20 @@ elif command == "pg_restore":
         sys.exit(3)
 elif command == "psql":
     sql = args[args.index("--command") + 1]
+    comprehensive_catalog_env = {
+        "pg_catalog.pg_namespace": "FAKE_DB_SCHEMA_COUNT",
+        "pg_catalog.pg_class": "FAKE_DB_RELATION_COUNT",
+        "pg_catalog.pg_proc": "FAKE_DB_ROUTINE_COUNT",
+        "pg_catalog.pg_type": "FAKE_DB_TYPE_COUNT",
+        "pg_catalog.pg_extension": "FAKE_DB_EXTENSION_COUNT",
+        "pg_catalog.pg_foreign_data_wrapper": "FAKE_DB_FDW_COUNT",
+        "pg_catalog.pg_foreign_server": "FAKE_DB_SERVER_COUNT",
+        "pg_catalog.pg_publication": "FAKE_DB_PUBLICATION_COUNT",
+        "pg_catalog.pg_largeobject_metadata": "FAKE_DB_LARGE_OBJECT_COUNT",
+        "pg_catalog.pg_collation": "FAKE_DB_COLLATION_COUNT",
+        "pg_catalog.pg_conversion": "FAKE_DB_CONVERSION_COUNT",
+        "pg_catalog.pg_ts_config": "FAKE_DB_TEXT_SEARCH_COUNT",
+    }
     catalog_env = {
         "FROM pg_catalog.pg_namespace": "FAKE_DB_SCHEMA_COUNT",
         "FROM pg_catalog.pg_class": "FAKE_DB_RELATION_COUNT",
@@ -59,12 +73,17 @@ elif command == "psql":
         "FROM pg_catalog.pg_type": "FAKE_DB_TYPE_COUNT",
         "FROM pg_catalog.pg_extension": "FAKE_DB_EXTENSION_COUNT",
     }
-    matched = next((value for token, value in catalog_env.items() if token in sql), None)
-    if matched:
-        print(os.environ.get(matched, os.environ.get("FAKE_DB_OBJECT_COUNT", "0")))
-    elif "artifact_storage_key" in sql:
-        rows = pathlib.Path(os.environ["FAKE_ROWS_FILE"])
-        if rows.exists(): print(rows.read_text(encoding="utf-8"), end="")
+    if "database_objects" in sql:
+        values = [os.environ.get(name, "0") for token, name in comprehensive_catalog_env.items() if token in sql]
+        values.append(os.environ.get("FAKE_DB_OBJECT_COUNT", "0"))
+        print(max(map(int, values)))
+    else:
+        matched = next((value for token, value in catalog_env.items() if token in sql), None)
+        if matched:
+            print(os.environ.get(matched, os.environ.get("FAKE_DB_OBJECT_COUNT", "0")))
+        elif "artifact_storage_key" in sql:
+            rows = pathlib.Path(os.environ["FAKE_ROWS_FILE"])
+            if rows.exists(): print(rows.read_text(encoding="utf-8"), end="")
 elif command == "tar":
     if os.environ.get("FAKE_TAR_FAIL") == "1": sys.exit(4)
     if "--create" in args:
@@ -105,7 +124,9 @@ elif command == "mkdir":
 elif command == "chmod":
     mode = int(args[0], 8)
     for target in args[1:]:
-        if target != "--": os.chmod(target, mode)
+        if target != "--":
+            os.chmod(target, mode)
+            data = metadata(); data[str(pathlib.Path(target).resolve())] = oct(mode)[2:]; save_metadata(data)
 elif command == "stat":
     path = pathlib.Path(args[-1])
     if "%a" in args: print(metadata().get(str(path.resolve()), oct(path.stat().st_mode & 0o777)[2:]))
@@ -339,6 +360,25 @@ def test_restore_accepts_only_matching_pair_and_reports_redacted_counts(tmp_path
     assert "--dbname eurith_restore_test" in restore_call
 
 
+def test_restore_preserves_scratch_named_files_from_archive_byte_for_byte(tmp_path: Path) -> None:
+    """Catches verifier scratch state overwriting legitimate restored release-volume files."""
+    harness = Harness(tmp_path)
+    payloads = {
+        ".registry.tsv": b"legitimate-registry-content\x00\xff",
+        ".expected-artifacts.tsv": b"legitimate-expected-content\r\n",
+        ".actual-artifacts.tsv": b"legitimate-actual-content\n",
+    }
+    for name, payload in payloads.items():
+        (harness.volume / name).write_bytes(payload)
+    assert harness.run_backup().returncode == 0
+    restore_root = harness.tmp / "restore-volume"
+
+    completed = harness.run_restore(target=restore_root)
+
+    assert completed.returncode == 0, completed.stderr
+    assert {name: (restore_root / name).read_bytes() for name in payloads} == payloads
+
+
 @pytest.mark.parametrize(
     ("url", "expected"),
     [
@@ -459,6 +499,34 @@ def test_restore_rejects_every_user_object_category_before_pg_restore(
     if object_kind in {"table", "sequence", "view", "materialized_view", "foreign_table"}:
         relation_probe = next(line for line in calls.splitlines() if "FROM pg_catalog.pg_class" in line)
         assert "relkind" not in relation_probe
+    assert "pg_restore" not in calls
+
+
+@pytest.mark.parametrize(
+    ("environment", "catalog", "object_kind"),
+    [
+        ("FAKE_DB_FDW_COUNT", "pg_catalog.pg_foreign_data_wrapper", "foreign_data_wrapper"),
+        ("FAKE_DB_SERVER_COUNT", "pg_catalog.pg_foreign_server", "foreign_server"),
+        ("FAKE_DB_PUBLICATION_COUNT", "pg_catalog.pg_publication", "publication"),
+        ("FAKE_DB_LARGE_OBJECT_COUNT", "pg_catalog.pg_largeobject_metadata", "large_object"),
+        ("FAKE_DB_COLLATION_COUNT", "pg_catalog.pg_collation", "public_collation"),
+        ("FAKE_DB_CONVERSION_COUNT", "pg_catalog.pg_conversion", "public_conversion"),
+        ("FAKE_DB_TEXT_SEARCH_COUNT", "pg_catalog.pg_ts_config", "public_text_search_object"),
+    ],
+)
+def test_restore_pristine_baseline_rejects_database_and_schema_level_objects(
+    tmp_path: Path, environment: str, catalog: str, object_kind: str
+) -> None:
+    """Catches a selective emptiness gate that misses non-relation database objects."""
+    harness = Harness(tmp_path)
+    assert harness.run_backup().returncode == 0
+
+    completed = harness.run_restore(**{environment: "1"})
+
+    assert completed.returncode != 0, object_kind
+    assert "restore_database_not_empty" in completed.stderr
+    calls = (harness.state / "calls.log").read_text()
+    assert catalog in calls
     assert "pg_restore" not in calls
 
 

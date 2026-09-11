@@ -12,7 +12,7 @@ database_url_file="$2"
 restore_root="$3"
 checkout_root="${RELEASE_CHECKOUT_ROOT:-$(cd -- "$SCRIPT_DIR/.." && pwd -P)}"
 production_root="${RELEASE_VOLUME_ROOT:-/opt/eurith/releases}"
-for command in pg_restore psql tar sha256sum stat find sort diff python3; do require_command "$command"; done
+for command in pg_restore psql tar sha256sum stat find sort diff python3 mktemp chmod rm; do require_command "$command"; done
 
 require_safe_absolute_path "$generation" backup "$checkout_root"
 require_safe_absolute_path "$database_url_file" secret "$checkout_root"
@@ -26,12 +26,27 @@ case "$restore_resolved/" in "$production_resolved"/*) die "restore_volume_is_pr
 [[ -d "$restore_root" && ! -L "$restore_root" ]] || die "restore_volume_invalid"
 [[ -z "$(find -P "$restore_root" -mindepth 1 -print -quit)" ]] || die "restore_volume_not_empty"
 
+# Verifier state must never share names or lifecycle with restored content.
+# Create one private, invocation-owned workspace outside every protected tree.
+scratch_parent="${RELEASE_VERIFY_TMPDIR:-/tmp}"
+require_safe_absolute_path "$scratch_parent" backup "$checkout_root"
+[[ -d "$scratch_parent" && ! -L "$scratch_parent" ]] || die "verify_temp_root_invalid"
+scratch_parent_resolved="$(_canonical_path "$scratch_parent")"
+for protected_root in "$generation_resolved" "$restore_resolved" "$production_resolved"; do
+  case "$scratch_parent_resolved/" in "$protected_root"/*) die "verify_temp_root_protected" ;; esac
+done
+scratch="$(mktemp -d -- "$scratch_parent/eurith-release-verify.XXXXXXXX")" || die "verify_temp_create_failed"
+chmod 0700 -- "$scratch" || die "verify_temp_mode_failed"
+[[ -d "$scratch" && ! -L "$scratch" && "$(stat -c '%a' -- "$scratch")" == 700 ]] || die "verify_temp_invalid"
+cleanup_scratch() { rm -rf -- "$scratch"; }
+trap cleanup_scratch EXIT
+
 dump="$generation/database.dump"
 archive="$generation/releases.tar"
 manifest="$generation/manifest.sha256"
 for item in "$dump" "$archive" "$manifest"; do [[ -f "$item" && ! -L "$item" ]] || die "backup_component_invalid"; done
 
-pg_env="$restore_root/.pg.env"
+pg_env="$scratch/pg.env"
 python3 - "$database_url_file" restore "$pg_env" <<'PY'
 import os, pathlib, re, shlex, sys
 from urllib.parse import unquote, urlsplit
@@ -98,17 +113,54 @@ require_catalog_zero() {
   [[ "$count" == 0 ]] || die "restore_database_not_empty"
 }
 
-# Explicit pristine-database baseline: public plus PostgreSQL system schemas,
-# and optionally the default plpgsql extension. Any user schema/object fails.
-require_catalog_zero "SELECT count(*) FROM pg_catalog.pg_namespace n WHERE n.nspname NOT IN ('public','pg_catalog','information_schema','pg_toast') AND n.nspname !~ '^pg_(temp|toast_temp)_[0-9]+$'"
-require_catalog_zero "SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' OR (n.nspname NOT IN ('pg_catalog','information_schema','pg_toast') AND n.nspname !~ '^pg_(temp|toast_temp)_[0-9]+$')"
-require_catalog_zero "SELECT count(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' OR (n.nspname NOT IN ('pg_catalog','information_schema','pg_toast') AND n.nspname !~ '^pg_(temp|toast_temp)_[0-9]+$')"
-require_catalog_zero "SELECT count(*) FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname='public' OR (n.nspname NOT IN ('pg_catalog','information_schema','pg_toast') AND n.nspname !~ '^pg_(temp|toast_temp)_[0-9]+$')"
-require_catalog_zero "SELECT count(*) FROM pg_catalog.pg_extension e WHERE e.extname NOT IN ('plpgsql')"
+# Fail closed against the complete set of database-local object families that
+# can make an otherwise disposable restore target non-pristine. PostgreSQL's
+# built-in objects live in system schemas or below FirstNormalObjectId (16384);
+# public and plpgsql are the only allowed initialized-database objects.
+require_catalog_zero "WITH database_objects(object_kind, object_oid) AS (
+  SELECT 'schema', n.oid FROM pg_catalog.pg_namespace n
+    WHERE n.nspname NOT IN ('public','pg_catalog','information_schema','pg_toast')
+      AND n.nspname !~ '^pg_(temp|toast_temp)_[0-9]+$'
+  UNION ALL SELECT 'relation', c.oid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname='public' OR (n.nspname NOT IN ('pg_catalog','information_schema','pg_toast') AND n.nspname !~ '^pg_(temp|toast_temp)_[0-9]+$')
+  UNION ALL SELECT 'routine', p.oid FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname='public' OR (n.nspname NOT IN ('pg_catalog','information_schema','pg_toast') AND n.nspname !~ '^pg_(temp|toast_temp)_[0-9]+$')
+  UNION ALL SELECT 'type', t.oid FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace
+    WHERE n.nspname='public' OR (n.nspname NOT IN ('pg_catalog','information_schema','pg_toast') AND n.nspname !~ '^pg_(temp|toast_temp)_[0-9]+$')
+  UNION ALL SELECT 'extension', e.oid FROM pg_catalog.pg_extension e WHERE e.extname <> 'plpgsql'
+  UNION ALL SELECT 'operator', o.oid FROM pg_catalog.pg_operator o JOIN pg_catalog.pg_namespace n ON n.oid=o.oprnamespace WHERE n.nspname='public'
+  UNION ALL SELECT 'collation', c.oid FROM pg_catalog.pg_collation c JOIN pg_catalog.pg_namespace n ON n.oid=c.collnamespace WHERE n.nspname='public'
+  UNION ALL SELECT 'conversion', c.oid FROM pg_catalog.pg_conversion c JOIN pg_catalog.pg_namespace n ON n.oid=c.connamespace WHERE n.nspname='public'
+  UNION ALL SELECT 'operator_class', o.oid FROM pg_catalog.pg_opclass o JOIN pg_catalog.pg_namespace n ON n.oid=o.opcnamespace WHERE n.nspname='public'
+  UNION ALL SELECT 'operator_family', o.oid FROM pg_catalog.pg_opfamily o JOIN pg_catalog.pg_namespace n ON n.oid=o.opfnamespace WHERE n.nspname='public'
+  UNION ALL SELECT 'text_search_parser', t.oid FROM pg_catalog.pg_ts_parser t JOIN pg_catalog.pg_namespace n ON n.oid=t.prsnamespace WHERE n.nspname='public'
+  UNION ALL SELECT 'text_search_config', t.oid FROM pg_catalog.pg_ts_config t JOIN pg_catalog.pg_namespace n ON n.oid=t.cfgnamespace WHERE n.nspname='public'
+  UNION ALL SELECT 'text_search_dictionary', t.oid FROM pg_catalog.pg_ts_dict t JOIN pg_catalog.pg_namespace n ON n.oid=t.dictnamespace WHERE n.nspname='public'
+  UNION ALL SELECT 'text_search_template', t.oid FROM pg_catalog.pg_ts_template t JOIN pg_catalog.pg_namespace n ON n.oid=t.tmplnamespace WHERE n.nspname='public'
+  UNION ALL SELECT 'foreign_data_wrapper', f.oid FROM pg_catalog.pg_foreign_data_wrapper f
+  UNION ALL SELECT 'foreign_server', s.oid FROM pg_catalog.pg_foreign_server s
+  UNION ALL SELECT 'user_mapping', u.oid FROM pg_catalog.pg_user_mapping u
+  UNION ALL SELECT 'publication', p.oid FROM pg_catalog.pg_publication p
+  UNION ALL SELECT 'large_object', l.oid FROM pg_catalog.pg_largeobject_metadata l
+  UNION ALL SELECT 'event_trigger', e.oid FROM pg_catalog.pg_event_trigger e
+  UNION ALL SELECT 'default_acl', d.oid FROM pg_catalog.pg_default_acl d
+  UNION ALL SELECT 'extended_statistics', s.oid FROM pg_catalog.pg_statistic_ext s JOIN pg_catalog.pg_namespace n ON n.oid=s.stxnamespace WHERE n.nspname='public'
+  UNION ALL SELECT 'language', l.oid FROM pg_catalog.pg_language l WHERE l.lanname NOT IN ('internal','c','sql','plpgsql')
+  UNION ALL SELECT 'cast', c.oid FROM pg_catalog.pg_cast c WHERE c.oid >= 16384
+  UNION ALL SELECT 'transform', t.oid FROM pg_catalog.pg_transform t WHERE t.oid >= 16384
+  UNION ALL SELECT 'access_method', a.oid FROM pg_catalog.pg_am a WHERE a.oid >= 16384
+  UNION ALL SELECT 'subscription', s.oid FROM pg_catalog.pg_subscription s WHERE s.subdbid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=current_database())
+  UNION ALL SELECT 'database_setting', d.setdatabase FROM pg_catalog.pg_db_role_setting d WHERE d.setdatabase=(SELECT oid FROM pg_catalog.pg_database WHERE datname=current_database())
+  UNION ALL SELECT 'security_label', s.objoid FROM pg_catalog.pg_seclabel s
+  UNION ALL SELECT 'database_security_label', s.objoid FROM pg_catalog.pg_shseclabel s WHERE s.classoid='pg_catalog.pg_database'::pg_catalog.regclass AND s.objoid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=current_database())
+  UNION ALL SELECT 'public_schema_comment', d.objoid FROM pg_catalog.pg_description d WHERE d.classoid='pg_catalog.pg_namespace'::pg_catalog.regclass AND d.objoid='public'::pg_catalog.regnamespace AND d.description <> 'standard public schema'
+  UNION ALL SELECT 'database_comment', d.objoid FROM pg_catalog.pg_shdescription d WHERE d.classoid='pg_catalog.pg_database'::pg_catalog.regclass AND d.objoid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=current_database())
+)
+SELECT count(*) FROM database_objects"
 pg_restore --exit-on-error --no-owner --no-privileges --dbname "$PGDATABASE" "$dump" || die "database_restore_failed"
 tar --extract --file "$archive" --directory "$restore_root" || die "archive_restore_failed"
 
-rows="$restore_root/.registry.tsv"
+rows="$scratch/registry.tsv"
 psql --no-psqlrc --set ON_ERROR_STOP=1 --tuples-only --no-align --field-separator=$'\t' \
   --command "SELECT artifact_storage_key, status, artifact_size_bytes, artifact_sha256 FROM app_releases WHERE delivery_method = 'direct_apk' AND artifact_deleted_at IS NULL ORDER BY artifact_storage_key" \
   >"$rows" || die "release_registry_query_failed"
@@ -127,8 +179,8 @@ while IFS=$'\t' read -r key status expected_size expected_sha extra; do
   row_count=$((row_count + 1))
 done <"$rows"
 
-expected_artifacts="$restore_root/.expected-artifacts.tsv"
-actual_artifacts="$restore_root/.actual-artifacts.tsv"
+expected_artifacts="$scratch/expected-artifacts.tsv"
+actual_artifacts="$scratch/actual-artifacts.tsv"
 awk -F '\t' '$1 == "artifact" {print $0}' "$manifest" | LC_ALL=C sort >"$expected_artifacts"
 : >"$actual_artifacts"
 final_root="$restore_root/android/sha256"
@@ -144,7 +196,6 @@ LC_ALL=C sort -o "$actual_artifacts" "$actual_artifacts"
 diff -u -- "$expected_artifacts" "$actual_artifacts" >/dev/null || die "manifest_artifact_mismatch"
 file_count="$(grep -c '^artifact' "$actual_artifacts" || true)"
 manifest_digest="$(sha256_file "$manifest")"
-rm -f -- "$rows" "$expected_artifacts" "$actual_artifacts"
 unset PGPASSWORD PGUSER PGDATABASE PGPORT PGHOST
 printf 'rows=%s\n' "$row_count"
 printf 'files=%s\n' "$file_count"
