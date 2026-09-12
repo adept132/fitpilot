@@ -88,7 +88,10 @@ def start_docker_through_dependency(emit_output=True):
     return 0
 
 def activate_boot_unit(emit_output=True):
-    if os.environ.get("FAKE_SYSTEMCTL_RESTART_FAIL") == "1": return 23
+    if (
+        os.environ.get("FAKE_SYSTEMCTL_START_FAIL") == "1"
+        or os.environ.get("FAKE_SYSTEMCTL_RESTART_FAIL") == "1"
+    ): return 23
     result = subprocess.run(
         [os.environ["FAKE_BASH"], os.environ["EURITH_TEST_BOOT_HELPER"]],
         env=os.environ.copy(), text=True, capture_output=True, check=False,
@@ -327,6 +330,13 @@ elif command == "systemctl":
         if os.environ.get("FAKE_SYSTEMCTL_IS_ENABLED_FAIL") == "1": sys.exit(18)
         sys.exit(0 if (state_dir / "boot-unit-enabled").exists() else 1)
     if args == ["restart", "eurith-release-views.service"]:
+        if (state_dir / "docker-started").exists():
+            with (state_dir / "calls.log").open("a", encoding="utf-8") as log:
+                log.write("systemctl try-restart docker.service\n")
+            (state_dir / "docker-restart-propagated").write_text("yes")
+        sys.exit(activate_boot_unit())
+    if args == ["start", "eurith-release-views.service"]:
+        if (state_dir / "boot-unit-active").exists(): sys.exit(0)
         sys.exit(activate_boot_unit())
     if args == ["is-enabled", "eurith-release-views.service"]:
         if os.environ.get("FAKE_SYSTEMCTL_IS_ENABLED_FAIL") == "1": sys.exit(18)
@@ -523,11 +533,11 @@ def test_boot_assets_are_installed_exactly_and_ordered_before_permission_probes(
     daemon_reload = calls.index("systemctl daemon-reload")
     graph_verify = next(index for index, call in enumerate(calls) if call.startswith("systemd-analyze verify "))
     enable = calls.index("systemctl enable eurith-release-views.service")
-    restart = calls.index("systemctl restart eurith-release-views.service")
+    start = calls.index("systemctl start eurith-release-views.service")
     enabled_gate = calls.index("systemctl is-enabled eurith-release-views.service")
     active_gate = calls.index("systemctl is-active --quiet eurith-release-views.service")
     permission_probe = next(index for index, call in enumerate(calls) if "EURITH_PROBE_ACTION=api-stage" in call)
-    assert daemon_reload < graph_verify < enable < restart < enabled_gate < active_gate < permission_probe
+    assert daemon_reload < graph_verify < enable < start < enabled_gate < active_gate < permission_probe
     assert (host.state / "boot-unit-active").read_text() == "yes"
     assert result.stdout.index("boot_mounts=verified") < result.stdout.index("permissions=verified")
 
@@ -551,10 +561,52 @@ def test_boot_asset_installation_and_enablement_are_idempotent(host: Host) -> No
     calls = (host.state / "calls.log").read_text().splitlines()
     assert calls.count("systemctl daemon-reload") == 1
     assert calls.count("systemctl enable eurith-release-views.service") == 1
-    assert calls.count("systemctl restart eurith-release-views.service") == 1
+    assert calls.count("systemctl start eurith-release-views.service") == 1
     assert calls.count("systemctl is-enabled eurith-release-views.service") == 1
     assert calls.count("systemctl is-active --quiet eurith-release-views.service") == 1
     assert (host.state / "boot-unit-active").read_text() == "yes"
+
+
+def test_repeat_provisioning_with_active_docker_does_not_restart_docker(host: Host) -> None:
+    first = host.run()
+    assert first.returncode == 0, first.stderr
+    docker = host.start_docker()
+    assert docker.returncode == 0, docker.stderr
+    (host.state / "calls.log").write_text("", encoding="utf-8")
+
+    repeated = host.run()
+
+    assert repeated.returncode == 0, repeated.stderr
+    assert (host.state / "docker-started").read_text() == "yes"
+    assert not (host.state / "docker-restart-propagated").exists()
+    calls = (host.state / "calls.log").read_text().splitlines()
+    assert "systemctl try-restart docker.service" not in calls
+    assert "systemctl restart docker.service" not in calls
+    assert "systemctl stop docker.service" not in calls
+
+
+def test_repeat_provisioning_with_active_docker_revalidates_live_mounts(host: Host) -> None:
+    first = host.run()
+    assert first.returncode == 0, first.stderr
+    docker = host.start_docker()
+    assert docker.returncode == 0, docker.stderr
+    mounts_path = host.state / "mounts.json"
+    mounts = json.loads(mounts_path.read_text())
+    mounts[str(host.final_view.resolve())]["options"] = "rw,nosymfollow"
+    mounts_path.write_text(json.dumps(mounts), encoding="utf-8")
+    (host.state / "calls.log").write_text("", encoding="utf-8")
+
+    repeated = host.run()
+
+    assert repeated.returncode != 0
+    assert "error=mount_readonly_missing" in repeated.stderr
+    assert "permissions=verified" not in repeated.stdout
+    assert (host.state / "docker-started").read_text() == "yes"
+    assert not (host.state / "docker-restart-propagated").exists()
+    calls = (host.state / "calls.log").read_text().splitlines()
+    assert "systemctl try-restart docker.service" not in calls
+    assert "systemctl restart docker.service" not in calls
+    assert "systemctl stop docker.service" not in calls
 
 
 @pytest.mark.parametrize(
@@ -576,11 +628,11 @@ def test_boot_unit_requires_persistent_enabled_and_active_state(
     assert "permissions=verified" not in result.stdout
 
 
-def test_boot_unit_restart_failure_blocks_provisioning(host: Host) -> None:
-    result = host.run(FAKE_SYSTEMCTL_RESTART_FAIL="1")
+def test_boot_unit_start_failure_blocks_provisioning(host: Host) -> None:
+    result = host.run(FAKE_SYSTEMCTL_START_FAIL="1")
 
     assert result.returncode != 0
-    assert "error=boot_unit_restart_failed" in result.stderr
+    assert "error=boot_unit_start_failed" in result.stderr
     assert "boot_mounts=verified" not in result.stdout
     assert "permissions=verified" not in result.stdout
 
