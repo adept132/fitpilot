@@ -43,14 +43,16 @@ verify_path_chain_no_symlinks() {
 }
 
 verify_exact_bind() {
-  local source="$1" target="$2" reported_source reported_target options
+  local source="$1" target="$2" reported_source reported_target options source_identity target_identity
   reported_source="$(findmnt -n -o SOURCE --mountpoint "$target" 2>/dev/null)" || die mount_source_unreadable "$target"
   reported_target="$(findmnt -n -o TARGET --mountpoint "$target" 2>/dev/null)" || die mount_target_unreadable "$target"
   options="$(findmnt -n -o VFS-OPTIONS --mountpoint "$target" 2>/dev/null)" || die mount_options_unreadable "$target"
-  reported_source="$(readlink -e -- "$reported_source" 2>/dev/null)" || die mount_source_unreadable "$target"
   reported_target="$(readlink -e -- "$reported_target" 2>/dev/null)" || die mount_target_unreadable "$target"
-  [[ "$reported_source" == "$source" ]] || die mount_source_mismatch "$target"
+  [[ -n "$reported_source" && "$reported_source" != *$'\n'* ]] || die mount_source_unreadable "$target"
   [[ "$reported_target" == "$target" ]] || die mount_target_mismatch "$target"
+  source_identity="$(stat -Lc '%d:%i' -- "$source" 2>/dev/null)" || die mount_source_identity_unreadable "$target"
+  target_identity="$(stat -Lc '%d:%i' -- "$target" 2>/dev/null)" || die mount_target_identity_unreadable "$target"
+  [[ -n "$source_identity" && "$source_identity" == "$target_identity" ]] || die mount_source_mismatch "$target"
   case ",$options," in *,ro,*) ;; *) die mount_readonly_missing "$target" ;; esac
   case ",$options," in *,nosymfollow,*) ;; *) die mount_nosymfollow_missing "$target" ;; esac
 }

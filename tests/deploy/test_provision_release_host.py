@@ -34,7 +34,7 @@ def _shell(path: Path) -> str:
 
 
 FAKE_DRIVER = r'''from __future__ import annotations
-import json, os, pathlib, shutil, stat, sys, tempfile
+import json, os, pathlib, shutil, stat, subprocess, sys, tempfile
 
 command, *args = sys.argv[1:]
 sys.stdout.reconfigure(newline="\n")
@@ -57,6 +57,34 @@ def metadata_set(path, mode, owner, group):
     data = load(metadata_path)
     data[key(path)] = {"mode": str(mode).lstrip("0") or "0", "owner": str(owner).replace("root", "0"), "group": str(group).replace("root", "0")}
     save(metadata_path, data)
+
+def boot_contract_is_valid():
+    unit = pathlib.Path(os.environ["FAKE_BOOT_UNIT"])
+    drop_in = pathlib.Path(os.environ["FAKE_DOCKER_DROP_IN"])
+    if not unit.is_file() or not drop_in.is_file(): return False
+    unit_text = unit.read_text()
+    drop_in_text = drop_in.read_text()
+    return all(value in unit_text for value in (
+        "Before=docker.service",
+        "Type=oneshot",
+        "ExecStart=/usr/local/libexec/eurith-release-views",
+        "RemainAfterExit=yes",
+    )) and all(value in drop_in_text for value in (
+        "Requires=eurith-release-views.service",
+        "After=eurith-release-views.service",
+    ))
+
+def start_docker_through_dependency():
+    if not boot_contract_is_valid(): return 21
+    result = subprocess.run(
+        [os.environ["FAKE_BASH"], os.environ["EURITH_TEST_BOOT_HELPER"]],
+        env=os.environ.copy(), text=True, capture_output=True, check=False,
+    )
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    if result.returncode != 0: return result.returncode
+    (state_dir / "docker-started").write_text("yes")
+    return 0
 
 with (state_dir / "calls.log").open("a", encoding="utf-8") as log:
     log.write(command + " " + " ".join(args) + "\n")
@@ -165,9 +193,21 @@ elif command == "umount":
             if child.is_file(): child.unlink()
 elif command == "ln":
     target, link = args[-2:]
-    if target.replace("\\", "/").endswith("/etc/passwd"): target = "/etc/passwd"
-    pathlib.Path(link).write_text("FAKE-SYMLINK:" + target)
-    metadata_set(link, "777", "0", "0")
+    if "-s" in args:
+        if target.replace("\\", "/").endswith("/etc/passwd"): target = "/etc/passwd"
+        pathlib.Path(link).write_text("FAKE-SYMLINK:" + target)
+        metadata_set(link, "777", "0", "0")
+    else:
+        source, destination = pathlib.Path(target), pathlib.Path(link)
+        race = os.environ.get("FAKE_BOOT_ASSET_PUBLISH_RACE", "")
+        if race and destination.name == "eurith-release-views" and not destination.exists():
+            destination.write_bytes(source.read_bytes() if race == "exact" else b"competitor-won\n")
+            record = load(metadata_path)[key(source)]
+            metadata_set(destination, record["mode"], record["owner"], record["group"])
+        if destination.exists(): sys.exit(1)
+        os.link(source, destination)
+        record = load(metadata_path)[key(source)]
+        metadata_set(destination, record["mode"], record["owner"], record["group"])
 elif command == "readlink":
     if "-e" in args:
         target = pathlib.Path(args[-1])
@@ -250,6 +290,8 @@ elif command == "docker":
     sys.exit(2)
 elif command == "systemctl":
     if args == ["daemon-reload"]:
+        if os.environ.get("FAKE_DOCKER_SOCKET_ACTIVATES_DURING_RELOAD") == "1":
+            sys.exit(start_docker_through_dependency())
         sys.exit(0)
     if args == ["enable", "eurith-release-views.service"]:
         if os.environ.get("FAKE_SYSTEMCTL_ENABLE_FAIL") == "1": sys.exit(16)
@@ -258,10 +300,13 @@ elif command == "systemctl":
     if args == ["is-enabled", "--quiet", "eurith-release-views.service"]:
         if os.environ.get("FAKE_SYSTEMCTL_IS_ENABLED_FAIL") == "1": sys.exit(18)
         sys.exit(0 if (state_dir / "boot-unit-enabled").exists() else 1)
+    if args == ["start", "docker.service"]:
+        sys.exit(start_docker_through_dependency())
     sys.exit(2)
 elif command == "systemd-analyze":
     if args and args[0] == "verify":
-        sys.exit(17 if os.environ.get("FAKE_SYSTEMD_VERIFY_FAIL") == "1" else 0)
+        if os.environ.get("FAKE_SYSTEMD_VERIFY_FAIL") == "1": sys.exit(17)
+        sys.exit(0 if boot_contract_is_valid() else 22)
     sys.exit(2)
 else:
     sys.exit(127)
@@ -334,7 +379,7 @@ class Host:
     @property
     def installed_docker_drop_in(self) -> Path: return self.root / "etc" / "systemd" / "system" / "docker.service.d" / "eurith-release-views.conf"
 
-    def run(self, **extra_env: str) -> subprocess.CompletedProcess[str]:
+    def environment(self, **extra_env: str) -> dict[str, str]:
         env = os.environ.copy()
         env.update({
             "PATH": _shell(self.bin) + ":/usr/bin:/bin",
@@ -345,11 +390,19 @@ class Host:
             "FAKE_API_ENV": str(self.api_env),
             "FAKE_FINAL_VIEW": str(self.final_view),
             "FAKE_PROBE_VIEW": str(self.probe_view),
+            "FAKE_PROBE_SOURCE": str(self.probe_source),
+            "FAKE_BOOT_UNIT": str(self.installed_boot_service),
+            "FAKE_DOCKER_DROP_IN": str(self.installed_docker_drop_in),
+            "FAKE_BASH": BASH,
             "EURITH_FAKE_SYMLINKS": "1",
             "EURITH_TEST_BOOT_HELPER": _shell(self.rendered_boot_helper),
             "CADDY_IMAGE_REF": "caddy:2.11.4@sha256:" + "c" * 64,
         })
         env.update(extra_env)
+        return env
+
+    def run(self, **extra_env: str) -> subprocess.CompletedProcess[str]:
+        env = self.environment(**extra_env)
         args = [
             BASH, _shell(SCRIPT), "--root", _shell(self.root),
             "--secret-source-dir", _shell(self.secrets),
@@ -363,6 +416,16 @@ class Host:
             "--target-sha", "a" * 40,
         ]
         return subprocess.run(args, cwd=ROOT, env=env, text=True, capture_output=True, check=False)
+
+    def start_docker(self, **extra_env: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [BASH, _shell(self.bin / "systemctl"), "start", "docker.service"],
+            cwd=ROOT,
+            env=self.environment(**extra_env),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
 
 
 @pytest.fixture
@@ -449,6 +512,57 @@ def test_boot_asset_installation_and_enablement_are_idempotent(host: Host) -> No
     assert calls.count("systemctl is-enabled --quiet eurith-release-views.service") == 1
 
 
+@pytest.mark.parametrize(("race", "succeeds"), [("exact", True), ("drift", False)])
+def test_boot_asset_publication_never_overwrites_a_concurrent_destination(
+    host: Host, race: str, succeeds: bool
+) -> None:
+    result = host.run(FAKE_BOOT_ASSET_PUBLISH_RACE=race)
+
+    assert (result.returncode == 0) is succeeds
+    if succeeds:
+        assert host.installed_boot_helper.read_bytes() == BOOT_HELPER.read_bytes()
+        assert "permissions=verified" in result.stdout
+    else:
+        assert host.installed_boot_helper.read_bytes() == b"competitor-won\n"
+        assert "error=boot_asset_bytes_mismatch" in result.stderr
+        assert "permissions=verified" not in result.stdout
+
+
+def test_first_use_activation_waits_until_release_layout_exists(host: Host) -> None:
+    result = host.run(FAKE_DOCKER_SOCKET_ACTIVATES_DURING_RELOAD="1")
+
+    assert result.returncode == 0, result.stderr
+    assert (host.state / "docker-started").is_file()
+    assert "boot_mounts=verified" in result.stdout
+    assert "permissions=verified" in result.stdout
+
+
+def test_docker_dependency_blocks_start_when_helper_fails(host: Host) -> None:
+    assert host.run().returncode == 0
+    (host.state / "mounts.json").write_text("{}", encoding="utf-8")
+
+    result = host.start_docker(FAKE_MOUNT_FAIL_AT="bind-final")
+
+    assert result.returncode != 0
+    assert "error=mount_bind_failed" in result.stderr
+    assert not (host.state / "docker-started").exists()
+
+
+def test_docker_dependency_restores_views_before_start(host: Host) -> None:
+    assert host.run().returncode == 0
+    (host.state / "mounts.json").write_text("{}", encoding="utf-8")
+
+    result = host.start_docker()
+
+    assert result.returncode == 0, result.stderr
+    assert (host.state / "docker-started").is_file()
+    mounts = json.loads((host.state / "mounts.json").read_text())
+    assert set(mounts) == {
+        str(host.final_view.resolve()),
+        str(host.probe_view.resolve()),
+    }
+
+
 @pytest.mark.parametrize(
     ("drift", "expected_error"),
     [
@@ -509,6 +623,34 @@ def test_boot_setup_failure_prevents_permission_verification(
     assert "permissions=verified" not in result.stdout
     calls = (host.state / "calls.log").read_text()
     assert "EURITH_PROBE_ACTION=api-stage" not in calls
+
+
+@pytest.mark.parametrize(
+    "extra_env",
+    [
+        {"FAKE_SYSTEMCTL_IS_ENABLED_FAIL": "1"},
+        {"FAKE_DOCKER_FAIL_ACTION": "caddy-read"},
+    ],
+)
+def test_first_use_failure_after_helper_preserves_mounted_layout_for_retry(
+    host: Host, extra_env: dict[str, str]
+) -> None:
+    failed = host.run(**extra_env)
+
+    assert failed.returncode != 0
+    mounts = json.loads((host.state / "mounts.json").read_text())
+    assert set(mounts) == {
+        str(host.final_view.resolve()),
+        str(host.probe_view.resolve()),
+    }
+    assert host.probe_source.is_dir()
+    assert (host.probe_source / "regular").is_file()
+
+    retried = host.run()
+
+    assert retried.returncode == 0, retried.stderr
+    assert "boot_mounts=verified" in retried.stdout
+    assert "permissions=verified" in retried.stdout
 
 
 def test_target_uid_is_resolved_before_storage_and_any_release_overlay() -> None:

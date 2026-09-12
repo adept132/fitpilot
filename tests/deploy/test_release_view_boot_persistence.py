@@ -87,7 +87,10 @@ elif command == "findmnt":
     if record is None:
         sys.exit(1)
     if "SOURCE" in args:
-        print(shell_path(record["source"]))
+        if os.environ.get("FAKE_REALISTIC_BIND_SOURCE") == "1":
+            print("/dev/fake[" + shell_path(record["source"]) + "]")
+        else:
+            print(shell_path(record["source"]))
     elif "TARGET" in args:
         print(shell_path(record["target"]))
     elif "VFS-OPTIONS" in args:
@@ -104,6 +107,11 @@ elif command == "readlink":
     if not pathlib.Path(args[-1]).exists():
         sys.exit(1)
     print(shell_path(target))
+elif command == "stat":
+    mounts = load_mounts()
+    target = key(args[-1])
+    record = mounts.get(target)
+    print(record["source"] if record is not None else target)
 else:
     sys.exit(127)
 '''
@@ -157,7 +165,7 @@ class HelperHost:
     def _make_fake_commands(self) -> None:
         driver = self.state / "driver.py"
         driver.write_text(FAKE_DRIVER, encoding="utf-8")
-        for command in ("mount", "umount", "findmnt", "readlink"):
+        for command in ("mount", "umount", "findmnt", "readlink", "stat"):
             wrapper = self.bin / command
             wrapper.write_text(
                 f'#!/bin/sh\nexec "{Path(sys.executable).as_posix()}" "{driver.as_posix()}" {command} "$@"\n',
@@ -292,6 +300,16 @@ def test_wrong_existing_source_fails_without_repair_or_unmount(helper_host: Help
 
     _assert_failure(result, "mount_source_mismatch", existing, helper_host)
     assert not any(call.startswith(("mount ", "umount ")) for call in helper_host.calls())
+
+
+def test_realistic_bind_source_format_is_verified_by_directory_identity(
+    helper_host: HelperHost,
+) -> None:
+    result = helper_host.run(FAKE_REALISTIC_BIND_SOURCE="1")
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["boot_mounts=verified"]
+    assert helper_host.mounts() == _expected_mounts(helper_host)
 
 
 @pytest.mark.parametrize(
