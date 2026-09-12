@@ -87,6 +87,25 @@ def start_docker_through_dependency(emit_output=True):
     (state_dir / "docker-started").write_text("yes")
     return 0
 
+def activate_boot_unit(emit_output=True):
+    if os.environ.get("FAKE_SYSTEMCTL_RESTART_FAIL") == "1": return 23
+    result = subprocess.run(
+        [os.environ["FAKE_BASH"], os.environ["EURITH_TEST_BOOT_HELPER"]],
+        env=os.environ.copy(), text=True, capture_output=True, check=False,
+    )
+    if emit_output:
+        sys.stdout.write(result.stdout)
+        sys.stderr.write(result.stderr)
+    if result.returncode != 0:
+        (state_dir / "boot-unit-failed").write_text("yes")
+        try: (state_dir / "boot-unit-active").unlink()
+        except FileNotFoundError: pass
+        return result.returncode
+    (state_dir / "boot-unit-active").write_text("yes")
+    try: (state_dir / "boot-unit-failed").unlink()
+    except FileNotFoundError: pass
+    return 0
+
 with (state_dir / "calls.log").open("a", encoding="utf-8") as log:
     log.write(command + " " + " ".join(args) + "\n")
 
@@ -302,11 +321,25 @@ elif command == "systemctl":
         sys.exit(0)
     if args == ["enable", "eurith-release-views.service"]:
         if os.environ.get("FAKE_SYSTEMCTL_ENABLE_FAIL") == "1": sys.exit(16)
-        (state_dir / "boot-unit-enabled").write_text("yes")
+        (state_dir / "boot-unit-enabled").write_text(os.environ.get("FAKE_SYSTEMCTL_ENABLE_STATE", "enabled"))
         sys.exit(0)
     if args == ["is-enabled", "--quiet", "eurith-release-views.service"]:
         if os.environ.get("FAKE_SYSTEMCTL_IS_ENABLED_FAIL") == "1": sys.exit(18)
         sys.exit(0 if (state_dir / "boot-unit-enabled").exists() else 1)
+    if args == ["restart", "eurith-release-views.service"]:
+        sys.exit(activate_boot_unit())
+    if args == ["is-enabled", "eurith-release-views.service"]:
+        if os.environ.get("FAKE_SYSTEMCTL_IS_ENABLED_FAIL") == "1": sys.exit(18)
+        state = os.environ.get("FAKE_SYSTEMCTL_ENABLE_STATE", "enabled")
+        print(state)
+        sys.exit(0 if state in ("enabled", "enabled-runtime") else 1)
+    if args == ["is-active", "--quiet", "eurith-release-views.service"]:
+        state = os.environ.get("FAKE_SYSTEMCTL_ACTIVE_STATE", "active")
+        if state == "failed":
+            (state_dir / "boot-unit-failed").write_text("yes")
+            sys.exit(3)
+        if state == "inactive": sys.exit(3)
+        sys.exit(0 if (state_dir / "boot-unit-active").exists() else 3)
     if args == ["start", "docker.service"]:
         sys.exit(start_docker_through_dependency())
     sys.exit(2)
@@ -490,10 +523,12 @@ def test_boot_assets_are_installed_exactly_and_ordered_before_permission_probes(
     daemon_reload = calls.index("systemctl daemon-reload")
     graph_verify = next(index for index, call in enumerate(calls) if call.startswith("systemd-analyze verify "))
     enable = calls.index("systemctl enable eurith-release-views.service")
-    helper = next(index for index, call in enumerate(calls) if call.startswith("readlink -e -- "))
-    enabled_gate = calls.index("systemctl is-enabled --quiet eurith-release-views.service")
+    restart = calls.index("systemctl restart eurith-release-views.service")
+    enabled_gate = calls.index("systemctl is-enabled eurith-release-views.service")
+    active_gate = calls.index("systemctl is-active --quiet eurith-release-views.service")
     permission_probe = next(index for index, call in enumerate(calls) if "EURITH_PROBE_ACTION=api-stage" in call)
-    assert daemon_reload < graph_verify < enable < helper < enabled_gate < permission_probe
+    assert daemon_reload < graph_verify < enable < restart < enabled_gate < active_gate < permission_probe
+    assert (host.state / "boot-unit-active").read_text() == "yes"
     assert result.stdout.index("boot_mounts=verified") < result.stdout.index("permissions=verified")
 
 
@@ -516,7 +551,38 @@ def test_boot_asset_installation_and_enablement_are_idempotent(host: Host) -> No
     calls = (host.state / "calls.log").read_text().splitlines()
     assert calls.count("systemctl daemon-reload") == 1
     assert calls.count("systemctl enable eurith-release-views.service") == 1
-    assert calls.count("systemctl is-enabled --quiet eurith-release-views.service") == 1
+    assert calls.count("systemctl restart eurith-release-views.service") == 1
+    assert calls.count("systemctl is-enabled eurith-release-views.service") == 1
+    assert calls.count("systemctl is-active --quiet eurith-release-views.service") == 1
+    assert (host.state / "boot-unit-active").read_text() == "yes"
+
+
+@pytest.mark.parametrize(
+    ("extra_env", "expected_error"),
+    [
+        ({"FAKE_SYSTEMCTL_ENABLE_STATE": "enabled-runtime"}, "boot_unit_not_persistently_enabled"),
+        ({"FAKE_SYSTEMCTL_ENABLE_STATE": "disabled"}, "boot_unit_not_persistently_enabled"),
+        ({"FAKE_SYSTEMCTL_ACTIVE_STATE": "inactive"}, "boot_unit_not_active"),
+        ({"FAKE_SYSTEMCTL_ACTIVE_STATE": "failed"}, "boot_unit_not_active"),
+    ],
+)
+def test_boot_unit_requires_persistent_enabled_and_active_state(
+    host: Host, extra_env: dict[str, str], expected_error: str
+) -> None:
+    result = host.run(**extra_env)
+
+    assert result.returncode != 0
+    assert f"error={expected_error}" in result.stderr
+    assert "permissions=verified" not in result.stdout
+
+
+def test_boot_unit_restart_failure_blocks_provisioning(host: Host) -> None:
+    result = host.run(FAKE_SYSTEMCTL_RESTART_FAIL="1")
+
+    assert result.returncode != 0
+    assert "error=boot_unit_restart_failed" in result.stderr
+    assert "boot_mounts=verified" not in result.stdout
+    assert "permissions=verified" not in result.stdout
 
 
 @pytest.mark.parametrize(("race", "succeeds"), [("exact", True), ("drift", False)])
@@ -629,7 +695,7 @@ def test_preexisting_boot_asset_drift_fails_closed_without_overwrite(
     [
         ({"FAKE_SYSTEMD_VERIFY_FAIL": "1"}, "boot_systemd_verify_failed"),
         ({"FAKE_SYSTEMCTL_ENABLE_FAIL": "1"}, "boot_unit_enable_failed"),
-        ({"FAKE_SYSTEMCTL_IS_ENABLED_FAIL": "1"}, "boot_unit_not_enabled"),
+        ({"FAKE_SYSTEMCTL_IS_ENABLED_FAIL": "1"}, "boot_unit_not_persistently_enabled"),
         ({"FAKE_MOUNT_FAIL_AT": "bind-final"}, "mount_bind_failed"),
     ],
 )

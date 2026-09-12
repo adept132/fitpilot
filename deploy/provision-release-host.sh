@@ -312,18 +312,20 @@ install_boot_asset "$BOOT_HELPER_SOURCE" "$BOOT_HELPER_DESTINATION" 755 eurith-r
 install_boot_asset "$BOOT_UNIT_SOURCE" "$BOOT_UNIT_DESTINATION" 644 eurith-release-views.service
 install_boot_asset "$DOCKER_DROP_IN_SOURCE" "$DOCKER_DROP_IN_DESTINATION" 644 docker-eurith-release-views.conf
 
-BOOT_HELPER_RUNNER="$BOOT_HELPER_DESTINATION"
 if [[ "$ROOT_PREFIX" != / ]]; then
-  BOOT_HELPER_RUNNER="${EURITH_TEST_BOOT_HELPER:-}"
-  [[ -n "$BOOT_HELPER_RUNNER" ]] || die alternate_root_boot_helper_missing
-  require_safe_absolute_path "$BOOT_HELPER_RUNNER" mutable "$CHECKOUT_ROOT"
-  [[ -f "$BOOT_HELPER_RUNNER" && ! -L "$BOOT_HELPER_RUNNER" ]] || die alternate_root_boot_helper_invalid
+  TEST_BOOT_HELPER="${EURITH_TEST_BOOT_HELPER:-}"
+  [[ -n "$TEST_BOOT_HELPER" ]] || die alternate_root_boot_helper_missing
+  require_safe_absolute_path "$TEST_BOOT_HELPER" mutable "$CHECKOUT_ROOT"
+  [[ -f "$TEST_BOOT_HELPER" && ! -L "$TEST_BOOT_HELPER" ]] || die alternate_root_boot_helper_invalid
 fi
 systemctl daemon-reload || die boot_systemd_reload_failed
 systemd-analyze verify "$BOOT_UNIT_DESTINATION" docker.service >/dev/null 2>&1 || die boot_systemd_verify_failed
 systemctl enable eurith-release-views.service >/dev/null 2>&1 || die boot_unit_enable_failed
-"$BOOT_HELPER_RUNNER"
-systemctl is-enabled --quiet eurith-release-views.service || die boot_unit_not_enabled
+systemctl restart eurith-release-views.service >/dev/null || die boot_unit_restart_failed
+boot_unit_state="$(systemctl is-enabled eurith-release-views.service 2>/dev/null)" || die boot_unit_not_persistently_enabled
+[[ "$boot_unit_state" == enabled ]] || die boot_unit_not_persistently_enabled
+systemctl is-active --quiet eurith-release-views.service || die boot_unit_not_active
+printf '%s\n' 'boot_mounts=verified'
 
 assert_exact_bind_mount() {
   local source="$1" target="$2" reported_target source_identity target_identity

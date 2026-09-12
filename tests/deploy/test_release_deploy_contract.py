@@ -93,8 +93,32 @@ esac
         installed["eurith-release-views"].mkdir()
 
     _wrapper(bin_dir, "systemctl", '''
-[[ "$*" == "is-enabled --quiet eurith-release-views.service" ]] || exit 91
-[[ "$BOOT_GATE_CASE" != unit_disabled ]]
+case "$*" in
+  "is-enabled --quiet eurith-release-views.service")
+    [[ "$BOOT_GATE_CASE" != unit_disabled ]] ;;
+  "is-enabled eurith-release-views.service")
+    case "$BOOT_GATE_CASE" in
+      unit_disabled) printf 'disabled\n'; exit 1 ;;
+      unit_enabled_runtime) printf 'enabled-runtime\n' ;;
+      *) printf 'enabled\n' ;;
+    esac ;;
+  "is-active --quiet eurith-release-views.service")
+    [[ "$BOOT_GATE_CASE" != unit_inactive && "$BOOT_GATE_CASE" != unit_failed ]] ;;
+  *) exit 91 ;;
+esac
+''')
+    _wrapper(bin_dir, "sha256sum", '''
+path="${@: -1}"
+is_source=0; [[ "$path" == *"/assets/deploy/systemd/"* ]] && is_source=1
+case "$BOOT_GATE_CASE" in
+  source_read_failure) [[ "$is_source" == 0 ]] || exit 41 ;;
+  installed_read_failure) [[ "$is_source" == 1 ]] || exit 42 ;;
+  both_read_failure) exit 43 ;;
+  source_hash_malformed) if [[ "$is_source" == 1 ]]; then printf 'INVALID  %s\n' "$path"; exit 0; fi ;;
+  installed_hash_malformed) if [[ "$is_source" == 0 ]]; then printf 'INVALID  %s\n' "$path"; exit 0; fi ;;
+  both_hash_malformed) printf 'INVALID  %s\n' "$path"; exit 0 ;;
+esac
+exec /usr/bin/sha256sum "$@"
 ''')
     _wrapper(bin_dir, "stat", '''
 if [[ "$1" == -c && "$2" == "%a:%u:%g" ]]; then
@@ -149,7 +173,16 @@ fi
         ("unit_owner", "boot_mount_unit_metadata_invalid"),
         ("drop_in_owner", "boot_mount_docker_drop_in_metadata_invalid"),
         ("unit_disabled", "boot_mount_unit_not_enabled"),
+        ("unit_enabled_runtime", "boot_mount_unit_not_enabled"),
+        ("unit_inactive", "boot_mount_unit_not_active"),
+        ("unit_failed", "boot_mount_unit_not_active"),
         ("helper_nonzero", "boot_mount_runtime_verification_failed"),
+        ("source_read_failure", "boot_mount_target_asset_hash_unreadable"),
+        ("installed_read_failure", "boot_mount_installed_asset_hash_unreadable"),
+        ("both_read_failure", "boot_mount_target_asset_hash_unreadable"),
+        ("source_hash_malformed", "boot_mount_target_asset_hash_invalid"),
+        ("installed_hash_malformed", "boot_mount_installed_asset_hash_invalid"),
+        ("both_hash_malformed", "boot_mount_target_asset_hash_invalid"),
         ("final_source_drift", "mount_source_mismatch"),
         ("final_target_drift", "mount_target_mismatch"),
         ("final_options_drift", "mount_readonly_missing"),
@@ -178,12 +211,191 @@ def test_boot_mount_gate_emits_live_proofs_before_single_backend_pass(tmp_path: 
     ]
 
 
-def test_boot_mount_gate_runs_after_provisioning_and_again_at_final_success() -> None:
-    script = _text(DEPLOY)
-    build = script[script.index("build_target() {") : script.index("rehearse_migration_compatibility()")]
-    assert build.index("provision-release-host.sh") < build.index("verify_boot_mount_gate")
-    final = script[script.index("write_mobile_gate() {") : script.index("on_exit() {")]
-    assert final.index("verify_boot_mount_gate") < final.index("evidence backend_gate passed")
+def _function(script: str, name: str, next_name: str) -> str:
+    start = script.index(f"{name}() {{")
+    end = script.index(f"\n{next_name}() {{", start)
+    return script[start:end]
+
+
+def _run_real_deploy_boot_path(
+    tmp_path: Path, final_case: str
+) -> tuple[subprocess.CompletedProcess[str], list[str], bool]:
+    bin_dir = tmp_path / "bin"; bin_dir.mkdir()
+    state_dir = tmp_path / "state"; state_dir.mkdir()
+    script_dir = tmp_path / "deploy"; script_dir.mkdir()
+    asset_root = tmp_path / "assets"
+    asset_dir = asset_root / "deploy" / "systemd"; asset_dir.mkdir(parents=True)
+    installed_dir = tmp_path / "installed"; installed_dir.mkdir()
+    evidence_dir = tmp_path / "evidence"; evidence_dir.mkdir()
+    evidence_file = evidence_dir / "deploy.env"
+    evidence_file.write_text("", encoding="ascii")
+    mobile_gate = evidence_dir / "mobile.env"
+    calls = state_dir / "calls.log"; calls.write_text("", encoding="ascii")
+
+    final_source = tmp_path / "mounts" / "final-source"
+    final_target = tmp_path / "mounts" / "final-target"
+    probe_source = tmp_path / "mounts" / "probe-source"
+    probe_target = tmp_path / "mounts" / "probe-target"
+    wrong_target = tmp_path / "mounts" / "wrong-target"
+    for path in (final_source, final_target, probe_source, probe_target, wrong_target):
+        path.mkdir(parents=True, exist_ok=True)
+
+    helper = _text(ROOT / "deploy" / "systemd" / "eurith-release-views")
+    replacements = {
+        "/opt/eurith/releases/android/sha256": _shell(final_source),
+        "/opt/eurith/release-caddy-view/android/sha256": _shell(final_target),
+        "/opt/eurith/release-caddy-probe-source": _shell(probe_source),
+        "/opt/eurith/release-caddy-view/.probe": _shell(probe_target),
+    }
+    for production, rendered in sorted(replacements.items(), key=lambda item: -len(item[0])):
+        helper = helper.replace(production, rendered)
+    assets = {
+        "eurith-release-views": helper,
+        "eurith-release-views.service": "[Service]\nType=oneshot\n",
+        "docker-eurith-release-views.conf": "[Unit]\nAfter=eurith-release-views.service\n",
+    }
+    installed: dict[str, Path] = {}
+    for name, content in assets.items():
+        (asset_dir / name).write_text(content, encoding="utf-8", newline="\n")
+        destination = installed_dir / name
+        destination.write_text(content, encoding="utf-8", newline="\n")
+        destination.chmod(0o755 if name == "eurith-release-views" else 0o644)
+        installed[name] = destination
+
+    _wrapper(script_dir, "provision-release-host.sh", "exit 0")
+    _wrapper(bin_dir, "systemctl", '''
+case "$*" in
+  "is-enabled --quiet eurith-release-views.service")
+    [[ "$BOOT_GATE_PHASE" != final || "$FINAL_GATE_CASE" != final_unit_disabled ]] ;;
+  "is-enabled eurith-release-views.service")
+    if [[ "$BOOT_GATE_PHASE" == final ]]; then
+      case "$FINAL_GATE_CASE" in
+        final_unit_disabled) printf 'disabled\n'; exit 1 ;;
+        final_unit_enabled_runtime) printf 'enabled-runtime\n' ;;
+        *) printf 'enabled\n' ;;
+      esac
+    else printf 'enabled\n'; fi ;;
+  "is-active --quiet eurith-release-views.service")
+    [[ "$BOOT_GATE_PHASE" != final || ( "$FINAL_GATE_CASE" != final_unit_inactive && "$FINAL_GATE_CASE" != final_unit_failed ) ]] ;;
+  *) exit 91 ;;
+esac
+''')
+    _wrapper(bin_dir, "sha256sum", '''
+path="${@: -1}"
+if [[ "$BOOT_GATE_PHASE" == final && "$FINAL_GATE_CASE" == final_helper_hash && "$path" == *"/installed/eurith-release-views" ]]; then
+  printf '%064d  %s\n' 0 "$path"
+  exit 0
+fi
+exec /usr/bin/sha256sum "$@"
+''')
+    _wrapper(bin_dir, "readlink", '''
+if [[ "$BOOT_GATE_PHASE" == final && "$FINAL_GATE_CASE" == final_helper_nonzero ]]; then exit 1; fi
+[[ -e "${@: -1}" ]] || exit 1
+printf "%s\n" "${@: -1}"
+''')
+    _wrapper(bin_dir, "findmnt", '''
+target="${@: -1}"; kind=probe; [[ "$target" == "$FAKE_FINAL_TARGET" ]] && kind=final
+case "$*" in
+  *" -o TARGET "*)
+    if [[ "$BOOT_GATE_PHASE" == final && "$FINAL_GATE_CASE" == "final_${kind}_target_drift" ]]; then printf '%s\n' "$FAKE_WRONG_TARGET"; else printf '%s\n' "$target"; fi ;;
+  *" -o SOURCE "*) printf '/dev/fake\n' ;;
+  *" -o VFS-OPTIONS "*)
+    if [[ "$BOOT_GATE_PHASE" == final && "$FINAL_GATE_CASE" == "final_${kind}_options_drift" ]]; then printf 'rw,nosuid\n'; else printf 'ro,nosymfollow,nosuid\n'; fi ;;
+  *) exit 92 ;;
+esac
+''')
+    _wrapper(bin_dir, "stat", '''
+path="${@: -1}"
+if [[ "$*" == *"%a:%u:%g"* ]]; then
+  case "$path" in *eurith-release-views) printf '755:0:0\n' ;; *) printf '644:0:0\n' ;; esac
+elif [[ "$*" == *"%d:%i"* ]]; then
+  if [[ "$BOOT_GATE_PHASE" == final && "$FINAL_GATE_CASE" == final_final_source_drift && "$path" == "$FAKE_FINAL_TARGET" ]]; then printf 'wrong-final\n'
+  elif [[ "$BOOT_GATE_PHASE" == final && "$FINAL_GATE_CASE" == final_probe_source_drift && "$path" == "$FAKE_PROBE_TARGET" ]]; then printf 'wrong-probe\n'
+  elif [[ "$path" == "$FAKE_FINAL_SOURCE" || "$path" == "$FAKE_FINAL_TARGET" ]]; then printf 'final-identity\n'
+  else printf 'probe-identity\n'; fi
+else exit 93; fi
+''')
+    _wrapper(bin_dir, "mount", "exit 94")
+    _wrapper(bin_dir, "umount", "exit 0")
+    _wrapper(bin_dir, "docker", '''
+case "$*" in
+  *" build api") exit 0 ;;
+  *" run --rm --no-deps api alembic heads") printf 'head\n' ;;
+  *) exit 95 ;;
+esac
+''')
+    _wrapper(bin_dir, "python3", '''
+printf 'python3 %s\n' "$*" >>"$FAKE_CALLS"
+: >"$3"
+''')
+    _wrapper(bin_dir, "date", "exec /usr/bin/date \"$@\"")
+
+    deploy_script = _text(DEPLOY)
+    gate_functions = deploy_script[
+        deploy_script.index("verify_boot_asset() {") : deploy_script.index("\nrehearse_migration_compatibility() {")
+    ]
+    write_gate = _function(deploy_script, "write_mobile_gate", "on_exit")
+    runner = tmp_path / "runner.sh"
+    runner.write_text(
+        "#!/usr/bin/env bash\nset -Eeuo pipefail\n"
+        "die() { printf 'error=%s\\n' \"$1\" >&2; exit 1; }\n"
+        "evidence() { printf '%s=%s\\n' \"$1\" \"$2\" >>\"$EVIDENCE_DIR/deploy.env\"; }\n"
+        "sha256_file() { sha256sum -- \"$1\" | awk '{print $1}'; }\n"
+        + gate_functions + "\n" + write_gate
+        + f"\nSCRIPT_DIR='{_shell(script_dir)}'\nEURITH_DEPLOY_ASSET_ROOT='{_shell(asset_root)}'\n"
+        + f"BOOT_HELPER_DESTINATION='{_shell(installed['eurith-release-views'])}'\n"
+        + f"BOOT_UNIT_DESTINATION='{_shell(installed['eurith-release-views.service'])}'\n"
+        + f"DOCKER_DROP_IN_DESTINATION='{_shell(installed['docker-eurith-release-views.conf'])}'\n"
+        + f"EVIDENCE_DIR='{_shell(evidence_dir)}'\nMOBILE_GATE_FILE='{_shell(mobile_gate)}'\n"
+        + "EURITH_SECRET_SOURCE_DIR=/fake/secrets\nEURITH_BASE_COMPOSE=/fake/base-compose.yml\n"
+        + "RELEASE_OVERLAY=/fake/release-overlay.yml\n"
+        + "MOBILE_GATE_PUBLISHER=fake-publisher\nTARGET_SHA=" + "a" * 40 + "\nMOBILE_CANDIDATE_SHA=" + "b" * 40 + "\n"
+        + "EXPECTED_ALEMBIC_HEAD=head\ncompose=(docker compose)\n"
+        + "export BOOT_GATE_PHASE=initial\nbuild_target\nexport BOOT_GATE_PHASE=final\nwrite_mobile_gate\n",
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+    env = os.environ.copy(); env.update({
+        "PATH": _shell(bin_dir) + ":/usr/bin:/bin",
+        "FINAL_GATE_CASE": final_case,
+        "FAKE_CALLS": _shell(calls),
+        "FAKE_FINAL_SOURCE": _shell(final_source),
+        "FAKE_FINAL_TARGET": _shell(final_target),
+        "FAKE_PROBE_SOURCE": _shell(probe_source),
+        "FAKE_PROBE_TARGET": _shell(probe_target),
+        "FAKE_WRONG_TARGET": _shell(wrong_target),
+    })
+    completed = subprocess.run([BASH, _shell(runner)], env=env, capture_output=True, text=True, timeout=15)
+    return completed, evidence_file.read_text(encoding="ascii").splitlines(), mobile_gate.exists()
+
+
+@pytest.mark.parametrize(
+    "final_case",
+    [
+        "final_helper_hash", "final_helper_nonzero", "final_unit_disabled",
+        "final_unit_enabled_runtime", "final_unit_inactive", "final_unit_failed",
+        "final_final_source_drift", "final_final_target_drift", "final_final_options_drift",
+        "final_probe_source_drift", "final_probe_target_drift", "final_probe_options_drift",
+    ],
+)
+def test_real_final_publication_path_rechecks_changed_boot_state(
+    tmp_path: Path, final_case: str
+) -> None:
+    result, evidence, gate_exists = _run_real_deploy_boot_path(tmp_path, final_case)
+    assert result.returncode != 0
+    assert "backend_gate=passed" not in evidence
+    assert "backend_gate=passed" not in result.stdout
+    assert not gate_exists
+
+
+def test_real_build_and_final_publication_path_succeeds_without_state_change(tmp_path: Path) -> None:
+    result, evidence, gate_exists = _run_real_deploy_boot_path(tmp_path, "success")
+    assert result.returncode == 0, result.stderr
+    assert evidence.count("boot_mount_assets=verified") == 2
+    assert evidence.count("boot_mount_unit=enabled") == 2
+    assert evidence.count("boot_mount_runtime=verified") == 2
+    assert evidence.count("backend_gate=passed") == 1
+    assert gate_exists
 
 
 def _rollback_function() -> str:

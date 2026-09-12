@@ -235,10 +235,15 @@ gate_migrations() {
 
 verify_boot_asset() {
   local source="$1" destination="$2" mode="$3" metadata_error="$4" bytes_error="$5"
+  local source_hash destination_hash
   [[ -f "$source" && ! -L "$source" ]] || die boot_mount_target_asset_invalid
   [[ -f "$destination" && ! -L "$destination" ]] || die "$metadata_error"
   [[ "$(stat -c '%a:%u:%g' -- "$destination" 2>/dev/null)" == "${mode}:0:0" ]] || die "$metadata_error"
-  [[ "$(sha256_file "$destination")" == "$(sha256_file "$source")" ]] || die "$bytes_error"
+  source_hash="$(sha256_file "$source")" || die boot_mount_target_asset_hash_unreadable
+  [[ "$source_hash" =~ ^[0-9a-f]{64}$ ]] || die boot_mount_target_asset_hash_invalid
+  destination_hash="$(sha256_file "$destination")" || die boot_mount_installed_asset_hash_unreadable
+  [[ "$destination_hash" =~ ^[0-9a-f]{64}$ ]] || die boot_mount_installed_asset_hash_invalid
+  [[ "$destination_hash" == "$source_hash" ]] || die "$bytes_error"
 }
 
 verify_installed_boot_assets() {
@@ -248,10 +253,12 @@ verify_installed_boot_assets() {
 }
 
 verify_boot_mount_gate() {
-  local helper_output
+  local helper_output unit_enabled
   verify_installed_boot_assets
   evidence boot_mount_assets verified
-  systemctl is-enabled --quiet eurith-release-views.service || die boot_mount_unit_not_enabled
+  unit_enabled="$(systemctl is-enabled eurith-release-views.service 2>/dev/null)" || die boot_mount_unit_not_enabled
+  [[ "$unit_enabled" == enabled ]] || die boot_mount_unit_not_enabled
+  systemctl is-active --quiet eurith-release-views.service || die boot_mount_unit_not_active
   evidence boot_mount_unit enabled
   helper_output="$("$BOOT_HELPER_DESTINATION")" || die boot_mount_runtime_verification_failed
   [[ "$helper_output" == boot_mounts=verified ]] || die boot_mount_runtime_evidence_invalid

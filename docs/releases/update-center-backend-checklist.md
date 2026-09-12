@@ -121,6 +121,7 @@ Before and after the controlled production reboot, record the output of:
 
 ```bash
 systemctl is-enabled eurith-release-views.service
+systemctl is-active eurith-release-views.service
 systemctl is-enabled docker.service
 systemctl status --no-pager eurith-release-views.service
 systemctl status --no-pager docker.service
@@ -129,6 +130,10 @@ systemctl cat docker.service
 findmnt -n -o SOURCE,TARGET,VFS-OPTIONS --mountpoint /opt/eurith/release-caddy-view/android/sha256
 findmnt -n -o SOURCE,TARGET,VFS-OPTIONS --mountpoint /opt/eurith/release-caddy-view/.probe
 ```
+
+Require the release-view unit state to be exactly persistent `enabled` and
+`active`/successful; `enabled-runtime`, inactive, and failed states block the
+release even when a direct helper revalidation would pass.
 
 Require the final mount to map `/opt/eurith/releases/android/sha256` to
 `/opt/eurith/release-caddy-view/android/sha256`, and the probe mount to map

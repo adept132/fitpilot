@@ -189,13 +189,15 @@ container and restores the approved rollback API through the target overlay.
 The deployment records `boot_mount_assets=verified` only after the installed
 helper, unit, and Docker drop-in are regular non-symlink root-owned files with
 exact modes `0755`, `0644`, and `0644` and SHA-256 values matching the detached
-target assets. It records `boot_mount_unit=enabled` only after the unit is
-enabled, and `boot_mount_runtime=verified` only after the installed helper
-reports `boot_mounts=verified`. Inspect the live unit, dependency, and both
-mounts with these exact commands:
+target assets. It records `boot_mount_unit=enabled` only after `systemd` reports
+the unit as persistently `enabled` (not `enabled-runtime`) and active/successful.
+It records `boot_mount_runtime=verified` only after the installed helper reports
+`boot_mounts=verified`. Inspect the live unit, dependency, and both mounts with
+these exact commands:
 
 ```bash
 systemctl is-enabled eurith-release-views.service
+systemctl is-active eurith-release-views.service
 systemctl is-enabled docker.service
 systemctl status --no-pager eurith-release-views.service
 systemctl status --no-pager docker.service
