@@ -287,7 +287,17 @@ elif command == "docker":
         sys.exit(0)
     if is_overlay and joined.endswith(" config --images api"):
         ref_output = os.environ.get("FAKE_COMPOSE_IMAGE_REF_OUTPUT", "eurith-api")
+        if os.environ.get("FAKE_COMPOSE_IMAGES_ALL") == "1":
+            ref_output = "eurith-api\npostgres:17-bookworm\ncaddy:2.11.4"
         sys.stdout.write(ref_output + ("\n" if ref_output else "")); sys.exit(0)
+    if is_overlay and joined.endswith(" config --format json"):
+        api = {"build": {"context": "/opt/eurith/backend"}}
+        if "FAKE_COMPOSE_IMAGE_REF_OUTPUT" in os.environ:
+            api["image"] = os.environ["FAKE_COMPOSE_IMAGE_REF_OUTPUT"]
+        print(json.dumps({"name": "eurith", "services": {
+            "api": api, "postgres": {"image": "postgres:17-bookworm"},
+            "caddy": {"image": "caddy:2.11.4"},
+        }})); sys.exit(0)
     if "--entrypoint id api -u" in joined:
         print(os.environ.get("FAKE_TARGET_API_UID", "1234") if is_overlay else "1234"); sys.exit(0)
     passed_env = {args[i + 1].split("=", 1)[0]: args[i + 1].split("=", 1)[1] for i, value in enumerate(args[:-1]) if value == "-e" and "=" in args[i + 1]}
@@ -383,6 +393,12 @@ else:
 def _make_fake_commands(bin_dir: Path, state_dir: Path) -> None:
     driver = state_dir / "driver.py"
     driver.write_text(FAKE_DRIVER, encoding="utf-8")
+    python_wrapper = bin_dir / "python3"
+    python_wrapper.write_text(
+        f'#!/bin/sh\nexec "{Path(sys.executable).as_posix()}" "$@"\n',
+        encoding="utf-8",
+    )
+    python_wrapper.chmod(0o755)
     for command in ("docker", "findmnt", "mount", "umount", "getent", "groupadd", "install", "chown", "chmod", "stat", "ln", "readlink", "head", "mv", "mktemp", "find", "systemctl", "systemd-analyze"):
         wrapper = bin_dir / command
         wrapper.write_text(
@@ -936,6 +952,13 @@ def test_target_image_uid_is_authoritative_for_new_storage(host: Host) -> None:
     assert result.returncode == 0, result.stderr
     metadata = json.loads((host.state / "metadata.json").read_text())
     assert metadata[str((host.storage / "android" / "sha256").resolve())]["owner"] == "2345"
+    assert "permissions=verified" in result.stdout
+
+
+def test_compose_other_service_images_do_not_block_api_identity(host: Host) -> None:
+    """Compose config --images includes postgres and caddy even with an api argument."""
+    result = host.run(FAKE_COMPOSE_IMAGES_ALL="1")
+    assert result.returncode == 0, result.stderr
     assert "permissions=verified" in result.stdout
 
 

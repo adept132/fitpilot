@@ -353,7 +353,7 @@ rollback_infrastructure() {
         evidence rollback_caddy_image not_applicable
       fi
       if "${rollback_compose[@]}" build api >/dev/null 2>&1; then
-        rollback_api_ref="$("${rollback_compose[@]}" config --images api 2>/dev/null || true)"
+        rollback_api_ref="$("${rollback_compose[@]}" config --format json 2>/dev/null | python3 "$SCRIPT_DIR/resolve-compose-api-image.py" 2>/dev/null || true)"
         if [[ "$rollback_api_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$ ]]; then
           rollback_built_api_image="$(docker image inspect --format '{{.Id}}' "$rollback_api_ref" 2>/dev/null || true)"
           [[ "$rollback_built_api_image" == sha256:* ]] || rollback_built_api_image="sha256:${rollback_built_api_image}"

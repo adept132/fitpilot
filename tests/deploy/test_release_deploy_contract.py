@@ -470,6 +470,7 @@ if [[ "$ROLLBACK_CASE" == readiness_timeout ]]; then printf 503
 else : >"$ROLLBACK_STATE/ready"; printf 200; fi
 ''')
     _wrapper(bin_dir, "sleep", ":")
+    _wrapper(bin_dir, "python3", f'exec "{_shell(Path(sys.executable))}" "$@"')
     _wrapper(bin_dir, "docker", f'''next_count() {{
   local name="$1" path="$ROLLBACK_STATE/$1" value=0
   [[ ! -f "$path" ]] || value="$(<"$path")"
@@ -480,7 +481,7 @@ if [[ "$1" == compose ]]; then
   case "$*" in
     *" rm -f caddy") exit 0 ;;
     *" build api") exit 0 ;;
-    *" config --images api") printf "eurith-api:rollback\\n" ;;
+    *" config --format json") printf '%s\\n' '{{"name":"eurith","services":{{"api":{{"image":"eurith-api:rollback"}},"caddy":{{"image":"caddy:2.11.4"}}}}}}' ;;
     *" up -d "*) [[ "$ROLLBACK_CASE" != up_failure ]] ;;
     *" ps -q api")
       [[ "$ROLLBACK_CASE" != up_failure ]] || exit 0
@@ -539,6 +540,7 @@ fi''')
         "evidence() { printf '%s=%s\\n' \"$1\" \"$2\" >>\"$EVIDENCE_FILE\"; }\n"
         + _rollback_function()
         + "\ncompose=(docker compose)\n"
+        + f"SCRIPT_DIR='{_shell(DEPLOY.parent)}'\n"
         + "ROLLBACK_ATTEMPTED=0\nSWITCH_ATTEMPTED=1\nMIGRATION_ATTEMPTED=1\nMIGRATION_STATE=applied\n"
         + "SCHEMA_ROLLBACK_COMPATIBLE=1\nROLLBACK_EVIDENCE_WRITTEN=0\n"
         + f"PRIOR_CADDY_PRESENT={'1' if prior_caddy else '0'}\n"
@@ -1008,7 +1010,7 @@ def test_rollback_without_prior_caddy_rejects_container_appearing_during_readine
 def test_rollback_pass_requires_exact_candidate_api_image_running_stable_and_ready() -> None:
     script = _text(DEPLOY)
     rollback = script[script.index("rollback_infrastructure()") : script.index("switch_api_and_caddy()")]
-    assert 'config --images api' in rollback
+    assert 'config --format json' in rollback
     assert "docker image inspect --format '{{.Id}}'" in rollback
     assert "--format '{{.Image}}'" in rollback
     assert "--format '{{.State.Status}}'" in rollback
