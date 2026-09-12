@@ -175,16 +175,12 @@ verify_isolated_restore() {
 }
 
 checkout_target_source() {
-  local relative deploy_asset_hash runtime_asset_hash
+  local deploy_asset_hash runtime_asset_hash
   git -C "$SOURCE_DIR" checkout --detach "$TARGET_SHA" >/dev/null || die target_checkout_failed
   SOURCE_SWITCHED=1
   [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" == "$TARGET_SHA" && -z "$(git -C "$SOURCE_DIR" status --porcelain)" ]] || die target_checkout_invalid
-  for relative in deploy/compose.release.yml deploy/caddy/Caddyfile deploy/caddy/caddy-entrypoint.sh; do
-    [[ -f "$SOURCE_DIR/$relative" && ! -L "$SOURCE_DIR/$relative" ]] || die runtime_asset_missing
-    [[ "$(sha256_file "$SOURCE_DIR/$relative")" == "$(sha256_file "$EURITH_DEPLOY_ASSET_ROOT/$relative")" ]] || die runtime_asset_bytes_mismatch
-  done
-  deploy_asset_hash="$(sha256sum "$EURITH_DEPLOY_ASSET_ROOT/deploy/compose.release.yml" "$EURITH_DEPLOY_ASSET_ROOT/deploy/caddy/Caddyfile" "$EURITH_DEPLOY_ASSET_ROOT/deploy/caddy/caddy-entrypoint.sh" | sha256sum | awk '{print $1}')"
-  runtime_asset_hash="$(sha256sum "$SOURCE_DIR/deploy/compose.release.yml" "$SOURCE_DIR/deploy/caddy/Caddyfile" "$SOURCE_DIR/deploy/caddy/caddy-entrypoint.sh" | sha256sum | awk '{print $1}')"
+  deploy_asset_hash="$(release_asset_manifest_hash "$EURITH_DEPLOY_ASSET_ROOT")" || die runtime_asset_manifest_failed
+  runtime_asset_hash="$(release_asset_manifest_hash "$SOURCE_DIR")" || die runtime_asset_manifest_failed
   [[ "$runtime_asset_hash" == "$deploy_asset_hash" ]] || die runtime_asset_bytes_mismatch
   export EURITH_RUNTIME_SOURCE_ROOT="$SOURCE_DIR"
   export EURITH_RUNTIME_ASSET_ROOT="$SOURCE_DIR"
@@ -256,6 +252,7 @@ verify_boot_mount_gate() {
   local helper_output unit_enabled
   verify_installed_boot_assets
   evidence boot_mount_assets verified
+  verify_effective_boot_units "$BOOT_UNIT_DESTINATION" "$DOCKER_DROP_IN_DESTINATION"
   unit_enabled="$(systemctl is-enabled eurith-release-views.service 2>/dev/null)" || die boot_mount_unit_not_enabled
   [[ "$unit_enabled" == enabled ]] || die boot_mount_unit_not_enabled
   systemctl is-active --quiet eurith-release-views.service || die boot_mount_unit_not_active
@@ -328,6 +325,7 @@ capture_prior_runtime() {
 
 rollback_infrastructure() {
   local result=failed rollback_caddy_id rollback_caddy_image rollback_image_overlay=''
+  local rollback_caddy_status rollback_caddy_restarts current_caddy_id current_caddy_restarts rollback_caddy_baseline_verified=0
   local rollback_api_ref rollback_built_api_image rollback_api_id rollback_api_image rollback_api_status rollback_api_restarts
   local current_api_id attempt status rollback_api_image_verified=0 rollback_api_runtime_verified=0 rollback_api_readiness_verified=0 rollback_api_verified=0 rollback_caddy_verified=0
   local -a rollback_compose
@@ -335,7 +333,7 @@ rollback_infrastructure() {
   if [[ "$SWITCH_ATTEMPTED" == 1 || ( "$MIGRATION_ATTEMPTED" == 1 && "$MIGRATION_STATE" == applied ) ]]; then
     if [[ "$SWITCH_ATTEMPTED" == 1 ]]; then "${compose[@]}" stop caddy >/dev/null 2>&1 || true; fi
     if [[ "$PRIOR_CADDY_PRESENT" == 0 ]]; then
-      if "${compose[@]}" rm -f caddy >/dev/null 2>&1; then evidence rollback_caddy_absent passed; else evidence rollback_caddy_absent failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; fi
+      if "${compose[@]}" rm -f caddy >/dev/null 2>&1 && current_caddy_id="$("${compose[@]}" ps -a -q caddy 2>/dev/null)" && [[ -z "$current_caddy_id" ]]; then evidence rollback_caddy_absent passed; else evidence rollback_caddy_absent failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; fi
     fi
     if ! git -C "$SOURCE_DIR" checkout --detach "$ROLLBACK_SHA" >/dev/null 2>&1; then evidence rollback_checkout failed; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; fi
     if [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null)" != "$ROLLBACK_SHA" ]]; then evidence rollback_checkout failed; evidence rollback_checkout_mismatch yes; evidence rollback_result failed; ROLLBACK_EVIDENCE_WRITTEN=1; return 1; fi
@@ -353,7 +351,6 @@ rollback_infrastructure() {
         rollback_compose+=(-f "$rollback_image_overlay")
       else
         evidence rollback_caddy_image not_applicable
-        rollback_caddy_verified=1
       fi
       if "${rollback_compose[@]}" build api >/dev/null 2>&1; then
         rollback_api_ref="$("${rollback_compose[@]}" config --images api 2>/dev/null || true)"
@@ -365,7 +362,9 @@ rollback_infrastructure() {
               "${rollback_compose[@]}" up -d --no-deps --pull never api caddy >/dev/null 2>&1 || true
               rollback_caddy_id="$("${rollback_compose[@]}" ps -q caddy 2>/dev/null || true)"
               rollback_caddy_image="$(docker inspect "$rollback_caddy_id" --format '{{.Image}}' 2>/dev/null || true)"
-              if [[ -n "$rollback_caddy_id" && "$rollback_caddy_image" == "$OLD_CADDY_IMAGE_ID" ]]; then rollback_caddy_verified=1; fi
+              rollback_caddy_status="$(docker inspect "$rollback_caddy_id" --format '{{.State.Status}}' 2>/dev/null || true)"
+              rollback_caddy_restarts="$(docker inspect "$rollback_caddy_id" --format '{{.RestartCount}}' 2>/dev/null || true)"
+              if [[ -n "$rollback_caddy_id" && "$rollback_caddy_id" != *$'\n'* && "$rollback_caddy_image" == "$OLD_CADDY_IMAGE_ID" && "$rollback_caddy_status" == running && "$rollback_caddy_restarts" =~ ^[0-9]+$ ]]; then rollback_caddy_baseline_verified=1; fi
             else
               "${rollback_compose[@]}" up -d --no-deps --pull never api >/dev/null 2>&1 || true
             fi
@@ -384,6 +383,15 @@ rollback_infrastructure() {
                   rollback_api_status="$(docker inspect "$current_api_id" --format '{{.State.Status}}' 2>/dev/null || true)"
                   rollback_api_restarts="$(docker inspect "$current_api_id" --format '{{.RestartCount}}' 2>/dev/null || true)"
                   if [[ "$current_api_id" == "$rollback_api_id" && "$rollback_api_image" == "$rollback_built_api_image" && "$rollback_api_status" == running && "$rollback_api_restarts" == 0 ]]; then rollback_api_readiness_verified=1; else rollback_api_runtime_verified=0; fi
+                  if [[ "$PRIOR_CADDY_PRESENT" == 1 && "$rollback_caddy_baseline_verified" == 1 ]]; then
+                    current_caddy_id="$("${rollback_compose[@]}" ps -q caddy 2>/dev/null || true)"
+                    rollback_caddy_image="$(docker inspect "$current_caddy_id" --format '{{.Image}}' 2>/dev/null || true)"
+                    rollback_caddy_status="$(docker inspect "$current_caddy_id" --format '{{.State.Status}}' 2>/dev/null || true)"
+                    current_caddy_restarts="$(docker inspect "$current_caddy_id" --format '{{.RestartCount}}' 2>/dev/null || true)"
+                    if [[ "$current_caddy_id" == "$rollback_caddy_id" && "$rollback_caddy_image" == "$OLD_CADDY_IMAGE_ID" && "$rollback_caddy_status" == running && "$current_caddy_restarts" == "$rollback_caddy_restarts" ]]; then rollback_caddy_verified=1; fi
+                  elif [[ "$PRIOR_CADDY_PRESENT" == 0 ]]; then
+                    if current_caddy_id="$("${rollback_compose[@]}" ps -a -q caddy 2>/dev/null)" && [[ -z "$current_caddy_id" ]]; then rollback_caddy_verified=1; fi
+                  fi
                   break
                 fi
                 sleep 2
@@ -396,6 +404,7 @@ rollback_infrastructure() {
       if [[ "$PRIOR_CADDY_PRESENT" == 1 ]]; then
         if [[ "$rollback_caddy_verified" == 1 ]]; then evidence rollback_caddy_image passed; else evidence rollback_caddy_image failed; fi
       fi
+      if [[ "$rollback_caddy_verified" == 1 ]]; then evidence rollback_caddy_runtime passed; else evidence rollback_caddy_runtime failed; fi
       if [[ "$rollback_api_image_verified" == 1 ]]; then evidence rollback_api_image passed; else evidence rollback_api_image failed; fi
       if [[ "$rollback_api_runtime_verified" == 1 ]]; then evidence rollback_api_runtime passed; else evidence rollback_api_runtime failed; fi
       if [[ "$rollback_api_readiness_verified" == 1 ]]; then evidence rollback_api_readiness passed; else evidence rollback_api_readiness failed; fi

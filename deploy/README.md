@@ -46,6 +46,23 @@ resolve and approve its immutable digest before deployment. The deployer pulls,
 validates, and starts `caddy:2.11.4@sha256:<approved-digest>`; the mutable tag is
 never used to start the release service.
 
+The storage path names are unchanged. `/opt/eurith/releases` and its `android`
+directory are `root:eurith-releases` mode `2750`; only `.staging` and
+`android/sha256` are API-UID-owned mode `2770` with that shared group. API
+staging/finalization and cleanup retain write access inside those leaves, not
+permission to rename their directory entries. Every ancestor from `/` through
+the parents of both sources and targets must be root-owned and deny group/other
+write. The helper checks this top-down before inspecting or binding paths;
+repeating a symlink pathname check is not the security boundary.
+
+An existing API-owned storage root or `android` directory is rejected, not
+silently repaired. In a separately approved maintenance window, pause publication
+and cleanup, quiesce API writers, verify every ancestor and existing entry is a
+real directory, then apply the reviewed ownership/modes to these exact parent
+directories only. Do not recursively change artifact or staging ownership.
+Reconcile the versioned unit/helper with the approved assets under the same
+drift-recovery procedure, then rerun provisioning and all permission/boot gates.
+
 Credential rotation is one credential at a time: pause publication, withdrawal,
 mandatory changes, and cleanup; update the named external consumer and protected
 source together; atomically replace the complete API env file as root; run
@@ -183,6 +200,13 @@ Caddy rollback injects and verifies the exact immutable image ID used by the
 prior Caddy container. If Caddy was not
 part of the prior running topology, rollback removes the newly introduced Caddy
 container and restores the approved rollback API through the target overlay.
+Rollback captures the restored Caddy container/image, running state, and numeric
+restart baseline before readiness, then checks the same identity/image is still
+running with an unchanged restart count after API health succeeds. A crash,
+replacement, image change, or restart increase fails rollback evidence. Without
+prior Caddy, both initial removal and continued absence after readiness are
+proved with `compose ps -a -q caddy`. API image/runtime/readiness proofs remain
+mandatory for either topology.
 
 ## Boot-view inspection, recovery, and reboot gate
 
@@ -191,6 +215,14 @@ helper, unit, and Docker drop-in are regular non-symlink root-owned files with
 exact modes `0755`, `0644`, and `0644` and SHA-256 values matching the detached
 target assets. It records `boot_mount_unit=enabled` only after `systemd` reports
 the unit as persistently `enabled` (not `enabled-runtime`) and active/successful.
+It also checks the actual loaded fragment, no release-unit drop-ins/transient
+override or pending daemon reload, exact oneshot execution and filesystem
+dependencies, and Docker's loaded `Requires`/`After` relation. Only the approved
+Docker drop-in and vendor Docker fragment (`/usr/lib/systemd/system` or
+`/lib/systemd/system`) are accepted. Additional local overrides require review;
+they are not silently ignored. The unit invokes the helper through
+`/usr/bin/env -i` with fixed PATH and `LC_ALL=C`, with no alternate root,
+private mount namespace, environment file, or extra execution command.
 It records `boot_mount_runtime=verified` only after the installed helper reports
 `boot_mounts=verified`. Inspect the live unit, dependency, and both mounts with
 these exact commands:
@@ -203,6 +235,8 @@ systemctl status --no-pager eurith-release-views.service
 systemctl status --no-pager docker.service
 systemctl cat eurith-release-views.service
 systemctl cat docker.service
+systemctl show eurith-release-views.service --all --no-pager
+systemctl show docker.service --all --no-pager
 findmnt -n -o SOURCE,TARGET,VFS-OPTIONS --mountpoint /opt/eurith/release-caddy-view/android/sha256
 findmnt -n -o SOURCE,TARGET,VFS-OPTIONS --mountpoint /opt/eurith/release-caddy-view/.probe
 ```

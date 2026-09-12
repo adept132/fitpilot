@@ -232,6 +232,16 @@ ETag/Digest, certificate/package, install, and smoke evidence.
 
 ## Release automation idempotency preflight
 
+Final host acceptance must also prove root-owned non-writable ancestry for both
+release views, with API/cleanup writes confined to staging and final leaves;
+the actual loaded systemd fragments, approved drop-ins, execution environment,
+and filesystem/Docker dependencies; and rollback Caddy container/image/running
+state plus unchanged restart baseline after API readiness. If no Caddy existed
+before rollout, rollback must prove none remains or appears during readiness.
+An old API-owned storage parent requires approved quiesced repair, never an
+automatic recursive ownership change. Asset evidence hashes the ordered fixed
+relative asset names and content digests, independent of detached-checkout roots.
+
 Before starting EAS or another native build, release automation must call
 `GET /internal/app-releases/by-idempotency?key=<deterministic-key>` with the
 publisher bearer token. The operator token and public requests are not valid

@@ -203,11 +203,16 @@ API_UID="$(docker run --rm --entrypoint id "$TARGET_API_IMAGE" -u 2>/dev/null)" 
 
 storage_state=verified
 if [[ ! -e "$STORAGE_ROOT" ]]; then
-  install -d -m 2770 -o "$API_UID" -g "$GROUP_GID" -- "$STORAGE_ROOT" "$STAGING_DIR" "$(dirname -- "$FINAL_DIR")" "$FINAL_DIR" || die storage_create_failed
+  install -d -m 2750 -o 0 -g "$GROUP_GID" -- "$STORAGE_ROOT" "$(dirname -- "$FINAL_DIR")" || die storage_create_failed
+  install -d -m 2770 -o "$API_UID" -g "$GROUP_GID" -- "$STAGING_DIR" "$FINAL_DIR" || die storage_create_failed
   storage_state=created
 fi
 
-for directory in "$STORAGE_ROOT" "$STAGING_DIR" "$(dirname -- "$FINAL_DIR")" "$FINAL_DIR"; do
+for directory in "$STORAGE_ROOT" "$(dirname -- "$FINAL_DIR")"; do
+  [[ -d "$directory" && ! -L "$directory" ]] || die storage_tree_invalid
+  assert_mode_owner_group "$directory" 2750 0 "$GROUP_GID"
+done
+for directory in "$STAGING_DIR" "$FINAL_DIR"; do
   [[ -d "$directory" && ! -L "$directory" ]] || die storage_tree_invalid
   assert_mode_owner_group "$directory" 2770 "$API_UID" "$GROUP_GID"
 done
@@ -321,12 +326,14 @@ if [[ "$ROOT_PREFIX" != / ]]; then
 fi
 systemctl daemon-reload || die boot_systemd_reload_failed
 systemd-analyze verify "$BOOT_UNIT_DESTINATION" docker.service >/dev/null 2>&1 || die boot_systemd_verify_failed
+verify_effective_boot_units "$BOOT_UNIT_DESTINATION" "$DOCKER_DROP_IN_DESTINATION"
 systemctl enable eurith-release-views.service >/dev/null 2>&1 || die boot_unit_enable_failed
 systemctl start eurith-release-views.service >/dev/null || die boot_unit_start_failed
 "$BOOT_HELPER_RUNNER" >/dev/null
 boot_unit_state="$(systemctl is-enabled eurith-release-views.service 2>/dev/null)" || die boot_unit_not_persistently_enabled
 [[ "$boot_unit_state" == enabled ]] || die boot_unit_not_persistently_enabled
 systemctl is-active --quiet eurith-release-views.service || die boot_unit_not_active
+verify_effective_boot_units "$BOOT_UNIT_DESTINATION" "$DOCKER_DROP_IN_DESTINATION"
 printf '%s\n' 'boot_mounts=verified'
 
 assert_exact_bind_mount() {

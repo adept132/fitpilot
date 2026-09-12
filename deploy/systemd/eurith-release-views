@@ -27,6 +27,21 @@ cleanup_on_exit() {
 }
 trap cleanup_on_exit EXIT
 
+verify_root_controlled_ancestry() {
+  local directory="$1" parent metadata mode
+  if [[ "$directory" != / ]]; then
+    parent="${directory%/*}"; [[ -n "$parent" ]] || parent=/
+    verify_root_controlled_ancestry "$parent"
+  fi
+  # Check from / down: after a parent's check, an unprivileged writer cannot
+  # replace its child before that child's check or any subsequent bind/stat.
+  [[ -d "$directory" && ! -L "$directory" ]] || die path_symlink "$directory"
+  metadata="$(stat -c '%a:%u' -- "$directory" 2>/dev/null)" || die path_ancestry_unreadable "$directory"
+  [[ "$metadata" =~ ^([0-7]{3,4}):0$ ]] || die path_ancestry_not_root_controlled "$directory"
+  mode="${BASH_REMATCH[1]}"
+  (( (8#$mode & 0022) == 0 )) || die path_ancestry_writable "$directory"
+}
+
 verify_path_chain_no_symlinks() {
   local path="$1" canonical current
   [[ "$path" == /* ]] || die path_not_absolute "$path"
@@ -74,6 +89,7 @@ ensure_exact_bind() {
 
 [[ $# -eq 0 ]] || die arguments_not_allowed helper
 for path in "$FINAL_SOURCE" "$FINAL_TARGET" "$PROBE_SOURCE" "$PROBE_TARGET"; do
+  verify_root_controlled_ancestry "${path%/*}"
   verify_path_chain_no_symlinks "$path"
 done
 ensure_exact_bind "$FINAL_SOURCE" "$FINAL_TARGET"

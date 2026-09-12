@@ -45,7 +45,7 @@ def _boot_gate_functions() -> str:
     assert marker in script, "deploy.sh does not define the boot-mount deployment gate"
     start = script.index("verify_boot_asset() {")
     end = script.index("\nbuild_target() {", start)
-    return script[start:end]
+    return f'source "{_shell(ROOT / "deploy/lib/release_common.sh")}"\n' + script[start:end]
 
 
 def _run_boot_gate_harness(tmp_path: Path, case: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
@@ -65,7 +65,7 @@ case "$BOOT_GATE_CASE" in
   probe_options_drift) printf 'error=mount_nosymfollow_missing path=/opt/eurith/release-caddy-view/.probe\\n' >&2; exit 1 ;;
   helper_nonzero) exit 23 ;;
   success) printf 'boot_mounts=verified\\n' ;;
-  *) exit 24 ;;
+  *) printf 'boot_mounts=verified\\n' ;;
 esac
 '''
     assets = {
@@ -93,6 +93,9 @@ esac
         installed["eurith-release-views"].mkdir()
 
     _wrapper(bin_dir, "systemctl", '''
+if [[ "$1" == show ]]; then
+  exec "$FAKE_PYTHON" "$FAKE_SYSTEMD_SHOW" "$2" "$BOOT_GATE_CASE" "$FAKE_UNIT" "$FAKE_DROP_IN"
+fi
 case "$*" in
   "is-enabled --quiet eurith-release-views.service")
     [[ "$BOOT_GATE_CASE" != unit_disabled ]] ;;
@@ -154,6 +157,10 @@ fi
         "PATH": _shell(bin_dir) + ":/usr/bin:/bin",
         "BOOT_GATE_CASE": case,
         "EVIDENCE_FILE": _shell(evidence_file),
+        "FAKE_PYTHON": Path(sys.executable).as_posix(),
+        "FAKE_SYSTEMD_SHOW": (ROOT / "tests/deploy/fake_systemd_show.py").as_posix(),
+        "FAKE_UNIT": _shell(installed["eurith-release-views.service"]),
+        "FAKE_DROP_IN": _shell(installed["docker-eurith-release-views.conf"]),
     })
     completed = subprocess.run(
         [BASH, _shell(runner)], env=env, capture_output=True, text=True, timeout=15,
@@ -211,6 +218,25 @@ def test_boot_mount_gate_emits_live_proofs_before_single_backend_pass(tmp_path: 
     ]
 
 
+def test_boot_mount_gate_accepts_real_systemd_empty_struct_array_output(tmp_path: Path) -> None:
+    result, evidence = _run_boot_gate_harness(tmp_path, "systemd_empty_arrays")
+    assert result.returncode == 0, result.stderr
+    assert evidence.count("backend_gate=passed") == 1
+
+
+@pytest.mark.parametrize("case", [
+    "release_dropin", "release_transient", "release_fragment", "release_stale",
+    "release_exec", "release_environment", "release_environment_file",
+    "release_namespace", "release_root", "release_order", "release_mount_dependency",
+    "docker_dependency", "docker_order", "docker_dropin", "docker_transient",
+])
+def test_effective_systemd_override_never_allows_backend_gate(tmp_path: Path, case: str) -> None:
+    result, evidence = _run_boot_gate_harness(tmp_path, case)
+    assert result.returncode != 0
+    assert "backend_gate=passed" not in evidence
+    assert "error=boot_systemd_" in result.stderr
+
+
 def _function(script: str, name: str, next_name: str) -> str:
     start = script.index(f"{name}() {{")
     end = script.index(f"\n{next_name}() {{", start)
@@ -264,6 +290,11 @@ def _run_real_deploy_boot_path(
 
     _wrapper(script_dir, "provision-release-host.sh", "exit 0")
     _wrapper(bin_dir, "systemctl", '''
+if [[ "$1" == show ]]; then
+  effective_case=success
+  [[ "$BOOT_GATE_PHASE" != final ]] || effective_case="${FINAL_GATE_CASE#final_}"
+  exec "$FAKE_PYTHON" "$FAKE_SYSTEMD_SHOW" "$2" "$effective_case" "$FAKE_UNIT" "$FAKE_DROP_IN"
+fi
 case "$*" in
   "is-enabled --quiet eurith-release-views.service")
     [[ "$BOOT_GATE_PHASE" != final || "$FINAL_GATE_CASE" != final_unit_disabled ]] ;;
@@ -308,6 +339,8 @@ esac
 path="${@: -1}"
 if [[ "$*" == *"%a:%u:%g"* ]]; then
   case "$path" in *eurith-release-views) printf '755:0:0\n' ;; *) printf '644:0:0\n' ;; esac
+elif [[ "$*" == *"%a:%u"* ]]; then
+  printf '755:0\n'
 elif [[ "$*" == *"%d:%i"* ]]; then
   if [[ "$BOOT_GATE_PHASE" == final && "$FINAL_GATE_CASE" == final_final_source_drift && "$path" == "$FAKE_FINAL_TARGET" ]]; then printf 'wrong-final\n'
   elif [[ "$BOOT_GATE_PHASE" == final && "$FINAL_GATE_CASE" == final_probe_source_drift && "$path" == "$FAKE_PROBE_TARGET" ]]; then printf 'wrong-probe\n'
@@ -341,6 +374,7 @@ printf 'python3 %s\n' "$*" >>"$FAKE_CALLS"
         "die() { printf 'error=%s\\n' \"$1\" >&2; exit 1; }\n"
         "evidence() { printf '%s=%s\\n' \"$1\" \"$2\" >>\"$EVIDENCE_DIR/deploy.env\"; }\n"
         "sha256_file() { sha256sum -- \"$1\" | awk '{print $1}'; }\n"
+        + f'source "{_shell(ROOT / "deploy/lib/release_common.sh")}"\n'
         + gate_functions + "\n" + write_gate
         + f"\nSCRIPT_DIR='{_shell(script_dir)}'\nEURITH_DEPLOY_ASSET_ROOT='{_shell(asset_root)}'\n"
         + f"BOOT_HELPER_DESTINATION='{_shell(installed['eurith-release-views'])}'\n"
@@ -358,6 +392,10 @@ printf 'python3 %s\n' "$*" >>"$FAKE_CALLS"
     env = os.environ.copy(); env.update({
         "PATH": _shell(bin_dir) + ":/usr/bin:/bin",
         "FINAL_GATE_CASE": final_case,
+        "FAKE_PYTHON": Path(sys.executable).as_posix(),
+        "FAKE_SYSTEMD_SHOW": (ROOT / "tests/deploy/fake_systemd_show.py").as_posix(),
+        "FAKE_UNIT": _shell(installed["eurith-release-views.service"]),
+        "FAKE_DROP_IN": _shell(installed["docker-eurith-release-views.conf"]),
         "FAKE_CALLS": _shell(calls),
         "FAKE_FINAL_SOURCE": _shell(final_source),
         "FAKE_FINAL_TARGET": _shell(final_target),
@@ -376,6 +414,7 @@ printf 'python3 %s\n' "$*" >>"$FAKE_CALLS"
         "final_unit_enabled_runtime", "final_unit_inactive", "final_unit_failed",
         "final_final_source_drift", "final_final_target_drift", "final_final_options_drift",
         "final_probe_source_drift", "final_probe_target_drift", "final_probe_options_drift",
+        "final_release_dropin", "final_release_environment", "final_docker_dependency",
     ],
 )
 def test_real_final_publication_path_rechecks_changed_boot_state(
@@ -383,6 +422,7 @@ def test_real_final_publication_path_rechecks_changed_boot_state(
 ) -> None:
     result, evidence, gate_exists = _run_real_deploy_boot_path(tmp_path, final_case)
     assert result.returncode != 0
+    assert "build_status=passed" in evidence
     assert "backend_gate=passed" not in evidence
     assert "backend_gate=passed" not in result.stdout
     assert not gate_exists
@@ -425,7 +465,10 @@ def _run_rollback_harness(tmp_path: Path, case: str, prior_caddy: bool) -> list[
   *"status --porcelain") exit 0 ;;
   *) exit 97 ;;
 esac''')
-    _wrapper(bin_dir, "curl", '''if [[ "$ROLLBACK_CASE" == readiness_timeout ]]; then printf 503; else printf 200; fi''')
+    _wrapper(bin_dir, "curl", '''
+if [[ "$ROLLBACK_CASE" == readiness_timeout ]]; then printf 503
+else : >"$ROLLBACK_STATE/ready"; printf 200; fi
+''')
     _wrapper(bin_dir, "sleep", ":")
     _wrapper(bin_dir, "docker", f'''next_count() {{
   local name="$1" path="$ROLLBACK_STATE/$1" value=0
@@ -443,13 +486,37 @@ if [[ "$1" == compose ]]; then
       [[ "$ROLLBACK_CASE" != up_failure ]] || exit 0
       count="$(next_count api_ps)"
       if [[ "$ROLLBACK_CASE" == container_swap && "$count" -gt 0 ]]; then printf "api-swap\\n"; else printf "api-id\\n"; fi ;;
-    *" ps -q caddy") [[ "$PRIOR_CADDY" == 1 && "$ROLLBACK_CASE" != up_failure ]] && printf "caddy-id\\n" ;;
+    *" ps -q caddy"|*" ps -a -q caddy")
+      if [[ "$PRIOR_CADDY" == 0 ]]; then
+        [[ "$ROLLBACK_CASE" == caddy_unexpected && -f "$ROLLBACK_STATE/ready" ]] && printf "caddy-unexpected\\n"
+        exit 0
+      fi
+      [[ "$ROLLBACK_CASE" != up_failure ]] || exit 0
+      if [[ "$ROLLBACK_CASE" == caddy_swap_after && -f "$ROLLBACK_STATE/ready" ]]; then printf "caddy-swap\\n"
+      elif [[ "$ROLLBACK_CASE" == caddy_missing_after && -f "$ROLLBACK_STATE/ready" ]]; then exit 0
+      else printf "caddy-id\\n"; fi ;;
     *) exit 96 ;;
   esac
 elif [[ "$1 $2" == "image inspect" ]]; then
   printf "%s\\n" "{built_image}"
 elif [[ "$1" == inspect ]]; then
   container="$2"; format="$4"
+  if [[ "$container" == caddy-* ]]; then
+    case "$format" in
+      "{{{{.Image}}}}")
+        if [[ "$ROLLBACK_CASE" == caddy_image_after && -f "$ROLLBACK_STATE/ready" ]]; then printf "%s\\n" "{wrong_image}"
+        else printf "%s\\n" "{old_caddy_image}"; fi ;;
+      "{{{{.State.Status}}}}")
+        if [[ "$ROLLBACK_CASE" == caddy_crash_before || ( "$ROLLBACK_CASE" == caddy_crash_after && -f "$ROLLBACK_STATE/ready" ) ]]; then printf "exited\\n"
+        else printf "running\\n"; fi ;;
+      "{{{{.RestartCount}}}}")
+        if [[ "$ROLLBACK_CASE" == caddy_restart_invalid ]]; then printf "unknown\\n"
+        elif [[ "$ROLLBACK_CASE" == caddy_restart_after && -f "$ROLLBACK_STATE/ready" ]]; then printf "3\\n"
+        else printf "2\\n"; fi ;;
+      *) exit 95 ;;
+    esac
+    exit 0
+  fi
   case "$format" in
     "{{{{.Image}}}}")
       if [[ "$container" == caddy-id ]]; then printf "%s\\n" "{old_caddy_image}"
@@ -920,6 +987,22 @@ def test_rollback_restores_both_prior_caddy_topologies() -> None:
     assert 'if [[ "$PRIOR_CADDY_PRESENT" == 0 ]]' in script
     assert '"${compose[@]}" rm -f caddy' in script
     assert 'rollback_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY")' in script
+
+
+@pytest.mark.parametrize("case", [
+    "caddy_crash_before", "caddy_crash_after", "caddy_restart_after",
+    "caddy_restart_invalid", "caddy_swap_after", "caddy_image_after", "caddy_missing_after",
+])
+def test_rollback_caddy_must_remain_running_same_image_container_and_restart_count(tmp_path: Path, case: str) -> None:
+    evidence = _run_rollback_harness(tmp_path, case, True)
+    assert "rollback_result=failed" in evidence
+    assert "rollback_result=passed" not in evidence
+
+
+def test_rollback_without_prior_caddy_rejects_container_appearing_during_readiness(tmp_path: Path) -> None:
+    evidence = _run_rollback_harness(tmp_path, "caddy_unexpected", False)
+    assert "rollback_result=failed" in evidence
+    assert "rollback_result=passed" not in evidence
 
 
 def test_rollback_pass_requires_exact_candidate_api_image_running_stable_and_ready() -> None:

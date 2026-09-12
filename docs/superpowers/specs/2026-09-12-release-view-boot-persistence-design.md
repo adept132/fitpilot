@@ -34,7 +34,8 @@ In scope:
 
 Out of scope:
 
-- changing APK storage layout or release API behavior;
+- changing APK storage path names or release API behavior (ancestry ownership
+  hardening is required for the source-path race fix);
 - using AAB or a store publication path;
 - changing Docker's system-wide restart policy;
 - automatically rebooting production during provisioning;
@@ -63,6 +64,24 @@ or command-line inputs. It validates with `lstat`/canonical-path checks that no
 source or destination component is a symlink and that every canonical path is
 the expected absolute path. It creates no release data and never replaces an
 unexpected entry.
+
+The source and target parents have root-controlled ancestry, verified from `/`
+down: real directories, owner UID 0, and no group/other write bits. This makes
+each checked child non-replaceable by an API writer across validation, bind,
+and identity verification. Storage root and `android` use root:shared-group
+mode `2750`; `.staging` and `android/sha256` alone keep API-UID:shared-group
+mode `2770`. The API can create/link/unlink artifact files and cleanup can
+unlink within these leaves, but neither can replace a parent or leaf directory
+entry. Existing writable ancestry fails closed and requires separately reviewed,
+quiesced exact-directory ownership repair; no recursive automatic migration.
+
+The effective systemd state is verified, not inferred from installed bytes:
+loaded approved release fragment, no release drop-ins or transient/stale unit,
+exact ExecStart with `/usr/bin/env -i` and fixed PATH/locale, approved execution
+environment/mount namespace, required filesystems and Docker Before/Requires/
+After relationship. Docker must use its vendor fragment and the single approved
+drop-in. Provisioning checks before activation and again after verification;
+deployment checks before build and immediately before backend-gate publication.
 
 For each view the helper:
 

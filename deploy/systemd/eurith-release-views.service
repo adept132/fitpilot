@@ -5,7 +5,7 @@ Before=docker.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/libexec/eurith-release-views
+ExecStart=/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C /usr/local/libexec/eurith-release-views
 RemainAfterExit=yes
 
 [Install]

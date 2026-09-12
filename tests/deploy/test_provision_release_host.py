@@ -67,7 +67,7 @@ def boot_contract_is_valid():
     return all(value in unit_text for value in (
         "Before=docker.service",
         "Type=oneshot",
-        "ExecStart=/usr/local/libexec/eurith-release-views",
+        "ExecStart=/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C /usr/local/libexec/eurith-release-views",
         "RemainAfterExit=yes",
     )) and all(value in drop_in_text for value in (
         "Requires=eurith-release-views.service",
@@ -170,6 +170,9 @@ elif command == "stat":
     mount_record = load(mounts_path).get(target_key)
     metadata_key = mount_record["source"] if mount_record and mount_record["source"] != target_key else target_key
     record = load(metadata_path).get(metadata_key)
+    if "%a:%u" in args:
+        print(f'{record["mode"]}:{record["owner"]}' if record else "755:0")
+        sys.exit(0)
     if record is None: sys.exit(1)
     if "%d:%i" in args: print(target_key if mount_record is None else mount_record["source"])
     else: print(f'{record["mode"]}:{record["owner"]}:{record["group"]}')
@@ -296,6 +299,14 @@ elif command == "docker":
     fixture_token = passed_env.get("EURITH_PROBE_TOKEN", "test-token")
     fixture = final_dir / fixture_name
     if action == "api-stage":
+        metadata = load(metadata_path)
+        api_uid = os.environ.get("FAKE_TARGET_API_UID", "1234")
+        for directory in (staging_dir.parent, final_dir.parent):
+            record = metadata.get(key(directory), {})
+            if record != {"mode": "2750", "owner": "0", "group": "4321"}: sys.exit(26)
+        for directory in (staging_dir, final_dir):
+            record = metadata.get(key(directory), {})
+            if record != {"mode": "2770", "owner": api_uid, "group": "4321"}: sys.exit(27)
         if "eurith-provision" not in joined or "chmod 0600" not in joined or "mv -T -n" not in joined or "chmod 0640" not in joined: sys.exit(3)
         if fixture.exists(): sys.exit(4)
         staging = staging_dir / (fixture_name + ".tmp")
@@ -318,6 +329,12 @@ elif command == "docker":
         sys.exit(0 if allowed in ("all", action.removeprefix("caddy-")) else 1)
     sys.exit(2)
 elif command == "systemctl":
+    if args and args[0] == "show":
+        sys.exit(subprocess.call([
+            sys.executable, os.environ["FAKE_SYSTEMD_SHOW"], args[1],
+            os.environ.get("FAKE_EFFECTIVE_CASE", "success"),
+            shell_path(os.environ["FAKE_BOOT_UNIT"]), shell_path(os.environ["FAKE_DOCKER_DROP_IN"]),
+        ]))
     if args == ["daemon-reload"]:
         if os.environ.get("FAKE_DOCKER_SOCKET_ACTIVATES_DURING_RELOAD") == "1":
             sys.exit(start_docker_through_dependency())
@@ -434,6 +451,7 @@ class Host:
         env.update({
             "PATH": _shell(self.bin) + ":/usr/bin:/bin",
             "FAKE_STATE_DIR": str(self.state),
+            "FAKE_SYSTEMD_SHOW": str(ROOT / "tests/deploy/fake_systemd_show.py"),
             "FAKE_FINAL_DIR": str(self.storage / "android" / "sha256"),
             "FAKE_STAGING_DIR": str(self.storage / ".staging"),
             "FAKE_STORAGE_ROOT": str(self.storage),
@@ -497,6 +515,16 @@ def test_scripts_exist() -> None:
     assert DOCKER_DROP_IN.is_file()
 
 
+@pytest.mark.parametrize("case", ["release_dropin", "release_environment", "docker_dependency"])
+def test_provision_rejects_effective_override_before_boot_or_permission_success(host: Host, case: str) -> None:
+    result = host.run(FAKE_EFFECTIVE_CASE=case)
+    assert result.returncode != 0
+    assert "error=boot_systemd_" in result.stderr
+    assert "boot_mounts=verified" not in result.stdout
+    assert "permissions=verified" not in result.stdout
+    assert "EURITH_PROBE_ACTION=api-stage" not in (host.state / "calls.log").read_text()
+
+
 def test_boot_assets_are_installed_exactly_and_ordered_before_permission_probes(host: Host) -> None:
     result = host.run()
 
@@ -522,7 +550,7 @@ def test_boot_assets_are_installed_exactly_and_ordered_before_permission_probes(
         "Before=docker.service",
         "RequiresMountsFor=/opt/eurith/releases /opt/eurith/release-caddy-probe-source",
         "WantedBy=multi-user.target",
-        "ExecStart=/usr/local/libexec/eurith-release-views",
+        "ExecStart=/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C /usr/local/libexec/eurith-release-views",
     ):
         assert line in service
     drop_in = host.installed_docker_drop_in.read_text(encoding="utf-8")
@@ -860,7 +888,7 @@ def test_first_use_survives_real_compose_short_bind_autocreate_side_effect(host:
     assert result.returncode == 0, result.stderr
     metadata = json.loads((host.state / "metadata.json").read_text())
     assert metadata[str(host.storage.resolve())] == {
-        "mode": "2770", "owner": "1234", "group": "4321"
+        "mode": "2750", "owner": "0", "group": "4321"
     }
 
 
@@ -880,7 +908,7 @@ def test_first_use_builds_target_and_resolves_uid_without_release_env_or_overlay
     assert first_overlay > 1
     metadata = json.loads((host.state / "metadata.json").read_text())
     assert metadata[str(host.storage.resolve())] == {
-        "mode": "2770", "owner": "2345", "group": "4321"
+        "mode": "2750", "owner": "0", "group": "4321"
     }
 
 
@@ -907,7 +935,7 @@ def test_target_image_uid_is_authoritative_for_new_storage(host: Host) -> None:
     result = host.run(FAKE_TARGET_API_UID="2345")
     assert result.returncode == 0, result.stderr
     metadata = json.loads((host.state / "metadata.json").read_text())
-    assert metadata[str(host.storage.resolve())]["owner"] == "2345"
+    assert metadata[str((host.storage / "android" / "sha256").resolve())]["owner"] == "2345"
     assert "permissions=verified" in result.stdout
 
 
@@ -985,7 +1013,9 @@ def test_env_files_have_exact_keys_and_storage_roots(host: Host) -> None:
     metadata = json.loads((host.state / "metadata.json").read_text())
     for path in (host.api_env, host.cleanup_env, host.deploy_env):
         assert metadata[str(path.resolve())] == {"mode": "640", "owner": "0", "group": "4321"}
-    for path in (host.storage, host.storage / ".staging", host.storage / "android", host.storage / "android" / "sha256"):
+    for path in (host.storage, host.storage / "android"):
+        assert metadata[str(path.resolve())] == {"mode": "2750", "owner": "0", "group": "4321"}
+    for path in (host.storage / ".staging", host.storage / "android" / "sha256"):
         assert metadata[str(path.resolve())] == {"mode": "2770", "owner": "1234", "group": "4321"}
 
 

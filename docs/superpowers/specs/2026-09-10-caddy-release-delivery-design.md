@@ -171,14 +171,19 @@ handoff. The normal latest endpoint remains `Cache-Control: no-store`.
 The persistent host tree is `/opt/eurith/releases`:
 
 ```text
-/opt/eurith/releases/                 owner=<API_UID>, group=eurith-releases, 2770
+/opt/eurith/releases/                 owner=root, group=eurith-releases, 2750
   .staging/                           owner=<API_UID>, group=eurith-releases, 2770
-  android/                            owner=<API_UID>, group=eurith-releases, 2770
+  android/                            owner=root, group=eurith-releases, 2750
     sha256/                           owner=<API_UID>, group=eurith-releases, 2770
       <64-lowercase-hex>.apk          owner=<API_UID>, group=eurith-releases, 0640
 ```
 
-`<API_UID>` is resolved from the built API image. The numeric GID is resolved
+`<API_UID>` is resolved from the built API image. The 2026-09-12
+boot-persistence security revision makes
+every ancestor root-owned with no group/other write; API and cleanup write
+access is retained only inside the `.staging` and final `sha256` leaves. Existing
+API-owned parent directories fail closed and require quiesced reviewed repair.
+The numeric GID is resolved
 from the host `eurith-releases` group. No deployment instruction assumes image
 UID/GID values. Setgid (`2`) on every directory preserves the shared group for
 new descendants. Staging files remain `0600` until validation and atomic

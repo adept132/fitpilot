@@ -67,8 +67,12 @@ if command == "mount":
     if os.environ.get("FAKE_MOUNT_FAIL_AT") == f"{operation}-{target_kind}":
         sys.exit(19)
     if operation == "bind":
+        # Model rename+symlink at the bind boundary by an API writer that owns
+        # the parent. Both later bind/stat pathname resolutions see the alias.
+        if os.environ.get("FAKE_SWAP_SOURCE_AT_BIND") == "1" and target_kind == "final":
+            (state_dir / "source-swapped").write_text("yes")
         mounts[target] = {
-            "source": key(args[-2]),
+            "source": key(args[-2]) + (".unapproved" if (state_dir / "source-swapped").exists() and target_kind == "final" else ""),
             "target": target,
             "options": "rw,nosuid,nodev",
         }
@@ -108,9 +112,17 @@ elif command == "readlink":
         sys.exit(1)
     print(shell_path(target))
 elif command == "stat":
+    if "%a:%u" in args:
+        if os.environ.get("FAKE_WRITABLE_ANCESTOR") == key(args[-1]):
+            print(os.environ.get("FAKE_ANCESTRY_METADATA", "2770:1234"))
+        else:
+            print("755:0")
+        sys.exit(0)
     mounts = load_mounts()
     target = key(args[-1])
     record = mounts.get(target)
+    if (state_dir / "source-swapped").exists() and target.endswith(os.sep + "sha256") and record is None:
+        target += ".unapproved"
     print(record["source"] if record is not None else target)
 else:
     sys.exit(127)
@@ -263,6 +275,25 @@ def test_first_start_creates_and_verifies_both_exact_mounts(helper_host: HelperH
         f"mount --bind {_call_path(helper_host.probe_source)} {_call_path(helper_host.probe_target)}",
         f"mount -o remount,bind,ro,nosymfollow {_call_path(helper_host.probe_target)}",
     ]
+
+
+@pytest.mark.parametrize("metadata", ["2770:1234", "2770:0", "777:0", "755:1234", "invalid"])
+def test_api_writable_ancestry_cannot_swap_source_between_validation_and_bind(helper_host: HelperHost, metadata: str) -> None:
+    result = helper_host.run(
+        FAKE_SWAP_SOURCE_AT_BIND="1",
+        FAKE_WRITABLE_ANCESTOR=str(helper_host.final_source.parent.resolve()),
+        FAKE_ANCESTRY_METADATA=metadata,
+    )
+    assert result.returncode != 0, result.stdout
+    assert helper_host.mounts() == {}
+    assert not any(call.startswith("mount ") for call in helper_host.calls())
+
+
+@pytest.mark.parametrize("path_name", ["final_source", "final_target", "probe_source", "probe_target"])
+def test_each_path_requires_root_controlled_parent_ancestry(helper_host: HelperHost, path_name: str) -> None:
+    result = helper_host.run(FAKE_WRITABLE_ANCESTOR=str(getattr(helper_host, path_name).parent.resolve()))
+    assert result.returncode != 0
+    assert helper_host.mounts() == {}
 
 
 def test_repeat_is_verification_only_and_does_not_mutate_mounts(helper_host: HelperHost) -> None:
