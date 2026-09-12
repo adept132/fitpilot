@@ -247,9 +247,19 @@ pg_restore --exit-on-error --no-owner --no-privileges --dbname "$PGDATABASE" "$d
 tar --extract --file "$archive" --directory "$restore_root" || die "archive_restore_failed"
 
 rows="$scratch/registry.tsv"
-psql --no-psqlrc --set ON_ERROR_STOP=1 --tuples-only --no-align --field-separator=$'\t' \
-  --command "SELECT artifact_storage_key, status, artifact_size_bytes, artifact_sha256 FROM app_releases WHERE delivery_method = 'direct_apk' AND artifact_deleted_at IS NULL ORDER BY artifact_storage_key" \
-  >"$rows" || die "release_registry_query_failed"
+relation_present="$(psql --no-psqlrc --set ON_ERROR_STOP=1 --tuples-only --no-align \
+  --command "SELECT CASE WHEN pg_catalog.to_regclass('public.app_releases') IS NULL THEN 0 ELSE 1 END")" \
+  || die "release_registry_query_failed"
+relation_present="${relation_present//[[:space:]]/}"
+case "$relation_present" in
+  0) : >"$rows" ;;
+  1)
+    psql --no-psqlrc --set ON_ERROR_STOP=1 --tuples-only --no-align --field-separator=$'\t' \
+      --command "SELECT artifact_storage_key, status, artifact_size_bytes, artifact_sha256 FROM public.app_releases WHERE delivery_method = 'direct_apk' AND artifact_deleted_at IS NULL ORDER BY artifact_storage_key" \
+      >"$rows" || die "release_registry_query_failed"
+    ;;
+  *) die "release_registry_query_failed" ;;
+esac
 
 row_count=0
 while IFS=$'\t' read -r key status expected_size expected_sha extra; do

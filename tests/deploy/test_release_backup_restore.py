@@ -52,6 +52,15 @@ elif command == "pg_restore":
         sys.exit(3)
 elif command == "psql":
     sql = args[args.index("--command") + 1]
+    if os.environ.get("FAKE_RELEASE_PROBE_ERROR") == "1" and "to_regclass" in sql:
+        print("simulated database failure", file=sys.stderr)
+        sys.exit(9)
+    if os.environ.get("FAKE_RELEASE_QUERY_ERROR") == "1" and "artifact_storage_key" in sql:
+        print("simulated database failure", file=sys.stderr)
+        sys.exit(9)
+    if "to_regclass" in sql:
+        print("0" if os.environ.get("FAKE_RELEASE_RELATION_STATE") == "missing" else "1")
+        sys.exit(0)
     comprehensive_catalog_env = {
         "pg_catalog.pg_namespace": "FAKE_DB_SCHEMA_COUNT",
         "pg_catalog.pg_class": "FAKE_DB_RELATION_COUNT",
@@ -82,6 +91,9 @@ elif command == "psql":
         if matched:
             print(os.environ.get(matched, os.environ.get("FAKE_DB_OBJECT_COUNT", "0")))
         elif "artifact_storage_key" in sql:
+            if os.environ.get("FAKE_RELEASE_RELATION_STATE") == "missing":
+                print('relation "app_releases" does not exist', file=sys.stderr)
+                sys.exit(1)
             rows = pathlib.Path(os.environ["FAKE_ROWS_FILE"])
             if rows.exists(): print(rows.read_text(encoding="utf-8"), end="")
 elif command == "tar":
@@ -224,6 +236,32 @@ def test_backup_creates_one_private_complete_paired_generation(tmp_path: Path) -
     assert "do-not-log" not in completed.stdout + completed.stderr + (harness.state / "calls.log").read_text()
 
 
+def test_backup_accepts_legacy_database_without_app_releases_as_empty_registry(tmp_path: Path) -> None:
+    """Catches the pre-migration backup requiring a relation introduced by the target release."""
+    harness = Harness(tmp_path)
+    (harness.volume / KEY).unlink()
+
+    completed = harness.run_backup(
+        env=harness.env(FAKE_RELEASE_RELATION_STATE="missing")
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    manifest = (harness.generation() / "manifest.sha256").read_text(encoding="utf-8")
+    assert "\nartifact\t" not in manifest
+
+
+@pytest.mark.parametrize("failure", ["FAKE_RELEASE_PROBE_ERROR", "FAKE_RELEASE_QUERY_ERROR"])
+def test_backup_keeps_non_relation_registry_query_errors_fatal(tmp_path: Path, failure: str) -> None:
+    """Catches treating an arbitrary database failure as the supported legacy baseline."""
+    harness = Harness(tmp_path)
+
+    completed = harness.run_backup(env=harness.env(**{failure: "1"}))
+
+    assert completed.returncode != 0
+    assert "release_registry_query_failed" in completed.stderr
+    assert list(harness.output.iterdir()) == []
+
+
 @pytest.mark.parametrize(
     ("mutation", "expected"),
     [
@@ -358,6 +396,31 @@ def test_restore_accepts_only_matching_pair_and_reports_redacted_counts(tmp_path
         if line.startswith("pg_restore ")
     )
     assert "--dbname eurith_restore_test" in restore_call
+
+
+def test_restore_accepts_legacy_database_without_app_releases_as_empty_registry(tmp_path: Path) -> None:
+    """Catches restore verification requiring the target relation before migration rehearsal."""
+    harness = Harness(tmp_path)
+    (harness.volume / KEY).unlink()
+    harness.rows.write_text("", encoding="utf-8")
+    assert harness.run_backup().returncode == 0
+
+    completed = harness.run_restore(FAKE_RELEASE_RELATION_STATE="missing")
+
+    assert completed.returncode == 0, completed.stderr
+    assert "rows=0" in completed.stdout and "files=0" in completed.stdout
+
+
+@pytest.mark.parametrize("failure", ["FAKE_RELEASE_PROBE_ERROR", "FAKE_RELEASE_QUERY_ERROR"])
+def test_restore_keeps_non_relation_registry_query_errors_fatal(tmp_path: Path, failure: str) -> None:
+    """Catches restore verification suppressing connectivity, permission, or SQL failures."""
+    harness = Harness(tmp_path)
+    assert harness.run_backup().returncode == 0
+
+    completed = harness.run_restore(**{failure: "1"})
+
+    assert completed.returncode != 0
+    assert "release_registry_query_failed" in completed.stderr
 
 
 def test_restore_preserves_scratch_named_files_from_archive_byte_for_byte(tmp_path: Path) -> None:

@@ -128,9 +128,19 @@ source "$pg_env"
 rm -f -- "$pg_env"
 
 rows_file="$generation/.registry.tsv"
-psql --no-psqlrc --set ON_ERROR_STOP=1 --tuples-only --no-align --field-separator=$'\t' \
-  --command "SELECT artifact_storage_key, status, artifact_size_bytes, artifact_sha256 FROM app_releases WHERE delivery_method = 'direct_apk' AND artifact_deleted_at IS NULL ORDER BY artifact_storage_key" \
-  >"$rows_file" || die "release_registry_query_failed"
+relation_present="$(psql --no-psqlrc --set ON_ERROR_STOP=1 --tuples-only --no-align \
+  --command "SELECT CASE WHEN pg_catalog.to_regclass('public.app_releases') IS NULL THEN 0 ELSE 1 END")" \
+  || die "release_registry_query_failed"
+relation_present="${relation_present//[[:space:]]/}"
+case "$relation_present" in
+  0) : >"$rows_file" ;;
+  1)
+    psql --no-psqlrc --set ON_ERROR_STOP=1 --tuples-only --no-align --field-separator=$'\t' \
+      --command "SELECT artifact_storage_key, status, artifact_size_bytes, artifact_sha256 FROM public.app_releases WHERE delivery_method = 'direct_apk' AND artifact_deleted_at IS NULL ORDER BY artifact_storage_key" \
+      >"$rows_file" || die "release_registry_query_failed"
+    ;;
+  *) die "release_registry_query_failed" ;;
+esac
 
 validate_key() {
   local key="$1" expected_sha="$2"
