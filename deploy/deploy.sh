@@ -40,8 +40,11 @@ MIGRATION_APPROVAL_TOOL="$RUNNER_ROOT/deploy/validate-migration-approval.py"
 REHEARSAL_PROBE="$RUNNER_ROOT/deploy/rehearse-release-db.py"
 REHEARSAL_INPUT_PREPARER="$RUNNER_ROOT/deploy/prepare-rehearsal-inputs.py"
 MOBILE_GATE_FILE="${MOBILE_GATE_FILE:-$EURITH_EVIDENCE_ROOT/backend-gate-${TARGET_SHA}.env}"
+BOOT_HELPER_DESTINATION=/usr/local/libexec/eurith-release-views
+BOOT_UNIT_DESTINATION=/etc/systemd/system/eurith-release-views.service
+DOCKER_DROP_IN_DESTINATION=/etc/systemd/system/docker.service.d/eurith-release-views.conf
 
-for command_name in git docker curl sha256sum awk sed grep stat findmnt head python3 install chmod date mktemp mv rm rmdir seq sleep; do require_command "$command_name"; done
+for command_name in git docker curl sha256sum awk sed grep stat findmnt head python3 install chmod date mktemp mv rm rmdir seq sleep systemctl; do require_command "$command_name"; done
 for path in "$SOURCE_DIR" "$EURITH_DEPLOY_ASSET_ROOT" "$EURITH_BASE_COMPOSE" "$RELEASE_OVERLAY" "$DEPLOY_ENV" "$EURITH_BACKUP_ROOT" "$EURITH_RESTORE_DB_URL_FILE" "$EURITH_RESTORE_VOLUME_ROOT" "$EURITH_MIGRATION_APPROVAL_FILE" "$EURITH_EVIDENCE_ROOT" "$EURITH_CANARY_IDS_FILE" "$MOBILE_GATE_FILE"; do [[ -n "$path" ]] || die required_runtime_path_missing; done
 PUBLIC_API_BASE="$(python3 - "$EURITH_PUBLIC_API_URL" <<'PY'
 import ipaddress, re, sys
@@ -230,9 +233,35 @@ gate_migrations() {
   evidence alembic_heads "$heads"; evidence alembic_path "$migration_path"; evidence migration_path_sha256 "$migration_path_hash"; evidence migration_policy_sha256 "$approval_hash"; evidence migration_approval_identity "$approval_identity"; evidence rehearsal_probe_sha256 "$(sha256_file "$REHEARSAL_PROBE")"
 }
 
+verify_boot_asset() {
+  local source="$1" destination="$2" mode="$3" metadata_error="$4" bytes_error="$5"
+  [[ -f "$source" && ! -L "$source" ]] || die boot_mount_target_asset_invalid
+  [[ -f "$destination" && ! -L "$destination" ]] || die "$metadata_error"
+  [[ "$(stat -c '%a:%u:%g' -- "$destination" 2>/dev/null)" == "${mode}:0:0" ]] || die "$metadata_error"
+  [[ "$(sha256_file "$destination")" == "$(sha256_file "$source")" ]] || die "$bytes_error"
+}
+
+verify_installed_boot_assets() {
+  verify_boot_asset "$EURITH_DEPLOY_ASSET_ROOT/deploy/systemd/eurith-release-views" "$BOOT_HELPER_DESTINATION" 755 boot_mount_helper_metadata_invalid boot_mount_helper_bytes_mismatch
+  verify_boot_asset "$EURITH_DEPLOY_ASSET_ROOT/deploy/systemd/eurith-release-views.service" "$BOOT_UNIT_DESTINATION" 644 boot_mount_unit_metadata_invalid boot_mount_unit_bytes_mismatch
+  verify_boot_asset "$EURITH_DEPLOY_ASSET_ROOT/deploy/systemd/docker-eurith-release-views.conf" "$DOCKER_DROP_IN_DESTINATION" 644 boot_mount_docker_drop_in_metadata_invalid boot_mount_docker_drop_in_bytes_mismatch
+}
+
+verify_boot_mount_gate() {
+  local helper_output
+  verify_installed_boot_assets
+  evidence boot_mount_assets verified
+  systemctl is-enabled --quiet eurith-release-views.service || die boot_mount_unit_not_enabled
+  evidence boot_mount_unit enabled
+  helper_output="$("$BOOT_HELPER_DESTINATION")" || die boot_mount_runtime_verification_failed
+  [[ "$helper_output" == boot_mounts=verified ]] || die boot_mount_runtime_evidence_invalid
+  evidence boot_mount_runtime verified
+}
+
 build_target() {
   local runtime_heads
   "$SCRIPT_DIR/provision-release-host.sh" --secret-source-dir "$EURITH_SECRET_SOURCE_DIR" --base-compose "$EURITH_BASE_COMPOSE" --release-overlay "$RELEASE_OVERLAY" --deploy-asset-root "$EURITH_DEPLOY_ASSET_ROOT" --target-sha "$TARGET_SHA" >/dev/null || die provisioning_verification_failed
+  verify_boot_mount_gate
   "${compose[@]}" build api || die target_build_failed
   runtime_heads="$("${compose[@]}" run --rm --no-deps api alembic heads 2>/dev/null | sed -n 's/^\([0-9A-Za-z_]*\).*/\1/p')" || die alembic_heads_failed
   [[ "$runtime_heads" == "$EXPECTED_ALEMBIC_HEAD" ]] || die built_image_alembic_head_mismatch
@@ -415,6 +444,7 @@ write_mobile_gate() {
   local completed_at
   completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; [[ "$completed_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || die deploy_timestamp_invalid
   evidence rollback_result not_required
+  verify_boot_mount_gate
   evidence backend_gate passed
   evidence deployment_result passed
   evidence deploy_completed_at "$completed_at"

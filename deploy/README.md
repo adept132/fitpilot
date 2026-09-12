@@ -184,6 +184,46 @@ prior Caddy container. If Caddy was not
 part of the prior running topology, rollback removes the newly introduced Caddy
 container and restores the approved rollback API through the target overlay.
 
+## Boot-view inspection, recovery, and reboot gate
+
+The deployment records `boot_mount_assets=verified` only after the installed
+helper, unit, and Docker drop-in are regular non-symlink root-owned files with
+exact modes `0755`, `0644`, and `0644` and SHA-256 values matching the detached
+target assets. It records `boot_mount_unit=enabled` only after the unit is
+enabled, and `boot_mount_runtime=verified` only after the installed helper
+reports `boot_mounts=verified`. Inspect the live unit, dependency, and both
+mounts with these exact commands:
+
+```bash
+systemctl is-enabled eurith-release-views.service
+systemctl is-enabled docker.service
+systemctl status --no-pager eurith-release-views.service
+systemctl status --no-pager docker.service
+systemctl cat eurith-release-views.service
+systemctl cat docker.service
+findmnt -n -o SOURCE,TARGET,VFS-OPTIONS --mountpoint /opt/eurith/release-caddy-view/android/sha256
+findmnt -n -o SOURCE,TARGET,VFS-OPTIONS --mountpoint /opt/eurith/release-caddy-view/.probe
+```
+
+The final view must report source `/opt/eurith/releases/android/sha256`, its
+exact target, and `ro,nosymfollow`; the probe must report source
+`/opt/eurith/release-caddy-probe-source`, its exact target, and the same options.
+If an unexpected host mount entry or option is present, recover in this order:
+
+1. Repair the unexpected host entry without changing the approved target assets.
+2. Restart `eurith-release-views.service`.
+3. Run both exact `findmnt` commands above and verify both mounts.
+4. Only then start or restart Docker and run the bounded API health, Caddy health,
+   and public canary checks.
+
+The first production rollout has a separate controlled reboot gate. After the
+deployment gate passes, reboot the production host in a controlled window and
+prove the release-view unit completed before Docker, both exact mounts remain
+`ro,nosymfollow`, API and Caddy container identities have zero restart-count
+increase, and all public canaries pass. Until that evidence is reviewed, mobile
+`main` and APK construction remain blocked. Production distributes APK only;
+never build an AAB or publish through Play Store for this release path.
+
 Run canaries independently with the same protected inputs:
 
 ```bash

@@ -103,6 +103,7 @@ observed.
 | --- | --- | --- |
 | Publisher/operator/webhook token generation or rotation | NOT RUN | Generate three independent secrets, install protected environment files, configure the matching GitHub boundaries, and record rotation ownership/date without exposing values. |
 | Release volume mounts and permissions | NOT RUN | Run `provision-release-host.sh`; verify actual API UID/shared GID, API `rw`, the dedicated Caddy view `ro,nosymfollow`, setgid directories, staging `0600`, final APK `0640`, and all negative mutation/symlink probes. |
+| Boot-persistent release views | NOT RUN | Prove installed helper/unit/Docker drop-in exact type, ownership, mode, and target SHA-256; enabled unit; live helper result; controlled reboot ordering; exact post-reboot mounts; zero container restarts; and public canaries. |
 | Caddy configuration and delivery | NOT RUN | Record the `caddy:2.11.4` digest; run fmt/adapt/validate, required real loopback tests, direct-prefix/header-denial checks, and public full/range checks when an existing direct APK is available. |
 | Disk threshold/alert | NOT RUN | Configure and trigger-test the alert below 20% free space on the release volume. |
 | Backup/restore drill | NOT RUN | Take a consistent DB + artifact backup, restore to an isolated target, and verify every restored APK SHA against the registry. |
@@ -113,6 +114,34 @@ observed.
 
 Release publication and production deployment remain prohibited until every
 applicable gate above has explicit evidence and operator approval.
+
+### Boot-view operator gate
+
+Before and after the controlled production reboot, record the output of:
+
+```bash
+systemctl is-enabled eurith-release-views.service
+systemctl is-enabled docker.service
+systemctl status --no-pager eurith-release-views.service
+systemctl status --no-pager docker.service
+systemctl cat eurith-release-views.service
+systemctl cat docker.service
+findmnt -n -o SOURCE,TARGET,VFS-OPTIONS --mountpoint /opt/eurith/release-caddy-view/android/sha256
+findmnt -n -o SOURCE,TARGET,VFS-OPTIONS --mountpoint /opt/eurith/release-caddy-view/.probe
+```
+
+Require the final mount to map `/opt/eurith/releases/android/sha256` to
+`/opt/eurith/release-caddy-view/android/sha256`, and the probe mount to map
+`/opt/eurith/release-caddy-probe-source` to
+`/opt/eurith/release-caddy-view/.probe`; both must include `ro,nosymfollow`.
+On drift, repair the unexpected host entry first, restart
+`eurith-release-views.service`, verify both exact mounts, and only then start or
+restart Docker and run bounded API health, Caddy health, and public canaries.
+
+Do not advance mobile `main` or begin APK construction until a controlled
+production reboot proves the unit-before-Docker order, both exact mounts, zero
+API/Caddy container restart-count increase, and passing public canaries.
+Production uses APK only for this release path—never AAB and never Play Store.
 
 ## Caddy rollout and backend-before-mobile closure
 

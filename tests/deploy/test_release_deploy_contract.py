@@ -39,6 +39,153 @@ def _wrapper(directory: Path, name: str, body: str) -> None:
     path.chmod(0o755)
 
 
+def _boot_gate_functions() -> str:
+    script = _text(DEPLOY)
+    marker = "verify_installed_boot_assets() {"
+    assert marker in script, "deploy.sh does not define the boot-mount deployment gate"
+    start = script.index("verify_boot_asset() {")
+    end = script.index("\nbuild_target() {", start)
+    return script[start:end]
+
+
+def _run_boot_gate_harness(tmp_path: Path, case: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    bin_dir = tmp_path / "bin"; bin_dir.mkdir()
+    asset_root = tmp_path / "assets"
+    asset_dir = asset_root / "deploy" / "systemd"; asset_dir.mkdir(parents=True)
+    installed_dir = tmp_path / "installed"; installed_dir.mkdir()
+    evidence_file = tmp_path / "evidence.env"
+
+    helper_body = '''#!/usr/bin/env bash
+case "$BOOT_GATE_CASE" in
+  final_source_drift) printf 'error=mount_source_mismatch path=/opt/eurith/release-caddy-view/android/sha256\\n' >&2; exit 1 ;;
+  final_target_drift) printf 'error=mount_target_mismatch path=/opt/eurith/release-caddy-view/android/sha256\\n' >&2; exit 1 ;;
+  final_options_drift) printf 'error=mount_readonly_missing path=/opt/eurith/release-caddy-view/android/sha256\\n' >&2; exit 1 ;;
+  probe_source_drift) printf 'error=mount_source_mismatch path=/opt/eurith/release-caddy-view/.probe\\n' >&2; exit 1 ;;
+  probe_target_drift) printf 'error=mount_target_mismatch path=/opt/eurith/release-caddy-view/.probe\\n' >&2; exit 1 ;;
+  probe_options_drift) printf 'error=mount_nosymfollow_missing path=/opt/eurith/release-caddy-view/.probe\\n' >&2; exit 1 ;;
+  helper_nonzero) exit 23 ;;
+  success) printf 'boot_mounts=verified\\n' ;;
+  *) exit 24 ;;
+esac
+'''
+    assets = {
+        "eurith-release-views": helper_body,
+        "eurith-release-views.service": "[Service]\nType=oneshot\n",
+        "docker-eurith-release-views.conf": "[Unit]\nAfter=eurith-release-views.service\n",
+    }
+    installed: dict[str, Path] = {}
+    for name, content in assets.items():
+        (asset_dir / name).write_text(content, encoding="ascii", newline="\n")
+        destination = installed_dir / name
+        destination.write_text(content, encoding="ascii", newline="\n")
+        destination.chmod(0o755 if name == "eurith-release-views" else 0o644)
+        installed[name] = destination
+
+    corrupt = {
+        "helper_hash": "eurith-release-views",
+        "unit_hash": "eurith-release-views.service",
+        "drop_in_hash": "docker-eurith-release-views.conf",
+    }.get(case)
+    if corrupt is not None:
+        installed[corrupt].write_text("corrupt\n", encoding="ascii")
+    if case == "helper_type":
+        installed["eurith-release-views"].unlink()
+        installed["eurith-release-views"].mkdir()
+
+    _wrapper(bin_dir, "systemctl", '''
+[[ "$*" == "is-enabled --quiet eurith-release-views.service" ]] || exit 91
+[[ "$BOOT_GATE_CASE" != unit_disabled ]]
+''')
+    _wrapper(bin_dir, "stat", '''
+if [[ "$1" == -c && "$2" == "%a:%u:%g" ]]; then
+  path="${@: -1}"
+  case "$BOOT_GATE_CASE:$path" in
+    helper_mode:*eurith-release-views) printf '700:0:0\\n' ;;
+    unit_owner:*eurith-release-views.service) printf '644:1000:0\\n' ;;
+    drop_in_owner:*docker-eurith-release-views.conf) printf '644:0:1000\\n' ;;
+    *:*eurith-release-views) printf '755:0:0\\n' ;;
+    *:*eurith-release-views.service|*:*docker-eurith-release-views.conf) printf '644:0:0\\n' ;;
+    *) exit 92 ;;
+  esac
+else
+  exec /usr/bin/stat "$@"
+fi
+''')
+    runner = tmp_path / "runner.sh"
+    runner.write_text(
+        "#!/usr/bin/env bash\nset -Eeuo pipefail\n"
+        "die() { printf 'error=%s\\n' \"$1\" >&2; exit 1; }\n"
+        "evidence() { printf '%s=%s\\n' \"$1\" \"$2\" >>\"$EVIDENCE_FILE\"; }\n"
+        "sha256_file() { sha256sum -- \"$1\" | awk '{print $1}'; }\n"
+        + _boot_gate_functions()
+        + f"\nEURITH_DEPLOY_ASSET_ROOT='{_shell(asset_root)}'\n"
+        + f"BOOT_HELPER_DESTINATION='{_shell(installed['eurith-release-views'])}'\n"
+        + f"BOOT_UNIT_DESTINATION='{_shell(installed['eurith-release-views.service'])}'\n"
+        + f"DOCKER_DROP_IN_DESTINATION='{_shell(installed['docker-eurith-release-views.conf'])}'\n"
+        + "verify_boot_mount_gate\nevidence backend_gate passed\n",
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+    env = os.environ.copy(); env.update({
+        "PATH": _shell(bin_dir) + ":/usr/bin:/bin",
+        "BOOT_GATE_CASE": case,
+        "EVIDENCE_FILE": _shell(evidence_file),
+    })
+    completed = subprocess.run(
+        [BASH, _shell(runner)], env=env, capture_output=True, text=True, timeout=15,
+    )
+    evidence = evidence_file.read_text(encoding="ascii").splitlines() if evidence_file.exists() else []
+    return completed, evidence
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_error"),
+    [
+        ("helper_hash", "boot_mount_helper_bytes_mismatch"),
+        ("unit_hash", "boot_mount_unit_bytes_mismatch"),
+        ("drop_in_hash", "boot_mount_docker_drop_in_bytes_mismatch"),
+        ("helper_type", "boot_mount_helper_metadata_invalid"),
+        ("helper_mode", "boot_mount_helper_metadata_invalid"),
+        ("unit_owner", "boot_mount_unit_metadata_invalid"),
+        ("drop_in_owner", "boot_mount_docker_drop_in_metadata_invalid"),
+        ("unit_disabled", "boot_mount_unit_not_enabled"),
+        ("helper_nonzero", "boot_mount_runtime_verification_failed"),
+        ("final_source_drift", "mount_source_mismatch"),
+        ("final_target_drift", "mount_target_mismatch"),
+        ("final_options_drift", "mount_readonly_missing"),
+        ("probe_source_drift", "mount_source_mismatch"),
+        ("probe_target_drift", "mount_target_mismatch"),
+        ("probe_options_drift", "mount_nosymfollow_missing"),
+    ],
+)
+def test_boot_mount_gate_rejects_each_failed_invariant(
+    tmp_path: Path, case: str, expected_error: str
+) -> None:
+    result, evidence = _run_boot_gate_harness(tmp_path, case)
+    assert result.returncode != 0
+    assert f"error={expected_error}" in result.stderr
+    assert "backend_gate=passed" not in evidence
+
+
+def test_boot_mount_gate_emits_live_proofs_before_single_backend_pass(tmp_path: Path) -> None:
+    result, evidence = _run_boot_gate_harness(tmp_path, "success")
+    assert result.returncode == 0, result.stderr
+    assert evidence == [
+        "boot_mount_assets=verified",
+        "boot_mount_unit=enabled",
+        "boot_mount_runtime=verified",
+        "backend_gate=passed",
+    ]
+
+
+def test_boot_mount_gate_runs_after_provisioning_and_again_at_final_success() -> None:
+    script = _text(DEPLOY)
+    build = script[script.index("build_target() {") : script.index("rehearse_migration_compatibility()")]
+    assert build.index("provision-release-host.sh") < build.index("verify_boot_mount_gate")
+    final = script[script.index("write_mobile_gate() {") : script.index("on_exit() {")]
+    assert final.index("verify_boot_mount_gate") < final.index("evidence backend_gate passed")
+
+
 def _rollback_function() -> str:
     script = _text(DEPLOY)
     start = script.index("rollback_infrastructure() {")
@@ -653,7 +800,7 @@ def test_dirty_checkout_stops_before_any_mutating_command(tmp_path: Path) -> Non
     calls = tmp_path / "calls.log"
     _wrapper(bin_dir, "git", 'printf "git %s\\n" "$*" >>"$FAKE_CALLS"; [[ "$1 $2" == "status --porcelain" ]] && printf " M dirty\\n"')
     _wrapper(bin_dir, "stat", 'if [[ "$*" == *"restore-db"* ]]; then printf "600:0\\n"; else printf "640:0\\n"; fi')
-    for command in ("docker", "curl", "sha256sum", "awk", "sed", "grep", "findmnt", "head"):
+    for command in ("docker", "curl", "sha256sum", "awk", "sed", "grep", "findmnt", "head", "systemctl"):
         _wrapper(bin_dir, command, f'printf "{command} %s\\n" "$*" >>"$FAKE_CALLS"; exit 99')
     _wrapper(bin_dir, "python3", f'exec "{_shell(Path(sys.executable))}" "$@"')
     source = tmp_path / "checkout"; source.mkdir(); (source / ".git").mkdir()
