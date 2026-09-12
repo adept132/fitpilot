@@ -74,14 +74,15 @@ def boot_contract_is_valid():
         "After=eurith-release-views.service",
     ))
 
-def start_docker_through_dependency():
+def start_docker_through_dependency(emit_output=True):
     if not boot_contract_is_valid(): return 21
     result = subprocess.run(
         [os.environ["FAKE_BASH"], os.environ["EURITH_TEST_BOOT_HELPER"]],
         env=os.environ.copy(), text=True, capture_output=True, check=False,
     )
-    sys.stdout.write(result.stdout)
-    sys.stderr.write(result.stderr)
+    if emit_output:
+        sys.stdout.write(result.stdout)
+        sys.stderr.write(result.stderr)
     if result.returncode != 0: return result.returncode
     (state_dir / "docker-started").write_text("yes")
     return 0
@@ -208,6 +209,12 @@ elif command == "ln":
         os.link(source, destination)
         record = load(metadata_path)[key(source)]
         metadata_set(destination, record["mode"], record["owner"], record["group"])
+        if (
+            os.environ.get("FAKE_DOCKER_ACTIVATES_ON_BOOT_ASSET_PUBLISH") == "1"
+            and destination.name == "eurith-release-views.conf"
+        ):
+            status = start_docker_through_dependency(emit_output=False)
+            (state_dir / "publication-activation-status").write_text(str(status))
 elif command == "readlink":
     if "-e" in args:
         target = pathlib.Path(args[-1])
@@ -537,6 +544,19 @@ def test_first_use_activation_waits_until_release_layout_exists(host: Host) -> N
     assert "permissions=verified" in result.stdout
 
 
+def test_external_activation_at_asset_publication_sees_complete_layout(host: Host) -> None:
+    result = host.run(FAKE_DOCKER_ACTIVATES_ON_BOOT_ASSET_PUBLISH="1")
+
+    assert result.returncode == 0, result.stderr
+    assert (host.state / "publication-activation-status").read_text() == "0"
+    assert (host.state / "docker-started").is_file()
+    assert host.probe_source.is_dir()
+    assert (host.probe_source / "regular").is_file()
+    mounts = json.loads((host.state / "mounts.json").read_text())
+    assert set(mounts) == {str(host.final_view.resolve()), str(host.probe_view.resolve())}
+    assert "permissions=verified" in result.stdout
+
+
 def test_docker_dependency_blocks_start_when_helper_fails(host: Host) -> None:
     assert host.run().returncode == 0
     (host.state / "mounts.json").write_text("{}", encoding="utf-8")
@@ -643,6 +663,35 @@ def test_first_use_failure_after_helper_preserves_mounted_layout_for_retry(
         str(host.final_view.resolve()),
         str(host.probe_view.resolve()),
     }
+    assert host.probe_source.is_dir()
+    assert (host.probe_source / "regular").is_file()
+
+    retried = host.run()
+
+    assert retried.returncode == 0, retried.stderr
+    assert "boot_mounts=verified" in retried.stdout
+    assert "permissions=verified" in retried.stdout
+
+
+@pytest.mark.parametrize(
+    "failure_env",
+    [
+        {"FAKE_SYSTEMD_VERIFY_FAIL": "1"},
+        {"FAKE_SYSTEMCTL_ENABLE_FAIL": "1"},
+    ],
+)
+def test_activation_before_verify_or_enable_failure_retains_layout_for_retry(
+    host: Host, failure_env: dict[str, str]
+) -> None:
+    failed = host.run(
+        FAKE_DOCKER_SOCKET_ACTIVATES_DURING_RELOAD="1",
+        **failure_env,
+    )
+
+    assert failed.returncode != 0
+    assert (host.state / "docker-started").is_file()
+    mounts = json.loads((host.state / "mounts.json").read_text())
+    assert set(mounts) == {str(host.final_view.resolve()), str(host.probe_view.resolve())}
     assert host.probe_source.is_dir()
     assert (host.probe_source / "regular").is_file()
 
@@ -945,12 +994,15 @@ def test_preexisting_random_probe_collision_is_preserved(host: Host) -> None:
 
 
 @pytest.mark.parametrize("stage", ["bind-final", "remount-final", "bind-probe", "remount-probe"])
-def test_mount_failure_rolls_back_only_created_view_and_rerun_succeeds(host: Host, stage: str) -> None:
+def test_mount_failure_retains_complete_view_and_rerun_succeeds(host: Host, stage: str) -> None:
     failed = host.run(FAKE_MOUNT_FAIL_AT=stage)
     assert failed.returncode != 0
-    assert not host.final_view.exists()
-    assert not host.probe_view.exists()
-    assert not host.probe_source.exists()
+    assert host.final_view.is_dir()
+    assert host.probe_view.is_dir()
+    assert host.probe_source.is_dir()
+    assert (host.probe_source / "regular").is_file()
+    mounts_path = host.state / "mounts.json"
+    assert not mounts_path.exists() or json.loads(mounts_path.read_text()) == {}
     rerun = host.run()
     assert rerun.returncode == 0, rerun.stderr
 

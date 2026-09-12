@@ -93,7 +93,7 @@ TEMP_FILES=()
 CREATED_VIEW_FILES=()
 CREATED_VIEW_DIRS=()
 PROVISION_SUCCESS=0
-BOOT_LAYOUT_MOUNTED=0
+BOOT_LAYOUT_RETAINED=0
 FIXTURE_MAY_EXIST=0
 FIXTURE_OWNED=0
 CADDY_CREATE_MAY_EXIST=0
@@ -106,7 +106,7 @@ cleanup_on_exit() {
   set +e
   for ((index=${#TEMP_FILES[@]}-1; index>=0; index--)); do rm -f -- "${TEMP_FILES[index]}"; done
   if [[ "$FIXTURE_MAY_EXIST" == 1 && -n "$FIXTURE_NAME" ]] && declare -p compose >/dev/null 2>&1; then cleanup_owned_fixture >/dev/null 2>&1; fi
-  if [[ "$PROVISION_SUCCESS" != 1 && "$BOOT_LAYOUT_MOUNTED" != 1 ]]; then
+  if [[ "$PROVISION_SUCCESS" != 1 && "$BOOT_LAYOUT_RETAINED" != 1 ]]; then
     for ((index=${#CREATED_VIEW_FILES[@]}-1; index>=0; index--)); do rm -f -- "${CREATED_VIEW_FILES[index]}"; done
     for ((index=${#CREATED_VIEW_DIRS[@]}-1; index>=0; index--)); do rmdir -- "${CREATED_VIEW_DIRS[index]}" >/dev/null 2>&1; done
   fi
@@ -153,10 +153,6 @@ install_boot_asset() {
   assert_mode_owner_group "$destination" "$mode" 0 0
   cmp -s -- "$source" "$destination" || die boot_asset_bytes_mismatch
 }
-
-install_boot_asset "$BOOT_HELPER_SOURCE" "$BOOT_HELPER_DESTINATION" 755 eurith-release-views
-install_boot_asset "$BOOT_UNIT_SOURCE" "$BOOT_UNIT_DESTINATION" 644 eurith-release-views.service
-install_boot_asset "$DOCKER_DROP_IN_SOURCE" "$DOCKER_DROP_IN_DESTINATION" 644 docker-eurith-release-views.conf
 
 group_state=existing
 if ! group_record="$(getent group "$GROUP_NAME" 2>/dev/null)"; then
@@ -311,6 +307,11 @@ if [[ "$ROOT_PREFIX" == / ]]; then [[ -L "$SOURCE_EXTERNAL" ]] || die external_p
 external_metadata="$(stat -c '%a:%u:%g' -- "$SOURCE_EXTERNAL" 2>/dev/null)" || die external_probe_metadata_unreadable
 [[ "$external_metadata" == "777:0:${GROUP_GID}" ]] || die external_probe_metadata_mismatch
 
+BOOT_LAYOUT_RETAINED=1
+install_boot_asset "$BOOT_HELPER_SOURCE" "$BOOT_HELPER_DESTINATION" 755 eurith-release-views
+install_boot_asset "$BOOT_UNIT_SOURCE" "$BOOT_UNIT_DESTINATION" 644 eurith-release-views.service
+install_boot_asset "$DOCKER_DROP_IN_SOURCE" "$DOCKER_DROP_IN_DESTINATION" 644 docker-eurith-release-views.conf
+
 BOOT_HELPER_RUNNER="$BOOT_HELPER_DESTINATION"
 if [[ "$ROOT_PREFIX" != / ]]; then
   BOOT_HELPER_RUNNER="${EURITH_TEST_BOOT_HELPER:-}"
@@ -322,7 +323,6 @@ systemctl daemon-reload || die boot_systemd_reload_failed
 systemd-analyze verify "$BOOT_UNIT_DESTINATION" docker.service >/dev/null 2>&1 || die boot_systemd_verify_failed
 systemctl enable eurith-release-views.service >/dev/null 2>&1 || die boot_unit_enable_failed
 "$BOOT_HELPER_RUNNER"
-BOOT_LAYOUT_MOUNTED=1
 systemctl is-enabled --quiet eurith-release-views.service || die boot_unit_not_enabled
 
 assert_exact_bind_mount() {
