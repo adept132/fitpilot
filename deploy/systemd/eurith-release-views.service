@@ -1,0 +1,12 @@
+[Unit]
+Description=Restore and verify protected Eurith release views
+RequiresMountsFor=/opt/eurith/releases /opt/eurith/release-caddy-probe-source
+Before=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/eurith-release-views
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+FINAL_SOURCE=/opt/eurith/releases/android/sha256
+FINAL_TARGET=/opt/eurith/release-caddy-view/android/sha256
+PROBE_SOURCE=/opt/eurith/release-caddy-probe-source
+PROBE_TARGET=/opt/eurith/release-caddy-view/.probe
+
+CREATED_MOUNTS=()
+SUCCESS=0
+
+die() {
+  printf 'error=%s path=%s\n' "$1" "$2" >&2
+  exit 1
+}
+
+cleanup_on_exit() {
+  local status=$? index
+  trap - EXIT
+  if [[ "$status" != 0 || "$SUCCESS" != 1 ]]; then
+    set +e
+    for ((index=${#CREATED_MOUNTS[@]}-1; index>=0; index--)); do
+      umount -- "${CREATED_MOUNTS[index]}" >/dev/null 2>&1
+    done
+  fi
+  exit "$status"
+}
+trap cleanup_on_exit EXIT
+
+verify_path_chain_no_symlinks() {
+  local path="$1" canonical current
+  [[ "$path" == /* ]] || die path_not_absolute "$path"
+  [[ -d "$path" ]] || die path_missing "$path"
+  canonical="$(readlink -e -- "$path" 2>/dev/null)" || die path_canonicalization_failed "$path"
+  [[ "$canonical" == "$path" ]] || die path_canonical_mismatch "$path"
+  current="$path"
+  while :; do
+    [[ ! -L "$current" ]] || die path_symlink "$path"
+    [[ "$current" == / ]] && break
+    current="${current%/*}"
+    [[ -n "$current" ]] || current=/
+  done
+}
+
+verify_exact_bind() {
+  local source="$1" target="$2" reported_source reported_target options
+  reported_source="$(findmnt -n -o SOURCE --mountpoint "$target" 2>/dev/null)" || die mount_source_unreadable "$target"
+  reported_target="$(findmnt -n -o TARGET --mountpoint "$target" 2>/dev/null)" || die mount_target_unreadable "$target"
+  options="$(findmnt -n -o VFS-OPTIONS --mountpoint "$target" 2>/dev/null)" || die mount_options_unreadable "$target"
+  reported_source="$(readlink -e -- "$reported_source" 2>/dev/null)" || die mount_source_unreadable "$target"
+  reported_target="$(readlink -e -- "$reported_target" 2>/dev/null)" || die mount_target_unreadable "$target"
+  [[ "$reported_source" == "$source" ]] || die mount_source_mismatch "$target"
+  [[ "$reported_target" == "$target" ]] || die mount_target_mismatch "$target"
+  case ",$options," in *,ro,*) ;; *) die mount_readonly_missing "$target" ;; esac
+  case ",$options," in *,nosymfollow,*) ;; *) die mount_nosymfollow_missing "$target" ;; esac
+}
+
+ensure_exact_bind() {
+  local source="$1" target="$2" inspection_status
+  if findmnt -n -o TARGET --mountpoint "$target" >/dev/null 2>&1; then
+    verify_exact_bind "$source" "$target"
+    return
+  else
+    inspection_status=$?
+  fi
+  [[ "$inspection_status" == 1 ]] || die mount_inspection_failed "$target"
+  mount --bind "$source" "$target" || die mount_bind_failed "$target"
+  CREATED_MOUNTS+=("$target")
+  mount -o remount,bind,ro,nosymfollow "$target" || die mount_remount_failed "$target"
+  verify_exact_bind "$source" "$target"
+}
+
+[[ $# -eq 0 ]] || die arguments_not_allowed helper
+for path in "$FINAL_SOURCE" "$FINAL_TARGET" "$PROBE_SOURCE" "$PROBE_TARGET"; do
+  verify_path_chain_no_symlinks "$path"
+done
+ensure_exact_bind "$FINAL_SOURCE" "$FINAL_TARGET"
+ensure_exact_bind "$PROBE_SOURCE" "$PROBE_TARGET"
+printf '%s\n' boot_mounts=verified
+SUCCESS=1

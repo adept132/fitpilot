@@ -35,7 +35,7 @@ while [[ $# -gt 0 ]]; do
   shift 2
 done
 
-for command_name in docker findmnt mount umount getent groupadd install chown stat ln readlink head awk sha256sum mv rm rmdir chmod dirname sed find sort mktemp od tr cat; do
+for command_name in docker findmnt mount umount getent groupadd install chown stat ln readlink head awk sha256sum mv rm rmdir chmod dirname sed find sort mktemp od tr cat cmp systemctl systemd-analyze; do
   require_command "$command_name"
 done
 if [[ "$ROOT_PREFIX" != / ]]; then require_safe_absolute_path "$ROOT_PREFIX" mutable "$CHECKOUT_ROOT"; fi
@@ -80,10 +80,16 @@ SOURCE_REGULAR="$PROBE_SOURCE/regular"
 SOURCE_EXTERNAL="$PROBE_SOURCE/external"
 PROBE_CONTENT=eurith-release-view-probe-v1
 GROUP_NAME=eurith-releases
+BOOT_HELPER_SOURCE="$DEPLOY_ASSET_ROOT/deploy/systemd/eurith-release-views"
+BOOT_UNIT_SOURCE="$DEPLOY_ASSET_ROOT/deploy/systemd/eurith-release-views.service"
+DOCKER_DROP_IN_SOURCE="$DEPLOY_ASSET_ROOT/deploy/systemd/docker-eurith-release-views.conf"
+BOOT_HELPER_DESTINATION="$(rooted /usr/local/libexec/eurith-release-views)"
+BOOT_UNIT_DESTINATION="$(rooted /etc/systemd/system/eurith-release-views.service)"
+DOCKER_DROP_IN_DESTINATION="$(rooted /etc/systemd/system/docker.service.d/eurith-release-views.conf)"
 for path in "$STORAGE_ROOT" "$STAGING_DIR" "$FINAL_DIR" "$VIEW_ROOT" "$FINAL_VIEW" "$PROBE_VIEW" "$PROBE_SOURCE"; do require_safe_absolute_path "$path" mutable "$CHECKOUT_ROOT"; done
+for path in "$BOOT_HELPER_DESTINATION" "$BOOT_UNIT_DESTINATION" "$DOCKER_DROP_IN_DESTINATION"; do require_safe_absolute_path "$path" mutable "$CHECKOUT_ROOT"; done
 
 TEMP_FILES=()
-CREATED_MOUNTS=()
 CREATED_VIEW_FILES=()
 CREATED_VIEW_DIRS=()
 PROVISION_SUCCESS=0
@@ -100,13 +106,53 @@ cleanup_on_exit() {
   for ((index=${#TEMP_FILES[@]}-1; index>=0; index--)); do rm -f -- "${TEMP_FILES[index]}"; done
   if [[ "$FIXTURE_MAY_EXIST" == 1 && -n "$FIXTURE_NAME" ]] && declare -p compose >/dev/null 2>&1; then cleanup_owned_fixture >/dev/null 2>&1; fi
   if [[ "$PROVISION_SUCCESS" != 1 ]]; then
-    for ((index=${#CREATED_MOUNTS[@]}-1; index>=0; index--)); do umount -- "${CREATED_MOUNTS[index]}" >/dev/null 2>&1; done
     for ((index=${#CREATED_VIEW_FILES[@]}-1; index>=0; index--)); do rm -f -- "${CREATED_VIEW_FILES[index]}"; done
     for ((index=${#CREATED_VIEW_DIRS[@]}-1; index>=0; index--)); do rmdir -- "${CREATED_VIEW_DIRS[index]}" >/dev/null 2>&1; done
   fi
   return "$status"
 }
 trap cleanup_on_exit EXIT
+
+ensure_root_owned_directory() {
+  local directory="$1"
+  if [[ -e "$directory" || -L "$directory" ]]; then
+    [[ -d "$directory" && ! -L "$directory" ]] || die boot_asset_parent_invalid
+  else
+    install -d -m 0755 -o 0 -g 0 -- "$directory" || die boot_asset_parent_create_failed
+  fi
+  assert_mode_owner_group "$directory" 755 0 0
+}
+
+install_boot_asset() {
+  local source="$1" destination="$2" mode="$3" expected_name="$4" parent basename temporary
+  [[ -f "$source" && ! -L "$source" ]] || die boot_asset_source_invalid
+  [[ "$(_canonical_path "$source")" == "$asset_resolved/deploy/systemd/$expected_name" ]] || die boot_asset_source_path_mismatch
+  parent="$(dirname -- "$destination")"
+  ensure_root_owned_directory "$parent"
+  if [[ "$ROOT_PREFIX" != / && "${EURITH_FAKE_BOOT_ASSET_SYMLINK:-}" == "$destination" ]]; then
+    die boot_asset_invalid
+  fi
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    [[ -f "$destination" && ! -L "$destination" ]] || die boot_asset_invalid
+    assert_mode_owner_group "$destination" "$mode" 0 0
+    cmp -s -- "$source" "$destination" || die boot_asset_bytes_mismatch
+    return
+  fi
+  basename="${destination##*/}"
+  temporary="$(mktemp --tmpdir="$parent" ".${basename}.tmp.XXXXXXXXXX")" || die secure_temp_create_failed
+  TEMP_FILES+=("$temporary")
+  [[ -f "$temporary" && ! -L "$temporary" ]] || die secure_temp_invalid
+  install -m "0$mode" -o 0 -g 0 -- "$source" "$temporary" || die boot_asset_install_failed
+  assert_mode_owner_group "$temporary" "$mode" 0 0
+  mv -T -- "$temporary" "$destination" || die atomic_replace_failed
+}
+
+install_boot_asset "$BOOT_HELPER_SOURCE" "$BOOT_HELPER_DESTINATION" 755 eurith-release-views
+install_boot_asset "$BOOT_UNIT_SOURCE" "$BOOT_UNIT_DESTINATION" 644 eurith-release-views.service
+install_boot_asset "$DOCKER_DROP_IN_SOURCE" "$DOCKER_DROP_IN_DESTINATION" 644 docker-eurith-release-views.conf
+systemctl daemon-reload || die boot_systemd_reload_failed
+systemd-analyze verify "$BOOT_UNIT_DESTINATION" docker.service >/dev/null 2>&1 || die boot_systemd_verify_failed
+systemctl enable eurith-release-views.service >/dev/null 2>&1 || die boot_unit_enable_failed
 
 group_state=existing
 if ! group_record="$(getent group "$GROUP_NAME" 2>/dev/null)"; then
@@ -245,12 +291,6 @@ if [[ "$view_exists" == 0 ]]; then
   ln -s -- /etc/passwd "$SOURCE_EXTERNAL" || die external_probe_create_failed
   CREATED_VIEW_FILES+=("$SOURCE_EXTERNAL")
   chown -h "0:${GROUP_GID}" -- "$SOURCE_EXTERNAL" || die external_probe_owner_failed
-  mount --bind "$FINAL_DIR" "$FINAL_VIEW" || die final_view_bind_failed
-  CREATED_MOUNTS+=("$FINAL_VIEW")
-  mount -o remount,bind,ro,nosymfollow "$FINAL_VIEW" || die final_view_protect_failed
-  mount --bind "$PROBE_SOURCE" "$PROBE_VIEW" || die probe_view_bind_failed
-  CREATED_MOUNTS+=("$PROBE_VIEW")
-  mount -o remount,bind,ro,nosymfollow "$PROBE_VIEW" || die probe_view_protect_failed
   view_state=created
 else
   for directory in "$VIEW_ROOT" "$(dirname -- "$FINAL_VIEW")" "$PROBE_SOURCE"; do
@@ -266,6 +306,16 @@ assert_mode_owner_group "$SOURCE_REGULAR" 440 0 "$GROUP_GID"
 if [[ "$ROOT_PREFIX" == / ]]; then [[ -L "$SOURCE_EXTERNAL" ]] || die external_probe_type_invalid; fi
 external_metadata="$(stat -c '%a:%u:%g' -- "$SOURCE_EXTERNAL" 2>/dev/null)" || die external_probe_metadata_unreadable
 [[ "$external_metadata" == "777:0:${GROUP_GID}" ]] || die external_probe_metadata_mismatch
+
+BOOT_HELPER_RUNNER="$BOOT_HELPER_DESTINATION"
+if [[ "$ROOT_PREFIX" != / ]]; then
+  BOOT_HELPER_RUNNER="${EURITH_TEST_BOOT_HELPER:-}"
+  [[ -n "$BOOT_HELPER_RUNNER" ]] || die alternate_root_boot_helper_missing
+  require_safe_absolute_path "$BOOT_HELPER_RUNNER" mutable "$CHECKOUT_ROOT"
+  [[ -f "$BOOT_HELPER_RUNNER" && ! -L "$BOOT_HELPER_RUNNER" ]] || die alternate_root_boot_helper_invalid
+fi
+"$BOOT_HELPER_RUNNER"
+systemctl is-enabled --quiet eurith-release-views.service || die boot_unit_not_enabled
 
 assert_exact_bind_mount() {
   local source="$1" target="$2" reported_target source_identity target_identity
