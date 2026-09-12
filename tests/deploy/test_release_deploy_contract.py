@@ -39,6 +39,104 @@ def _wrapper(directory: Path, name: str, body: str) -> None:
     path.chmod(0o755)
 
 
+def _rollback_function() -> str:
+    script = _text(DEPLOY)
+    start = script.index("rollback_infrastructure() {")
+    end = script.index("\nswitch_api_and_caddy() {", start)
+    return script[start:end]
+
+
+def _run_rollback_harness(tmp_path: Path, case: str, prior_caddy: bool) -> list[str]:
+    bin_dir = tmp_path / "bin"; bin_dir.mkdir()
+    state_dir = tmp_path / "state"; state_dir.mkdir()
+    evidence_file = tmp_path / "evidence.env"
+    source = tmp_path / "source"; source.mkdir()
+    overlay = tmp_path / "release.yml"; overlay.write_text("services: {}\n", encoding="ascii")
+    base = tmp_path / "compose.yml"; base.write_text("services: {}\n", encoding="ascii")
+    deploy_env = tmp_path / "deploy.env"; deploy_env.write_text("X=1\n", encoding="ascii")
+    asset_root = tmp_path / "assets"; asset_root.mkdir()
+    rollback_sha = "d" * 40
+    built_image = "sha256:" + "a" * 64
+    wrong_image = "sha256:" + "b" * 64
+    old_caddy_image = "sha256:" + "c" * 64
+
+    _wrapper(bin_dir, "git", f'''case "$*" in
+  *"checkout --detach {rollback_sha}") exit 0 ;;
+  *"rev-parse HEAD") printf "%s\\n" "{rollback_sha}" ;;
+  *"status --porcelain") exit 0 ;;
+  *) exit 97 ;;
+esac''')
+    _wrapper(bin_dir, "curl", '''if [[ "$ROLLBACK_CASE" == readiness_timeout ]]; then printf 503; else printf 200; fi''')
+    _wrapper(bin_dir, "sleep", ":")
+    _wrapper(bin_dir, "docker", f'''next_count() {{
+  local name="$1" path="$ROLLBACK_STATE/$1" value=0
+  [[ ! -f "$path" ]] || value="$(<"$path")"
+  printf "%s" "$((value + 1))" >"$path"
+  printf "%s" "$value"
+}}
+if [[ "$1" == compose ]]; then
+  case "$*" in
+    *" rm -f caddy") exit 0 ;;
+    *" build api") exit 0 ;;
+    *" config --images api") printf "eurith-api:rollback\\n" ;;
+    *" up -d "*) [[ "$ROLLBACK_CASE" != up_failure ]] ;;
+    *" ps -q api")
+      [[ "$ROLLBACK_CASE" != up_failure ]] || exit 0
+      count="$(next_count api_ps)"
+      if [[ "$ROLLBACK_CASE" == container_swap && "$count" -gt 0 ]]; then printf "api-swap\\n"; else printf "api-id\\n"; fi ;;
+    *" ps -q caddy") [[ "$PRIOR_CADDY" == 1 && "$ROLLBACK_CASE" != up_failure ]] && printf "caddy-id\\n" ;;
+    *) exit 96 ;;
+  esac
+elif [[ "$1 $2" == "image inspect" ]]; then
+  printf "%s\\n" "{built_image}"
+elif [[ "$1" == inspect ]]; then
+  container="$2"; format="$4"
+  case "$format" in
+    "{{{{.Image}}}}")
+      if [[ "$container" == caddy-id ]]; then printf "%s\\n" "{old_caddy_image}"
+      elif [[ "$ROLLBACK_CASE" == wrong_image ]]; then printf "%s\\n" "{wrong_image}"
+      else printf "%s\\n" "{built_image}"; fi ;;
+    "{{{{.State.Status}}}}") [[ "$ROLLBACK_CASE" == not_running ]] && printf "exited\\n" || printf "running\\n" ;;
+    "{{{{.RestartCount}}}}")
+      count="$(next_count restart)"
+      if [[ "$ROLLBACK_CASE" == restart_before ]]; then printf "1\\n"
+      elif [[ "$ROLLBACK_CASE" == restart_after && "$count" -gt 0 ]]; then printf "1\\n"
+      else printf "0\\n"; fi ;;
+    *) exit 95 ;;
+  esac
+else
+  exit 94
+fi''')
+    runner = tmp_path / "runner.sh"
+    runner.write_text(
+        "#!/usr/bin/env bash\nset -u\n"
+        "evidence() { printf '%s=%s\\n' \"$1\" \"$2\" >>\"$EVIDENCE_FILE\"; }\n"
+        + _rollback_function()
+        + "\ncompose=(docker compose)\n"
+        + "ROLLBACK_ATTEMPTED=0\nSWITCH_ATTEMPTED=1\nMIGRATION_ATTEMPTED=1\nMIGRATION_STATE=applied\n"
+        + "SCHEMA_ROLLBACK_COMPATIBLE=1\nROLLBACK_EVIDENCE_WRITTEN=0\n"
+        + f"PRIOR_CADDY_PRESENT={'1' if prior_caddy else '0'}\n"
+        + f"OLD_CADDY_IMAGE_ID={old_caddy_image}\nROLLBACK_SHA={rollback_sha}\n"
+        + f"SOURCE_DIR='{_shell(source)}'\nEURITH_DEPLOY_ASSET_ROOT='{_shell(asset_root)}'\n"
+        + f"DEPLOY_ENV='{_shell(deploy_env)}'\nEURITH_BASE_COMPOSE='{_shell(base)}'\nRELEASE_OVERLAY='{_shell(overlay)}'\n"
+        + "PUBLIC_API_BASE=https://example.invalid\n"
+        + "set +e\nrollback_infrastructure\nrc=$?\nset -e\nprintf 'return_code=%s\\n' \"$rc\"\n",
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+    env = os.environ.copy(); env.update({
+        "PATH": _shell(bin_dir) + ":/usr/bin:/bin",
+        "ROLLBACK_CASE": case,
+        "PRIOR_CADDY": "1" if prior_caddy else "0",
+        "ROLLBACK_STATE": _shell(state_dir),
+        "EVIDENCE_FILE": _shell(evidence_file),
+    })
+    completed = subprocess.run([BASH, _shell(runner)], env=env, capture_output=True, text=True, timeout=15)
+    assert completed.returncode == 0, completed.stderr
+    assert "return_code=1" in completed.stdout
+    return evidence_file.read_text(encoding="ascii").splitlines()
+
+
 def test_deploy_requires_two_arguments_plus_protected_exact_rollback_sha_and_remote_containment() -> None:
     script = _text(DEPLOY)
     assert "[[ $# == 2 ]]" in script
@@ -486,6 +584,39 @@ def test_rollback_pass_requires_exact_candidate_api_image_running_stable_and_rea
     assert "rollback_caddy_verified=1" in rollback
     assert '[[ "$rollback_api_verified" == 1 && "$rollback_caddy_verified" == 1 ]] && result=passed' in rollback
     assert 'up -d --no-deps api >/dev/null 2>&1 && result=passed' not in rollback
+
+
+@pytest.mark.parametrize(
+    ("case", "prior_caddy"),
+    [
+        ("up_failure", True),
+        ("wrong_image", False),
+        ("not_running", True),
+        ("restart_before", False),
+        ("restart_after", True),
+        ("readiness_timeout", False),
+        ("container_swap", True),
+    ],
+)
+def test_rollback_runtime_failures_never_emit_passed(
+    tmp_path: Path, case: str, prior_caddy: bool
+) -> None:
+    evidence = _run_rollback_harness(tmp_path, case, prior_caddy)
+    assert "rollback_result=failed" in evidence
+    assert "rollback_result=passed" not in evidence
+
+
+@pytest.mark.parametrize("prior_caddy", [False, True])
+def test_rollback_runtime_success_is_proven_for_both_caddy_topologies(
+    tmp_path: Path, prior_caddy: bool
+) -> None:
+    evidence = _run_rollback_harness(tmp_path, "success", prior_caddy)
+    assert evidence.count("rollback_result=passed") == 1
+    assert "rollback_api_image=passed" in evidence
+    assert "rollback_api_runtime=passed" in evidence
+    assert "rollback_api_readiness=passed" in evidence
+    expected_caddy = "rollback_caddy_image=passed" if prior_caddy else "rollback_caddy_image=not_applicable"
+    assert expected_caddy in evidence
 
 
 def test_nginx_artifact_and_instructions_are_removed_together() -> None:
