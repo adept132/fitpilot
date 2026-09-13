@@ -267,7 +267,7 @@ build_target() {
   "$SCRIPT_DIR/provision-release-host.sh" --secret-source-dir "$EURITH_SECRET_SOURCE_DIR" --base-compose "$EURITH_BASE_COMPOSE" --release-overlay "$RELEASE_OVERLAY" --deploy-asset-root "$EURITH_DEPLOY_ASSET_ROOT" --target-sha "$TARGET_SHA" >/dev/null || die provisioning_verification_failed
   verify_boot_mount_gate
   "${compose[@]}" build api || die target_build_failed
-  runtime_heads="$("${compose[@]}" run --rm --no-deps api alembic heads 2>/dev/null | sed -n 's/^\([0-9A-Za-z_]*\).*/\1/p')" || die alembic_heads_failed
+  runtime_heads="$("${compose[@]}" run --rm --no-deps --pull never api alembic heads 2>/dev/null | sed -n 's/^\([0-9A-Za-z_]*\).*/\1/p')" || die alembic_heads_failed
   [[ "$runtime_heads" == "$EXPECTED_ALEMBIC_HEAD" ]] || die built_image_alembic_head_mismatch
   evidence build_status passed
 }
@@ -277,10 +277,10 @@ rehearse_migration_compatibility() {
   local -a target_rehearsal_compose rollback_candidate_compose
   target_rehearsal_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY" -f "$REHEARSAL_OVERLAY")
   "${target_rehearsal_compose[@]}" config >/dev/null || die target_rehearsal_compose_invalid
-  "${target_rehearsal_compose[@]}" run --rm --no-deps api alembic upgrade head || die target_migration_rehearsal_failed
-  target_current="$("${target_rehearsal_compose[@]}" run --rm --no-deps api alembic current 2>/dev/null | sed -n 's/^\([0-9A-Za-z_]*\).*/\1/p' | tail -n1)" || die target_schema_rehearsal_failed
+  "${target_rehearsal_compose[@]}" run --rm --no-deps --pull never api alembic upgrade head || die target_migration_rehearsal_failed
+  target_current="$("${target_rehearsal_compose[@]}" run --rm --no-deps --pull never api alembic current 2>/dev/null | sed -n 's/^\([0-9A-Za-z_]*\).*/\1/p' | tail -n1)" || die target_schema_rehearsal_failed
   [[ "$target_current" == "$EXPECTED_ALEMBIC_HEAD" ]] || die target_schema_rehearsal_failed
-  "${target_rehearsal_compose[@]}" run --rm --no-deps --workdir /app -e PYTHONPATH=/app api python /tmp/eurith-rehearse-release-db.py "$EXPECTED_ALEMBIC_HEAD" || die target_schema_rehearsal_failed
+  "${target_rehearsal_compose[@]}" run --rm --no-deps --pull never --workdir /app -e PYTHONPATH=/app api python /tmp/eurith-rehearse-release-db.py "$EXPECTED_ALEMBIC_HEAD" || die target_schema_rehearsal_failed
   evidence target_migration_rehearsal passed
   git -C "$SOURCE_DIR" checkout --detach "$ROLLBACK_SHA" >/dev/null || die rollback_candidate_checkout_failed
   SOURCE_SWITCHED=1
@@ -291,9 +291,9 @@ rehearse_migration_compatibility() {
   "${rollback_candidate_compose[@]}" config >/dev/null || die rollback_candidate_compatibility_rehearsal_failed
   "${rollback_candidate_compose[@]}" build api >/dev/null || die rollback_candidate_compatibility_rehearsal_failed
   [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" == "$ROLLBACK_SHA" && -z "$(git -C "$SOURCE_DIR" status --porcelain)" ]] || die rollback_candidate_checkout_invalid
-  rollback_heads="$("${rollback_candidate_compose[@]}" run --rm --no-deps api alembic heads 2>/dev/null | sed -n 's/^\([0-9A-Za-z_]*\).*/\1/p')" || die rollback_candidate_compatibility_rehearsal_failed
+  rollback_heads="$("${rollback_candidate_compose[@]}" run --rm --no-deps --pull never api alembic heads 2>/dev/null | sed -n 's/^\([0-9A-Za-z_]*\).*/\1/p')" || die rollback_candidate_compatibility_rehearsal_failed
   [[ "$rollback_heads" == "$EXPECTED_ALEMBIC_HEAD" ]] || die rollback_candidate_alembic_head_mismatch
-  "${rollback_candidate_compose[@]}" run --rm --no-deps --workdir /app -e PYTHONPATH=/app api python /tmp/eurith-rehearse-release-db.py "$EXPECTED_ALEMBIC_HEAD" || die rollback_candidate_compatibility_rehearsal_failed
+  "${rollback_candidate_compose[@]}" run --rm --no-deps --pull never --workdir /app -e PYTHONPATH=/app api python /tmp/eurith-rehearse-release-db.py "$EXPECTED_ALEMBIC_HEAD" || die rollback_candidate_compatibility_rehearsal_failed
   evidence rollback_candidate_compatibility_rehearsal passed
   export EURITH_RUNTIME_SOURCE_ROOT="$EURITH_DEPLOY_ASSET_ROOT"
   export EURITH_RUNTIME_ASSET_ROOT="$EURITH_DEPLOY_ASSET_ROOT"
@@ -305,9 +305,9 @@ rehearse_migration_compatibility() {
 apply_migration_once() {
   MIGRATION_ATTEMPTED=1; MIGRATION_STATE=unknown
   printf '%s\n' 'migration_state=unknown' >&2
-  "${compose[@]}" run --rm --no-deps api alembic upgrade head || die migration_failed
+  "${compose[@]}" run --rm --no-deps --pull never api alembic upgrade head || die migration_failed
   MIGRATION_STATE=applied; evidence migration_state applied; MIGRATION_EVIDENCE_WRITTEN=1
-  "${compose[@]}" run --rm --no-deps api python scripts/localization_catalog_gate.py || die localization_gate_failed
+  "${compose[@]}" run --rm --no-deps --pull never api python scripts/localization_catalog_gate.py || die localization_gate_failed
   evidence migration_status passed
 }
 

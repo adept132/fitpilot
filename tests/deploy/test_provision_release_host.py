@@ -10,7 +10,6 @@ import textwrap
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "deploy" / "provision-release-host.sh"
 LIBRARY = ROOT / "deploy" / "lib" / "release_common.sh"
@@ -291,7 +290,14 @@ elif command == "docker":
             ref_output = "eurith-api\npostgres:17-bookworm\ncaddy:2.11.4"
         sys.stdout.write(ref_output + ("\n" if ref_output else "")); sys.exit(0)
     if is_overlay and joined.endswith(" config --format json"):
-        api = {"build": {"context": "/opt/eurith/backend"}}
+        build = {
+            "context": os.environ.get("FAKE_COMPOSE_BUILD_CONTEXT", os.environ["FAKE_DEPLOY_ASSET_ROOT"]),
+            "dockerfile": os.environ.get("FAKE_COMPOSE_BUILD_DOCKERFILE", "Dockerfile"),
+        }
+        if os.environ.get("FAKE_COMPOSE_EXTRA_BUILD_ARG") == "1": build["args"] = {"APP_MODE": "other"}
+        api = {"build": build}
+        if "FAKE_COMPOSE_PULL_POLICY" in os.environ:
+            api["pull_policy"] = os.environ["FAKE_COMPOSE_PULL_POLICY"]
         if "FAKE_COMPOSE_IMAGE_REF_OUTPUT" in os.environ:
             api["image"] = os.environ["FAKE_COMPOSE_IMAGE_REF_OUTPUT"]
         print(json.dumps({"name": "eurith", "services": {
@@ -472,6 +478,7 @@ class Host:
             "FAKE_STAGING_DIR": str(self.storage / ".staging"),
             "FAKE_STORAGE_ROOT": str(self.storage),
             "FAKE_API_ENV": str(self.api_env),
+            "FAKE_DEPLOY_ASSET_ROOT": _shell(ROOT),
             "FAKE_FINAL_VIEW": str(self.final_view),
             "FAKE_PROBE_VIEW": str(self.probe_view),
             "FAKE_PROBE_SOURCE": str(self.probe_source),
@@ -962,10 +969,39 @@ def test_compose_other_service_images_do_not_block_api_identity(host: Host) -> N
     assert "permissions=verified" in result.stdout
 
 
+def test_compose_build_image_can_have_different_id_than_direct_build(host: Host) -> None:
+    result = host.run(
+        FAKE_COMPOSE_IMAGE_ID_OUTPUT="sha256:" + "b" * 64,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "permissions=verified" in result.stdout
+    api_runs = [line for line in (host.state / "calls.log").read_text().splitlines()
+                if " run " in line and " api " in line]
+    assert api_runs
+    assert all(" --pull never " in line for line in api_runs)
+
+
+@pytest.mark.parametrize("build_override", [
+    {"FAKE_COMPOSE_BUILD_CONTEXT": "/opt/eurith/backend"},
+    {"FAKE_COMPOSE_BUILD_DOCKERFILE": "Otherfile"},
+    {"FAKE_COMPOSE_EXTRA_BUILD_ARG": "1"},
+    {"FAKE_COMPOSE_PULL_POLICY": "always"},
+])
+def test_compose_changed_build_source_fails_before_image_build_and_probes(
+    host: Host, build_override: dict[str, str]
+) -> None:
+    result = host.run(**build_override)
+    assert result.returncode != 0
+    assert "error=compose_api_image_ref_resolution_failed" in result.stderr
+    assert "permissions=verified" not in result.stdout
+    calls = (host.state / "calls.log").read_text()
+    assert " build api" not in calls
+    assert "EURITH_PROBE_ACTION=" not in calls
+
+
 @pytest.mark.parametrize(
     ("extra_env", "expected_error"),
     [
-        ({"FAKE_COMPOSE_IMAGE_ID_OUTPUT": "sha256:" + "b" * 64}, "compose_api_image_mismatch"),
         ({"FAKE_COMPOSE_IMAGE_REF_OUTPUT": ""}, "compose_api_image_ref_invalid"),
         (
             {"FAKE_COMPOSE_IMAGE_REF_OUTPUT": "eurith-api\nother-api"},

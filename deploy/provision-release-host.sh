@@ -357,17 +357,16 @@ external_metadata="$(stat -c '%a:%u:%g' -- "$PROBE_EXTERNAL" 2>/dev/null)" || di
 [[ "$external_metadata" == "777:0:${GROUP_GID}" ]] || die external_probe_metadata_mismatch
 assert_regular_read_and_external_symlink_denied "$PROBE_REGULAR" "$PROBE_EXTERNAL"
 
-"${compose[@]}" build api >/dev/null 2>&1 || die target_api_compose_build_failed
-COMPOSE_API_REF="$("${compose[@]}" config --format json 2>/dev/null | python3 "$SCRIPT_DIR/resolve-compose-api-image.py")" || die compose_api_image_ref_resolution_failed
+COMPOSE_API_REF="$("${compose[@]}" config --format json 2>/dev/null | python3 "$SCRIPT_DIR/resolve-compose-api-image.py" --expected-build-root "$asset_resolved")" || die compose_api_image_ref_resolution_failed
 [[ "$COMPOSE_API_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$ ]] || die compose_api_image_ref_invalid
+"${compose[@]}" build api >/dev/null 2>&1 || die target_api_compose_build_failed
 COMPOSE_API_IMAGE="$(docker image inspect --format '{{.Id}}' "$COMPOSE_API_REF" 2>/dev/null)" || die compose_api_image_resolution_failed
 [[ "$COMPOSE_API_IMAGE" =~ ^(sha256:)?[0-9a-f]{64}$ ]] || die compose_api_image_id_invalid
 [[ "$COMPOSE_API_IMAGE" == sha256:* ]] || COMPOSE_API_IMAGE="sha256:${COMPOSE_API_IMAGE}"
-[[ "$COMPOSE_API_IMAGE" == "$TARGET_API_IMAGE" ]] || die compose_api_image_mismatch
 COMPOSE_API_UID="$(docker run --rm --entrypoint id "$COMPOSE_API_IMAGE" -u 2>/dev/null)" || die compose_api_uid_resolution_failed
 [[ "$COMPOSE_API_UID" =~ ^[1-9][0-9]*$ ]] || die compose_api_uid_invalid
 [[ "$COMPOSE_API_UID" == "$API_UID" ]] || die compose_api_uid_mismatch
-compose_run() { "${compose[@]}" run --rm --no-deps "$@"; }
+compose_run() { "${compose[@]}" run --rm --no-deps --pull never "$@"; }
 if [[ "$ROOT_PREFIX" != / && -n "${EURITH_TEST_PROBE_TOKEN:-}" ]]; then
   PROBE_TOKEN="$EURITH_TEST_PROBE_TOKEN"
 else

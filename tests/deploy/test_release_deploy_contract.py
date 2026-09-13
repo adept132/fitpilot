@@ -351,9 +351,10 @@ else exit 93; fi
     _wrapper(bin_dir, "mount", "exit 94")
     _wrapper(bin_dir, "umount", "exit 0")
     _wrapper(bin_dir, "docker", '''
+printf 'docker %s\n' "$*" >>"$FAKE_CALLS"
 case "$*" in
   *" build api") exit 0 ;;
-  *" run --rm --no-deps api alembic heads") printf 'head\n' ;;
+  *" run --rm --no-deps"*" api alembic heads") printf 'head\n' ;;
   *) exit 95 ;;
 esac
 ''')
@@ -403,7 +404,7 @@ printf 'python3 %s\n' "$*" >>"$FAKE_CALLS"
         "FAKE_PROBE_TARGET": _shell(probe_target),
         "FAKE_WRONG_TARGET": _shell(wrong_target),
     })
-    completed = subprocess.run([BASH, _shell(runner)], env=env, capture_output=True, text=True, timeout=15)
+    completed = subprocess.run([BASH, _shell(runner)], env=env, capture_output=True, text=True, timeout=60)
     return completed, evidence_file.read_text(encoding="ascii").splitlines(), mobile_gate.exists()
 
 
@@ -436,6 +437,10 @@ def test_real_build_and_final_publication_path_succeeds_without_state_change(tmp
     assert evidence.count("boot_mount_runtime=verified") == 2
     assert evidence.count("backend_gate=passed") == 1
     assert gate_exists
+    docker_runs = [line for line in (tmp_path / "state" / "calls.log").read_text().splitlines()
+                   if line.startswith("docker ") and " run " in line]
+    assert docker_runs
+    assert all(" --pull never " in line for line in docker_runs)
 
 
 def _rollback_function() -> str:

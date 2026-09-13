@@ -5,6 +5,7 @@ Compose's ``config --images`` lists every service even when ``api`` is passed.
 For a build-only API service, Compose names its image ``<project>-api``.
 """
 
+import argparse
 import json
 import re
 import sys
@@ -15,9 +16,23 @@ PROJECT = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--expected-build-root")
+    args = parser.parse_args()
     try:
         config = json.load(sys.stdin)
         service = config["services"]["api"]
+        if args.expected_build_root is not None:
+            build = service.get("build")
+            if not isinstance(build, dict) or build != {
+                "context": args.expected_build_root,
+                "dockerfile": "Dockerfile",
+            }:
+                print("error=compose_api_build_source_invalid", file=sys.stderr)
+                return 1
+            if service.get("pull_policy") not in (None, "never"):
+                print("error=compose_api_pull_policy_invalid", file=sys.stderr)
+                return 1
         image = service.get("image")
         if image is None:
             project = config["name"]
