@@ -39,6 +39,7 @@ MIGRATION_MANIFEST_TOOL="$RUNNER_ROOT/deploy/migration-path-manifest.py"
 MIGRATION_APPROVAL_TOOL="$RUNNER_ROOT/deploy/validate-migration-approval.py"
 REHEARSAL_PROBE="$RUNNER_ROOT/deploy/rehearse-release-db.py"
 REHEARSAL_INPUT_PREPARER="$RUNNER_ROOT/deploy/prepare-rehearsal-inputs.py"
+CADDY_DATABASE_GUARD="$RUNNER_ROOT/deploy/guard-caddy-test-database.py"
 MOBILE_GATE_FILE="${MOBILE_GATE_FILE:-$EURITH_EVIDENCE_ROOT/backend-gate-${TARGET_SHA}.env}"
 BOOT_HELPER_DESTINATION=/usr/local/libexec/eurith-release-views
 BOOT_UNIT_DESTINATION=/etc/systemd/system/eurith-release-views.service
@@ -77,7 +78,7 @@ PY
 [[ -f "$EURITH_BASE_COMPOSE" && ! -L "$EURITH_BASE_COMPOSE" ]] || die base_compose_invalid
 [[ -f "$RELEASE_OVERLAY" && ! -L "$RELEASE_OVERLAY" ]] || die release_overlay_invalid
 [[ -f "$MOBILE_GATE_PUBLISHER" && ! -L "$MOBILE_GATE_PUBLISHER" ]] || die mobile_gate_publisher_invalid
-for helper in "$MIGRATION_MANIFEST_TOOL" "$MIGRATION_APPROVAL_TOOL" "$REHEARSAL_PROBE" "$REHEARSAL_INPUT_PREPARER"; do [[ -f "$helper" && ! -L "$helper" ]] || die migration_release_helper_invalid; done
+for helper in "$MIGRATION_MANIFEST_TOOL" "$MIGRATION_APPROVAL_TOOL" "$REHEARSAL_PROBE" "$REHEARSAL_INPUT_PREPARER" "$CADDY_DATABASE_GUARD"; do [[ -f "$helper" && ! -L "$helper" ]] || die migration_release_helper_invalid; done
 [[ -f "$EURITH_CANARY_IDS_FILE" && ! -L "$EURITH_CANARY_IDS_FILE" ]] || die canary_ids_file_invalid
 [[ -f "$EURITH_MIGRATION_APPROVAL_FILE" && ! -L "$EURITH_MIGRATION_APPROVAL_FILE" ]] || die migration_approval_file_invalid
 [[ -f "$EURITH_RESTORE_DB_URL_FILE" && ! -L "$EURITH_RESTORE_DB_URL_FILE" ]] || die restore_database_url_file_invalid
@@ -204,7 +205,7 @@ validate_caddy() {
 }
 
 run_caddy_integration() {
-  [[ "${TEST_DATABASE_URL:-}" =~ ^postgresql\+asyncpg://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?/fitpilot_task_caddy_[a-z0-9_]+$ ]] || die guarded_caddy_database_required
+  python3 "$CADDY_DATABASE_GUARD" || die guarded_caddy_database_required
   (cd "$EURITH_DEPLOY_ASSET_ROOT" && CADDY_INTEGRATION_REQUIRED=1 python3 -m pytest tests/deploy/test_caddy_integration.py -q -m caddy_integration) || die caddy_integration_failed
   evidence caddy_integration passed
 }
