@@ -4,6 +4,8 @@ services:
       context: "${EURITH_RUNTIME_SOURCE_ROOT:?set exact runtime source root}"
     env_file:
       - /etc/eurith/api-release.env
+    environment:
+      DATABASE_URL: !reset null
     group_add:
       - "${RELEASE_SHARED_GID:?set in /etc/eurith/release-deploy.env}"
     volumes:

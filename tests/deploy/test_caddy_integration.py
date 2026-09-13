@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+import re
 import sys
 
 import pytest
@@ -115,7 +116,12 @@ def test_unsafe_database_stops_before_app_import_or_subprocess(
 
 def test_harness_contract_is_pinned_and_uses_exact_production_caddyfile() -> None:
     """Catches a harness that silently tests a generated route or floating Caddy tag."""
-    assert CADDY_IMAGE == "caddy:2.11.4"
+    configured_image = os.environ.get("CADDY_TEST_IMAGE")
+    if configured_image:
+        assert re.fullmatch(r"caddy:2\.11\.4@sha256:[0-9a-f]{64}", configured_image)
+        assert CADDY_IMAGE == configured_image
+    else:
+        assert CADDY_IMAGE == "caddy:2.11.4"
     assert CaddyHarness.production_caddyfile().resolve() == (
         Path(__file__).resolve().parents[2] / "deploy/caddy/Caddyfile"
     ).resolve()

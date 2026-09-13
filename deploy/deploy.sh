@@ -40,6 +40,7 @@ MIGRATION_APPROVAL_TOOL="$RUNNER_ROOT/deploy/validate-migration-approval.py"
 REHEARSAL_PROBE="$RUNNER_ROOT/deploy/rehearse-release-db.py"
 REHEARSAL_INPUT_PREPARER="$RUNNER_ROOT/deploy/prepare-rehearsal-inputs.py"
 CADDY_DATABASE_GUARD="$RUNNER_ROOT/deploy/guard-caddy-test-database.py"
+COMPOSE_DATABASE_GUARD="$RUNNER_ROOT/deploy/guard-compose-database-url.py"
 MOBILE_GATE_FILE="${MOBILE_GATE_FILE:-$EURITH_EVIDENCE_ROOT/backend-gate-${TARGET_SHA}.env}"
 BOOT_HELPER_DESTINATION=/usr/local/libexec/eurith-release-views
 BOOT_UNIT_DESTINATION=/etc/systemd/system/eurith-release-views.service
@@ -78,7 +79,7 @@ PY
 [[ -f "$EURITH_BASE_COMPOSE" && ! -L "$EURITH_BASE_COMPOSE" ]] || die base_compose_invalid
 [[ -f "$RELEASE_OVERLAY" && ! -L "$RELEASE_OVERLAY" ]] || die release_overlay_invalid
 [[ -f "$MOBILE_GATE_PUBLISHER" && ! -L "$MOBILE_GATE_PUBLISHER" ]] || die mobile_gate_publisher_invalid
-for helper in "$MIGRATION_MANIFEST_TOOL" "$MIGRATION_APPROVAL_TOOL" "$REHEARSAL_PROBE" "$REHEARSAL_INPUT_PREPARER" "$CADDY_DATABASE_GUARD"; do [[ -f "$helper" && ! -L "$helper" ]] || die migration_release_helper_invalid; done
+for helper in "$MIGRATION_MANIFEST_TOOL" "$MIGRATION_APPROVAL_TOOL" "$REHEARSAL_PROBE" "$REHEARSAL_INPUT_PREPARER" "$CADDY_DATABASE_GUARD" "$COMPOSE_DATABASE_GUARD"; do [[ -f "$helper" && ! -L "$helper" ]] || die migration_release_helper_invalid; done
 [[ -f "$EURITH_CANARY_IDS_FILE" && ! -L "$EURITH_CANARY_IDS_FILE" ]] || die canary_ids_file_invalid
 [[ -f "$EURITH_MIGRATION_APPROVAL_FILE" && ! -L "$EURITH_MIGRATION_APPROVAL_FILE" ]] || die migration_approval_file_invalid
 [[ -f "$EURITH_RESTORE_DB_URL_FILE" && ! -L "$EURITH_RESTORE_DB_URL_FILE" ]] || die restore_database_url_file_invalid
@@ -194,6 +195,7 @@ validate_caddy() {
   local compose_hash caddy_digest repo_digests
   compose_hash="$(sha256sum "$EURITH_BASE_COMPOSE" "$RELEASE_OVERLAY" "$CADDYFILE" | sha256sum | awk '{print $1}')"; evidence compose_sha256 "$compose_hash"
   "${compose[@]}" config >/dev/null || die compose_validation_failed
+  "${compose[@]}" config --format json | python3 "$COMPOSE_DATABASE_GUARD" /etc/eurith/api-release.env || die production_database_target_invalid
   docker pull "$CADDY_IMAGE_REF" >/dev/null || die caddy_pull_failed
   repo_digests="$(docker image inspect "$CADDY_IMAGE_REF" --format '{{join .RepoDigests " "}}')" || die caddy_digest_inspect_failed
   grep -Eq "(^|[[:space:]])[^[:space:]]+@${EURITH_APPROVED_CADDY_DIGEST}([[:space:]]|$)" <<<"$repo_digests" || die caddy_digest_mismatch
@@ -206,7 +208,7 @@ validate_caddy() {
 
 run_caddy_integration() {
   python3 "$CADDY_DATABASE_GUARD" || die guarded_caddy_database_required
-  (cd "$EURITH_DEPLOY_ASSET_ROOT" && CADDY_INTEGRATION_REQUIRED=1 python3 -m pytest tests/deploy/test_caddy_integration.py -q -m caddy_integration) || die caddy_integration_failed
+  (cd "$EURITH_DEPLOY_ASSET_ROOT" && CADDY_TEST_IMAGE="$CADDY_IMAGE_REF" CADDY_INTEGRATION_REQUIRED=1 python3 -m pytest tests/deploy/test_caddy_integration.py -q -m caddy_integration) || die caddy_integration_failed
   evidence caddy_integration passed
 }
 
@@ -278,6 +280,7 @@ rehearse_migration_compatibility() {
   local -a target_rehearsal_compose rollback_candidate_compose
   target_rehearsal_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY" -f "$REHEARSAL_OVERLAY")
   "${target_rehearsal_compose[@]}" config >/dev/null || die target_rehearsal_compose_invalid
+  "${target_rehearsal_compose[@]}" config --format json | python3 "$COMPOSE_DATABASE_GUARD" "$REHEARSAL_DB_URL_SNAPSHOT" || die rehearsal_database_target_invalid
   "${target_rehearsal_compose[@]}" run --rm --no-deps --pull never api alembic upgrade head || die target_migration_rehearsal_failed
   target_current="$("${target_rehearsal_compose[@]}" run --rm --no-deps --pull never api alembic current 2>/dev/null | sed -n 's/^\([0-9A-Za-z_]*\).*/\1/p' | tail -n1)" || die target_schema_rehearsal_failed
   [[ "$target_current" == "$EXPECTED_ALEMBIC_HEAD" ]] || die target_schema_rehearsal_failed
@@ -290,6 +293,7 @@ rehearse_migration_compatibility() {
   export EURITH_RUNTIME_ASSET_ROOT="$EURITH_DEPLOY_ASSET_ROOT"
   rollback_candidate_compose=(docker compose --env-file "$DEPLOY_ENV" -f "$EURITH_BASE_COMPOSE" -f "$RELEASE_OVERLAY" -f "$REHEARSAL_OVERLAY")
   "${rollback_candidate_compose[@]}" config >/dev/null || die rollback_candidate_compatibility_rehearsal_failed
+  "${rollback_candidate_compose[@]}" config --format json | python3 "$COMPOSE_DATABASE_GUARD" "$REHEARSAL_DB_URL_SNAPSHOT" || die rehearsal_database_target_invalid
   "${rollback_candidate_compose[@]}" build api >/dev/null || die rollback_candidate_compatibility_rehearsal_failed
   [[ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" == "$ROLLBACK_SHA" && -z "$(git -C "$SOURCE_DIR" status --porcelain)" ]] || die rollback_candidate_checkout_invalid
   rollback_heads="$("${rollback_candidate_compose[@]}" run --rm --no-deps --pull never api alembic heads 2>/dev/null | sed -n 's/^\([0-9A-Za-z_]*\).*/\1/p')" || die rollback_candidate_compatibility_rehearsal_failed
@@ -304,6 +308,7 @@ rehearse_migration_compatibility() {
 }
 
 apply_migration_once() {
+  "${compose[@]}" config --format json | python3 "$COMPOSE_DATABASE_GUARD" /etc/eurith/api-release.env || die production_database_target_invalid
   MIGRATION_ATTEMPTED=1; MIGRATION_STATE=unknown
   printf '%s\n' 'migration_state=unknown' >&2
   "${compose[@]}" run --rm --no-deps --pull never api alembic upgrade head || die migration_failed
