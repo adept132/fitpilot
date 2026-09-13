@@ -100,7 +100,7 @@ OLD_COMMIT=''; EVIDENCE_DIR=''; BACKUP_GENERATION=''; BACKUP_MANIFEST_SHA256='';
 declare -A SWITCH_CONTAINER_IDS=()
 evidence() {
   local key="$1" value="$2"
-  [[ "$key" =~ ^[a-z_]+$ && "$value" != *$'\n'* && "$value" != *$'\r'* && "$value" != *'='* ]] || die invalid_evidence
+  [[ "$key" =~ ^[a-z_][a-z0-9_]*$ && "$value" != *$'\n'* && "$value" != *$'\r'* && "$value" != *'='* ]] || die invalid_evidence
   printf '%s=%s\n' "$key" "$value" >>"$EVIDENCE_DIR/deploy.env"
 }
 
