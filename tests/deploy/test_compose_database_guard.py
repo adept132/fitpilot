@@ -73,3 +73,15 @@ def test_release_compose_resets_base_database_environment_override() -> None:
     overlay = (ROOT / "deploy" / "compose.release.yml").read_text(encoding="utf-8")
     api = overlay.split("  api:\n", 1)[1].split("\n  caddy:", 1)[0]
     assert "    environment:\n      DATABASE_URL: !reset null\n" in api
+
+
+def test_rehearsal_container_can_reach_loopback_only_restore_database() -> None:
+    script = ROOT / "deploy" / "prepare-rehearsal-inputs.py"
+    spec = importlib.util.spec_from_file_location("rehearsal_inputs_network", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    overlay = module.overlay_bytes("/tmp/restore-db.env", "/tmp/probe.py").decode("ascii")
+    assert "    network_mode: host\n" in overlay
+    assert "    networks: !reset []\n" in overlay
+    assert "    ports: !reset []\n" in overlay
