@@ -298,7 +298,11 @@ def _has_only_default_constraint_options(
 
 
 def _catalog_rows(bind: Any, sql: str) -> list[Mapping[str, Any]]:
-    return list(bind.execute(sa.text(sql)).mappings())
+    rows = [dict(row) for row in bind.execute(sa.text(sql)).mappings()]
+    for row in rows:
+        if isinstance(row.get("contype"), bytes):
+            row["contype"] = row["contype"].decode("ascii")
+    return rows
 
 
 def _require_postgresql_catalog_contract(bind: Any, *, include_eas: bool) -> None:

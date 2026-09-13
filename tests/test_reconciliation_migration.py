@@ -238,6 +238,31 @@ def test_real_postgresql_reflection_shape_is_an_idempotent_noop():
     assert migration.plan_reconciliation(FakeInspector(**schema)) == ()
 
 
+def test_catalog_constraint_type_from_postgresql_is_normalized_before_comparison():
+    migration = importlib.import_module(MIGRATION_MODULE)
+
+    class CatalogResult:
+        def mappings(self):
+            return [{
+                "table_name": "app_releases",
+                "conname": "ck_app_releases_platform",
+                "contype": b"c",
+                "convalidated": True,
+                "connoinherit": False,
+                "condeferrable": False,
+                "condeferred": False,
+                "definition": "CHECK (platform::text = 'android'::text)",
+            }]
+
+    class CatalogBind:
+        def execute(self, _statement):
+            return CatalogResult()
+
+    rows = migration._catalog_rows(CatalogBind(), "SELECT constraint metadata")
+
+    assert rows[0]["contype"] == "c"
+
+
 def test_reconciliation_executes_the_original_additive_migrations_in_order():
     migration = importlib.import_module(MIGRATION_MODULE)
     called = []
