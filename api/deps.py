@@ -1,7 +1,6 @@
 from fastapi import Depends, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from api.core.firebase_admin import verify_firebase_token
 from api.errors import LocalizedHTTPException
 
 from collections.abc import AsyncGenerator
@@ -13,6 +12,13 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 firebase_bearer_scheme = HTTPBearer()
+
+
+def verify_firebase_token(id_token: str) -> dict:
+    from api.core.firebase_admin import verify_firebase_token as verify
+
+    return verify(id_token)
+
 
 async def get_current_firebase_claims(
     credentials: HTTPAuthorizationCredentials = Depends(firebase_bearer_scheme),

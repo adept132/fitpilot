@@ -132,6 +132,7 @@ async def delete_firebase_user(firebase_uid: str) -> bool:
     входе просто создастся заново как новый пустой пользователь.
     """
     try:
+        import api.core.firebase_admin  # noqa: F401 - initializes the default app
         from firebase_admin import auth
 
         auth.delete_user(firebase_uid)

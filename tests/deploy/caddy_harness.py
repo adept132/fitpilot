@@ -333,11 +333,19 @@ class CaddyHarness:
                 await connection.run_sync(models.Base.metadata.create_all)
 
         asyncio.run(create_current_schema())
-        main = importlib.import_module("api.main")
+        fastapi = importlib.import_module("fastapi")
+        errors = importlib.import_module("api.errors")
+        releases = importlib.import_module("api.routers.releases")
+        release_app = fastapi.FastAPI()
+        release_app.add_exception_handler(
+            errors.LocalizedHTTPException,
+            errors.localized_http_exception_handler,
+        )
+        release_app.include_router(releases.router)
         asyncio.run(self._seed(database.SessionLocal, models.AppRelease))
         asyncio.run(database.engine.dispose())
         self._engine = database.engine
-        router = _TestControlRouter(main.app, self.storage_key)
+        router = _TestControlRouter(release_app, self.storage_key)
         uvicorn = importlib.import_module("uvicorn")
         self.server = uvicorn.Server(
             uvicorn.Config(

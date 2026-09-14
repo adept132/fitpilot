@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import importlib
+import os
+from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -48,6 +52,8 @@ def test_empty_caddy_database_gets_current_schema_before_api_is_loaded(monkeypat
         if name == "api.services.models":
             return models
         if name == "api.main":
+            raise AssertionError("Caddy harness imported the credential-dependent full app")
+        if name == "api.routers.releases":
             assert inspect(engine).has_table("app_releases")
             raise _SchemaReady()
         return real_import(name)
@@ -68,3 +74,68 @@ def test_empty_caddy_database_gets_current_schema_before_api_is_loaded(monkeypat
             harness.start()
     finally:
         harness.close()
+
+
+def test_public_release_route_loads_without_firebase_credentials() -> None:
+    """A public APK request must not initialize Firebase at import time."""
+    env = os.environ.copy()
+    env.pop("FIREBASE_CREDENTIALS", None)
+    env["DATABASE_URL"] = "postgresql+asyncpg://nobody@localhost/fitpilot_task_caddy_test"
+    script = """
+import sys
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from api.routers.releases import router
+assert "api.core.firebase_admin" not in sys.modules
+app = FastAPI()
+app.include_router(router)
+response = TestClient(app).get("/app-releases/not-a-uuid/download")
+assert response.status_code == 422, response.status_code
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_startup_account_deletion_initializes_firebase_before_delete() -> None:
+    """Deferred auth import must not strand accounts purged before first login."""
+    env = os.environ.copy()
+    env["DATABASE_URL"] = "postgresql+asyncpg://nobody@localhost/fitpilot_task_caddy_test"
+    env["FIREBASE_CREDENTIALS"] = "{}"
+    script = """
+import asyncio
+import firebase_admin
+from firebase_admin import auth, credentials
+
+firebase_admin._apps.clear()
+initialized = []
+credentials.Certificate = lambda _value: object()
+def initialize(credential):
+    initialized.append(credential)
+    firebase_admin._apps["[DEFAULT]"] = object()
+firebase_admin.initialize_app = initialize
+def delete_user(uid):
+    assert initialized
+    assert uid == "expired-user"
+auth.delete_user = delete_user
+
+from api.services.account_service import delete_firebase_user
+assert asyncio.run(delete_firebase_user("expired-user")) is True
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
