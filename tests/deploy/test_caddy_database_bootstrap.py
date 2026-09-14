@@ -9,15 +9,13 @@ import sys
 from types import SimpleNamespace
 from uuid import uuid4
 
+from fastapi import APIRouter
+from fastapi.testclient import TestClient
 import pytest
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine, inspect
 from sqlalchemy.pool import StaticPool
 
 from tests.deploy import caddy_harness
-
-
-class _SchemaReady(Exception):
-    pass
 
 
 class _ConnectionAdapter:
@@ -39,35 +37,36 @@ class _BeginAdapter:
         return self.context.__exit__(kind, value, traceback)
 
 
-def test_caddy_schema_and_seed_share_one_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The pooled DB connection must not cross asyncio.run event loops."""
+def test_api_lifespan_owns_database_on_one_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Schema, fixture rows, requests, and teardown share the API worker loop."""
     engine = create_engine("sqlite://", poolclass=StaticPool)
     metadata = MetaData()
     Table("app_releases", metadata, Column("id", Integer, primary_key=True))
-    schema_loop = None
-    deleted_rows = []
-    dispose_calls = 0
+    events = []
 
     def create_schema(connection):
-        nonlocal schema_loop
-        schema_loop = asyncio.get_running_loop()
+        events.append(("schema", asyncio.get_running_loop()))
         metadata.create_all(connection)
 
     async def dispose():
-        nonlocal dispose_calls
-        if dispose_calls == 0:
-            assert asyncio.get_running_loop() is schema_loop
-        dispose_calls += 1
+        events.append(("dispose", asyncio.get_running_loop()))
 
-    async def seed_on_schema_loop(self, session_factory, app_release):
+    async def seed_rows(self, session_factory, app_release):
         assert inspect(engine).has_table("app_releases")
-        assert asyncio.get_running_loop() is schema_loop
+        events.append(("seed", asyncio.get_running_loop()))
         self.release_ids["valid"] = uuid4()
         self._session_factory = session_factory
         self._app_release = app_release
 
     async def delete_rows(self):
-        deleted_rows.append(True)
+        events.append(("delete", asyncio.get_running_loop()))
+
+    router = APIRouter()
+
+    @router.get("/loop-probe")
+    async def loop_probe():
+        events.append(("request", asyncio.get_running_loop()))
+        return {"ok": True}
 
     database = SimpleNamespace(
         engine=SimpleNamespace(begin=lambda: _BeginAdapter(engine), dispose=dispose),
@@ -80,20 +79,14 @@ def test_caddy_schema_and_seed_share_one_loop(monkeypatch: pytest.MonkeyPatch) -
     real_import = importlib.import_module
 
     def import_for_harness(name: str):
-        if name == "app.database":
-            return database
-        if name == "api.services.models":
-            return models
         if name == "api.main":
             raise AssertionError("Caddy harness imported the credential-dependent full app")
         if name == "api.routers.releases":
-            assert inspect(engine).has_table("app_releases")
-            raise _SchemaReady()
+            return SimpleNamespace(router=router)
         return real_import(name)
 
     monkeypatch.setattr(caddy_harness, "importlib", SimpleNamespace(import_module=import_for_harness))
-    monkeypatch.setattr(caddy_harness.CaddyHarness, "_prepare_files_and_mount", lambda self: None)
-    monkeypatch.setattr(caddy_harness.CaddyHarness, "_seed", seed_on_schema_loop)
+    monkeypatch.setattr(caddy_harness.CaddyHarness, "_seed", seed_rows)
     monkeypatch.setattr(caddy_harness.CaddyHarness, "_delete_rows", delete_rows)
 
     def no_historical_migration(args, **kwargs):
@@ -105,11 +98,13 @@ def test_caddy_schema_and_seed_share_one_loop(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://nobody@localhost/fitpilot_task_caddy_test")
     harness = caddy_harness.CaddyHarness("postgresql+asyncpg://nobody@localhost/fitpilot_task_caddy_test")
     try:
-        with pytest.raises(_SchemaReady):
-            harness.start()
+        with TestClient(harness._build_api_app(database, models)) as client:
+            assert client.get("/loop-probe").status_code == 200
     finally:
         harness.close()
-    assert deleted_rows == [True]
+        engine.dispose()
+    assert [name for name, _loop in events] == ["schema", "seed", "request", "delete", "dispose"]
+    assert len({id(loop) for _name, loop in events}) == 1
 
 
 def test_public_release_route_loads_without_firebase_credentials() -> None:

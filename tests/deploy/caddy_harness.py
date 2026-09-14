@@ -6,7 +6,6 @@ loaded by :meth:`CaddyHarness.start_or_skip`.
 """
 from __future__ import annotations
 
-import asyncio
 import base64
 import contextlib
 import hashlib
@@ -24,7 +23,7 @@ import tempfile
 import threading
 import time
 from types import TracebackType
-from typing import Any, Iterator
+from typing import Any, AsyncIterator, Iterator
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
@@ -327,35 +326,15 @@ class CaddyHarness:
         os.environ["RELEASE_STORAGE_ROOT"] = str(self.source_root)
         database = importlib.import_module("app.database")
         models = importlib.import_module("api.services.models")
-        self._engine = database.engine
-
-        async def initialize_disposable_database() -> None:
-            try:
-                async with database.engine.begin() as connection:
-                    await connection.run_sync(models.Base.metadata.create_all)
-                await self._seed(database.SessionLocal, models.AppRelease)
-            finally:
-                await database.engine.dispose()
-
-        asyncio.run(initialize_disposable_database())
-        fastapi = importlib.import_module("fastapi")
-        errors = importlib.import_module("api.errors")
-        releases = importlib.import_module("api.routers.releases")
-        release_app = fastapi.FastAPI()
-        release_app.add_exception_handler(
-            errors.LocalizedHTTPException,
-            errors.localized_http_exception_handler,
-        )
-        release_app.include_router(releases.router)
-        router = _TestControlRouter(release_app, self.storage_key)
         uvicorn = importlib.import_module("uvicorn")
         self.server = uvicorn.Server(
             uvicorn.Config(
-                router,
+                lambda: self._build_api_app(database, models),
                 host="127.0.0.1",
                 port=self.api_port,
                 http="h11",
-                lifespan="off",
+                factory=True,
+                lifespan="on",
                 log_level="warning",
             )
         )
@@ -364,6 +343,33 @@ class CaddyHarness:
         self._wait_http(self.api_port, "/__caddy_test/counter/all")
         self._start_caddy()
         self.runtime_case_count = 1
+
+    def _build_api_app(self, database: Any, models: Any) -> Any:
+        fastapi = importlib.import_module("fastapi")
+        errors = importlib.import_module("api.errors")
+        releases = importlib.import_module("api.routers.releases")
+
+        @contextlib.asynccontextmanager
+        async def lifespan(_app: Any) -> AsyncIterator[None]:
+            try:
+                async with database.engine.begin() as connection:
+                    await connection.run_sync(models.Base.metadata.create_all)
+                await self._seed(database.SessionLocal, models.AppRelease)
+                yield
+            finally:
+                try:
+                    if hasattr(self, "_session_factory") and self.release_ids:
+                        await self._delete_rows()
+                finally:
+                    await database.engine.dispose()
+
+        release_app = fastapi.FastAPI(lifespan=lifespan)
+        release_app.add_exception_handler(
+            errors.LocalizedHTTPException,
+            errors.localized_http_exception_handler,
+        )
+        release_app.include_router(releases.router)
+        return _TestControlRouter(release_app, self.storage_key)
 
     async def _seed(self, session_factory: Any, app_release: Any) -> None:
         variants = {
@@ -617,11 +623,6 @@ class CaddyHarness:
             self.server.should_exit = True
         if self.thread is not None:
             self.thread.join(timeout=10)
-        if hasattr(self, "_session_factory") and self.release_ids:
-            with contextlib.suppress(Exception):
-                asyncio.run(self._engine.dispose())
-                asyncio.run(self._delete_rows())
-                asyncio.run(self._engine.dispose())
         if self._probe_mounted:
             _run(["umount", str(self.view_probe)], cwd=self.repo, check=False, timeout=30)
             self._probe_mounted = False
