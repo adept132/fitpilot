@@ -323,20 +323,17 @@ class CaddyHarness:
 
     def start(self) -> None:
         self._prepare_files_and_mount()
-        env = os.environ.copy()
-        env["DATABASE_URL"] = self.database_url
-        env["RELEASE_STORAGE_ROOT"] = str(self.source_root)
-        _run(
-            [sys.executable, "-m", "alembic", "upgrade", "head"],
-            cwd=self.repo,
-            env=env,
-            timeout=120,
-        )
         os.environ["DATABASE_URL"] = self.database_url
         os.environ["RELEASE_STORAGE_ROOT"] = str(self.source_root)
-        main = importlib.import_module("api.main")
         database = importlib.import_module("app.database")
         models = importlib.import_module("api.services.models")
+
+        async def create_current_schema() -> None:
+            async with database.engine.begin() as connection:
+                await connection.run_sync(models.Base.metadata.create_all)
+
+        asyncio.run(create_current_schema())
+        main = importlib.import_module("api.main")
         asyncio.run(self._seed(database.SessionLocal, models.AppRelease))
         asyncio.run(database.engine.dispose())
         self._engine = database.engine
