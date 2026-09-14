@@ -242,6 +242,9 @@ class CaddyHarness:
         self.caddy_port = _reserve_port()
         self.server: Any = None
         self.thread: threading.Thread | None = None
+        self._worker_error: str | None = None
+        self._cleanup_errors: list[str] = []
+        self._container_attempted = False
         self._mounted = False
         self._probe_mounted = False
         self.host_mount_flags: set[str] = set()
@@ -338,11 +341,19 @@ class CaddyHarness:
                 log_level="warning",
             )
         )
-        self.thread = threading.Thread(target=self.server.run, daemon=True)
+        self.thread = threading.Thread(target=self._run_api, daemon=True)
         self.thread.start()
         self._wait_http(self.api_port, "/__caddy_test/counter/all")
         self._start_caddy()
         self.runtime_case_count = 1
+
+    def _run_api(self) -> None:
+        try:
+            self.server.run()
+        except BaseException as exc:
+            # Factory/server exceptions otherwise die in a thread and can expose
+            # the guarded URL through threading's default traceback reporter.
+            self._worker_error = sanitize_output(f"caddy test API worker failed: {exc}")
 
     def _build_api_app(self, database: Any, models: Any) -> Any:
         fastapi = importlib.import_module("fastapi")
@@ -351,17 +362,35 @@ class CaddyHarness:
 
         @contextlib.asynccontextmanager
         async def lifespan(_app: Any) -> AsyncIterator[None]:
+            # Record ownership before seeding: commit can fail after rows exist.
+            self._session_factory = database.SessionLocal
+            self._app_release = models.AppRelease
+            failure = None
             try:
                 async with database.engine.begin() as connection:
                     await connection.run_sync(models.Base.metadata.create_all)
                 await self._seed(database.SessionLocal, models.AppRelease)
                 yield
+            except BaseException as exc:
+                failure = sanitize_output(f"caddy test API lifespan failed: {exc}")
+                self._worker_error = failure
             finally:
                 try:
-                    if hasattr(self, "_session_factory") and self.release_ids:
+                    if self.release_ids:
                         await self._delete_rows()
+                        self.release_ids.clear()
+                except BaseException as exc:
+                    self._cleanup_errors.append(sanitize_output(f"fixture deletion failed: {exc}"))
                 finally:
-                    await database.engine.dispose()
+                    try:
+                        await database.engine.dispose()
+                    except BaseException as exc:
+                        self._cleanup_errors.append(sanitize_output(f"database disposal failed: {exc}"))
+            failures = ([failure] if failure else []) + self._cleanup_errors
+            if failures:
+                # Uvicorn logs lifespan failures instead of propagating them.
+                # Store them for close(), and never give its logger raw errors.
+                raise RuntimeError("; ".join(failures)) from None
 
         release_app = fastapi.FastAPI(lifespan=lifespan)
         release_app.add_exception_handler(
@@ -402,8 +431,6 @@ class CaddyHarness:
                     )
                 )
             await session.commit()
-        self._session_factory = session_factory
-        self._app_release = app_release
 
     def _prepare_files_and_mount(self) -> None:
         self.final_source.mkdir(parents=True)
@@ -445,14 +472,15 @@ class CaddyHarness:
 
     def _mount_protected(self, source: Path, target: Path) -> set[str]:
         _run(["mount", "--bind", str(source), str(target)], cwd=self.repo)
-        try:
-            _run(
-                ["mount", "-o", "remount,bind,ro,nosymfollow", str(target)],
-                cwd=self.repo,
-            )
-        except Exception:
-            _run(["umount", str(target)], cwd=self.repo, check=False)
-            raise
+        # A successful bind is owned even if protection or inspection fails.
+        if target == self.view_probe:
+            self._probe_mounted = True
+        else:
+            self._mounted = True
+        _run(
+            ["mount", "-o", "remount,bind,ro,nosymfollow", str(target)],
+            cwd=self.repo,
+        )
         options = _run(
             ["findmnt", "-n", "-o", "OPTIONS", "--target", str(target)],
             cwd=self.repo,
@@ -473,6 +501,7 @@ class CaddyHarness:
             "--env", "RELEASE_FILE_ROOT=/srv/eurith/releases",
             CADDY_IMAGE, "caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile",
         ]
+        self._container_attempted = True
         _run(command, cwd=self.repo, timeout=60)
         try:
             self._probe_container()
@@ -482,8 +511,9 @@ class CaddyHarness:
                 ["docker", "logs", self.container], cwd=self.repo, check=False, timeout=20
             )
             raise RuntimeError(
-                f"Caddy startup/probe failed: {exc}\nlogs={sanitize_output(logs.stdout + logs.stderr)}"
-            ) from exc
+                f"Caddy startup/probe failed: {sanitize_output(str(exc))}\n"
+                f"logs={sanitize_output(logs.stdout + logs.stderr)}"
+            ) from None
 
     def _probe_container(self) -> None:
         target = "/srv/eurith/releases/android/sha256"
@@ -558,21 +588,27 @@ class CaddyHarness:
         )
         return set(result.stdout.decode().strip().split(","))
 
-    @staticmethod
-    def _wait_http(port: int, path: str) -> None:
+    def _wait_http(self, port: int, path: str) -> None:
         deadline = time.monotonic() + 20
         last = "not attempted"
         while time.monotonic() < deadline:
+            if self._worker_error:
+                raise RuntimeError(self._worker_error)
+            if self.thread is not None and not self.thread.is_alive():
+                raise RuntimeError("caddy test API exited before readiness")
+            connection = None
             try:
                 connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
                 connection.request("GET", path)
                 response = connection.getresponse()
                 response.read()
-                connection.close()
                 return
             except OSError as exc:
                 last = str(exc)
                 time.sleep(0.1)
+            finally:
+                if connection is not None:
+                    connection.close()
         raise RuntimeError(f"HTTP process did not become ready: {sanitize_output(last)}")
 
     def request(
@@ -618,18 +654,46 @@ class CaddyHarness:
         return int(response.body)
 
     def close(self) -> None:
-        _run(["docker", "rm", "-f", self.container], cwd=self.repo, check=False, timeout=30)
+        errors = []
+        if self._container_attempted:
+            try:
+                _run(["docker", "rm", "-f", self.container], cwd=self.repo, timeout=30)
+                self._container_attempted = False
+            except Exception as exc:
+                errors.append(sanitize_output(f"container cleanup failed: {exc}"))
         if self.server is not None:
             self.server.should_exit = True
         if self.thread is not None:
-            self.thread.join(timeout=10)
-        if self._probe_mounted:
-            _run(["umount", str(self.view_probe)], cwd=self.repo, check=False, timeout=30)
-            self._probe_mounted = False
-        if self._mounted:
-            _run(["umount", str(self.view_final)], cwd=self.repo, check=False, timeout=30)
-            self._mounted = False
-        self.temp.cleanup()
+            try:
+                self.thread.join(timeout=10)
+                if self.thread.is_alive():
+                    errors.append("caddy test API did not stop within 10 seconds")
+            except Exception as exc:
+                errors.append(sanitize_output(f"caddy test API join failed: {exc}"))
+        if self._worker_error:
+            errors.append(self._worker_error)
+        errors.extend(self._cleanup_errors)
+        for flag, target in (("_probe_mounted", self.view_probe), ("_mounted", self.view_final)):
+            if getattr(self, flag):
+                try:
+                    result = _run(["umount", str(target)], cwd=self.repo, check=False, timeout=30)
+                    if result.returncode:
+                        raise RuntimeError("owned view is still mounted")
+                    setattr(self, flag, False)
+                except Exception as exc:
+                    errors.append(sanitize_output(f"view unmount failed: {exc}"))
+        if self._mounted or self._probe_mounted:
+            # Never recurse into a view whose unmount was not proven, including
+            # through TemporaryDirectory's garbage-collection finalizer.
+            self.temp._finalizer.detach()
+        else:
+            try:
+                self.temp.cleanup()
+            except Exception as exc:
+                errors.append(sanitize_output(f"temporary directory cleanup failed: {exc}"))
+        if errors:
+            # The context manager's original test/startup exception stays chained.
+            raise RuntimeError("Caddy harness cleanup failed: " + "; ".join(errors))
 
     async def _delete_rows(self) -> None:
         sqlalchemy = importlib.import_module("sqlalchemy")
