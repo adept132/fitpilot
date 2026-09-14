@@ -327,12 +327,17 @@ class CaddyHarness:
         os.environ["RELEASE_STORAGE_ROOT"] = str(self.source_root)
         database = importlib.import_module("app.database")
         models = importlib.import_module("api.services.models")
+        self._engine = database.engine
 
-        async def create_current_schema() -> None:
-            async with database.engine.begin() as connection:
-                await connection.run_sync(models.Base.metadata.create_all)
+        async def initialize_disposable_database() -> None:
+            try:
+                async with database.engine.begin() as connection:
+                    await connection.run_sync(models.Base.metadata.create_all)
+                await self._seed(database.SessionLocal, models.AppRelease)
+            finally:
+                await database.engine.dispose()
 
-        asyncio.run(create_current_schema())
+        asyncio.run(initialize_disposable_database())
         fastapi = importlib.import_module("fastapi")
         errors = importlib.import_module("api.errors")
         releases = importlib.import_module("api.routers.releases")
@@ -342,9 +347,6 @@ class CaddyHarness:
             errors.localized_http_exception_handler,
         )
         release_app.include_router(releases.router)
-        asyncio.run(self._seed(database.SessionLocal, models.AppRelease))
-        asyncio.run(database.engine.dispose())
-        self._engine = database.engine
         router = _TestControlRouter(release_app, self.storage_key)
         uvicorn = importlib.import_module("uvicorn")
         self.server = uvicorn.Server(
