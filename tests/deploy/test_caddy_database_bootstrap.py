@@ -186,6 +186,48 @@ def test_partial_seed_failure_still_deletes_owned_rows(lifecycle_harness, monkey
     assert events[-2:] == ["delete", "dispose"]
 
 
+def test_caddy_launch_failure_cleans_up_started_api_through_gate(lifecycle_harness, monkeypatch):
+    """A failed Docker launch must unwind the already-seeded, serving API worker."""
+    harness, _database, _models, events = lifecycle_harness
+    original_error = RuntimeError("Caddy launch failed after API readiness")
+    harness.database_url = f"postgresql+asyncpg://localhost/fitpilot_task_caddy_launch_{uuid4().hex}"
+
+    def docker_commands(args, **kwargs):
+        if args[:2] == ["docker", "run"]:
+            assert events == ["schema", "seed"]
+            assert harness.server.started
+            assert harness.thread.is_alive()
+            assert harness.release_ids
+            assert args[args.index("--name") + 1] == harness.container
+            events.append("launch")
+            raise original_error
+        assert args == ["docker", "rm", "-f", harness.container]
+        events.append("remove-owned-container")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(caddy_harness, "_run", docker_commands)
+    monkeypatch.setattr(
+        harness, "_start_caddy", caddy_harness.CaddyHarness._start_caddy.__get__(harness)
+    )
+    monkeypatch.setattr(caddy_harness.CaddyHarness, "_unavailable_reason", staticmethod(lambda: None))
+    monkeypatch.setenv("TEST_DATABASE_URL", harness.database_url)
+
+    class GateHarness(caddy_harness.CaddyHarness):
+        def __new__(cls, url):
+            assert url == harness.database_url
+            return harness
+
+    with pytest.raises(RuntimeError) as failure:
+        with GateHarness.start_or_skip():
+            pytest.fail("a failed Caddy launch must never yield the harness")
+
+    assert failure.value is original_error
+    assert events == ["schema", "seed", "launch", "remove-owned-container", "delete", "dispose"]
+    assert not harness.release_ids
+    assert not harness.thread.is_alive()
+    assert not harness.root.exists()
+
+
 def test_worker_cleanup_failure_fails_caller_and_redacts_diagnostics(lifecycle_harness, monkeypatch, caplog):
     """Uvicorn logging shutdown failure must not turn failed deletion into success."""
     harness, _database, _models, events = lifecycle_harness
@@ -322,18 +364,34 @@ def test_container_cleanup_error_does_not_prevent_worker_shutdown(lifecycle_harn
     assert not harness.root.exists()
 
 
-def test_factory_crash_is_sanitized_and_fails_readiness(lifecycle_harness, monkeypatch, caplog):
+@pytest.mark.parametrize("error_type", [RuntimeError, TypeError])
+def test_factory_crash_is_sanitized_and_fails_readiness(lifecycle_harness, monkeypatch, caplog, error_type):
+    """Sanitize before Uvicorn can log a factory TypeError and replace it with exit 1."""
     harness, _database, _models, _events = lifecycle_harness
+    logging_config = importlib.import_module("uvicorn.config").LOGGING_CONFIG
+    monkeypatch.setitem(logging_config["loggers"]["uvicorn"], "propagate", True)
 
     def failed_factory(*args):
-        raise RuntimeError("factory failed /_release_files/factory-secret.apk")
+        raise error_type(
+            "factory failed postgresql+asyncpg://user:factory-password@localhost/fitpilot_task_caddy_x "
+            "/_release_files/factory-secret.apk"
+        )
 
     monkeypatch.setattr(harness, "_build_api_app", failed_factory)
-    with pytest.raises(RuntimeError, match="factory failed") as failure:
+    with pytest.raises(RuntimeError) as failure:
         harness.start()
-    assert "factory-secret.apk" not in str(failure.value) + caplog.text
-    with pytest.raises(RuntimeError, match="factory failed"):
+    diagnostics = "".join(traceback.format_exception(failure.value)) + caplog.text
+    assert "factory-password" not in diagnostics
+    assert "factory-secret.apk" not in diagnostics
+    assert "/_release_files/" not in diagnostics
+    assert "factory failed" in str(failure.value)
+    with pytest.raises(RuntimeError, match="factory failed") as cleanup_failure:
         harness.close()
+    diagnostics = "".join(traceback.format_exception(cleanup_failure.value)) + caplog.text
+    assert "factory-password" not in diagnostics
+    assert "factory-secret.apk" not in diagnostics
+    assert "/_release_files/" not in diagnostics
+    assert not harness.thread.is_alive()
     assert not harness.root.exists()
 
 

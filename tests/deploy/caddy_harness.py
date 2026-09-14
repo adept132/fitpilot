@@ -330,9 +330,20 @@ class CaddyHarness:
         database = importlib.import_module("app.database")
         models = importlib.import_module("api.services.models")
         uvicorn = importlib.import_module("uvicorn")
+
+        def build_api_app() -> Any:
+            try:
+                return self._build_api_app(database, models)
+            except BaseException as exc:
+                # Uvicorn logs factory TypeError raw and replaces it with exit 1.
+                # Cross that boundary with a sanitized, non-TypeError reason.
+                raise RuntimeError(
+                    sanitize_output(f"caddy test API factory failed: {exc}")
+                ) from None
+
         self.server = uvicorn.Server(
             uvicorn.Config(
-                lambda: self._build_api_app(database, models),
+                build_api_app,
                 host="127.0.0.1",
                 port=self.api_port,
                 http="h11",
