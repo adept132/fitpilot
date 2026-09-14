@@ -128,6 +128,34 @@ def test_harness_contract_is_pinned_and_uses_exact_production_caddyfile() -> Non
     assert FIXTURE_BYTES == b"EURITH-CADDY-RANGE-FIXTURE"
 
 
+def test_pinned_caddy_launch_uses_explicit_executable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches Docker treating Caddy's subcommand as an absent image entrypoint."""
+    harness = CaddyHarness("postgresql+asyncpg://localhost/fitpilot_task_caddy_command")
+    captured: list[str] = []
+
+    class DockerRunIntercepted(Exception):
+        pass
+
+    def capture_docker_run(command: list[str], **kwargs: object) -> object:
+        if command[:2] == ["docker", "run"]:
+            captured.extend(command)
+            raise DockerRunIntercepted
+        raise AssertionError(f"unexpected subprocess command: {command}")
+
+    monkeypatch.setattr(harness_module, "_run", capture_docker_run)
+    try:
+        with pytest.raises(DockerRunIntercepted):
+            harness._start_caddy()
+        image_index = captured.index(CADDY_IMAGE)
+        assert captured[image_index + 1:] == [
+            "caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"
+        ]
+    finally:
+        harness.temp.cleanup()
+
+
 def test_subprocess_diagnostics_are_bounded_and_redacted() -> None:
     """Catches credentials, internal paths, or unlimited tool output entering failures."""
     secret = (

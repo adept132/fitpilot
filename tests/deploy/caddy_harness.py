@@ -465,7 +465,7 @@ class CaddyHarness:
             "--env", f"EURITH_SITE_ADDRESS=http://127.0.0.1:{self.caddy_port}",
             "--env", f"EURITH_UPSTREAM=127.0.0.1:{self.api_port}",
             "--env", "RELEASE_FILE_ROOT=/srv/eurith/releases",
-            CADDY_IMAGE, "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile",
+            CADDY_IMAGE, "caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile",
         ]
         _run(command, cwd=self.repo, timeout=60)
         try:
