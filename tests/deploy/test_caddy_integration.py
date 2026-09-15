@@ -156,6 +156,39 @@ def test_pinned_caddy_launch_uses_explicit_executable(
         harness.temp.cleanup()
 
 
+def test_pinned_caddy_launch_retains_only_binary_required_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pinned image gives /usr/bin/caddy cap_net_bind_service=ep."""
+    harness = CaddyHarness("postgresql+asyncpg://localhost/fitpilot_task_caddy_capability")
+    captured: list[str] = []
+
+    class DockerRunIntercepted(Exception):
+        pass
+
+    def capture_docker_run(command: list[str], **kwargs: object) -> object:
+        captured.extend(command)
+        raise DockerRunIntercepted
+
+    monkeypatch.setattr(harness_module, "_run", capture_docker_run)
+    try:
+        with pytest.raises(DockerRunIntercepted):
+            harness._start_caddy()
+        assert captured[:2] == ["docker", "run"]
+        launch = captured[: captured.index(CADDY_IMAGE)]
+        assert launch[launch.index("--cap-drop") + 1] == "ALL"
+        capabilities = [
+            option.split("=", 1)[1] if "=" in option else launch[index + 1]
+            for index, option in enumerate(launch)
+            if option == "--cap-add" or option.startswith("--cap-add=")
+        ]
+        assert capabilities == ["NET_BIND_SERVICE"]
+        assert not any(option == "--privileged" or option.startswith("--privileged=") for option in launch)
+        assert launch[launch.index("--security-opt") + 1] == "no-new-privileges"
+    finally:
+        harness.temp.cleanup()
+
+
 def test_subprocess_diagnostics_are_bounded_and_redacted() -> None:
     """Catches credentials, internal paths, or unlimited tool output entering failures."""
     secret = (

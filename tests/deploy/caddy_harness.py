@@ -502,6 +502,7 @@ class CaddyHarness:
         command = [
             "docker", "run", "--detach", "--name", self.container,
             "--network", "host", "--read-only", "--cap-drop", "ALL",
+            "--cap-add", "NET_BIND_SERVICE",
             "--security-opt", "no-new-privileges", "--tmpfs", "/data:rw,noexec,nosuid,nodev",
             "--tmpfs", "/config:rw,noexec,nosuid,nodev",
             "--mount", f"type=bind,src={self.production_caddyfile()},dst=/etc/caddy/Caddyfile,readonly",
