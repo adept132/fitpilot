@@ -327,9 +327,11 @@ def test_unavailable_or_non_regular_artifacts_are_never_served(
 
 def test_caddy_cannot_follow_a_raw_handoff_to_external_symlink(caddy: CaddyHarness) -> None:
     response = caddy.request("GET", "/__caddy_test/handoff/symlink-raw")
-    assert response.status in {404, 502}
     assert response.body != caddy.outside_bytes
     assert "x-accel-redirect" not in response.headers
+    # Caddy 2.11 maps the nosymfollow ELOOP from its initial fs.Stat to 400.
+    # Other fail-closed paths may return not found or a handled proxy error.
+    assert response.status in {400, 404, 502}
 
 
 def test_exact_upload_limit_does_not_expand_other_routes(caddy: CaddyHarness) -> None:
