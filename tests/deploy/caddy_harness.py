@@ -648,17 +648,24 @@ class CaddyHarness:
                 remaining -= len(part)
                 yield part
 
-        connection.request(
-            "POST",
-            "/internal/app-releases/android/direct-apk",
-            body=chunks(),
-            headers={"Content-Length": str(size), "Content-Type": "application/octet-stream"},
-            encode_chunked=False,
-        )
-        response = connection.getresponse()
-        result = Response(response.status, response.getheaders(), response.read())
-        connection.close()
-        return result
+        try:
+            try:
+                connection.request(
+                    "POST",
+                    "/internal/app-releases/android/direct-apk",
+                    body=chunks(),
+                    headers={
+                        "Content-Length": str(size),
+                        "Content-Type": "application/octet-stream",
+                    },
+                    encode_chunked=False,
+                )
+            except BrokenPipeError:
+                pass
+            response = connection.getresponse()
+            return Response(response.status, response.getheaders(), response.read())
+        finally:
+            connection.close()
 
     def counter(self, name: str) -> int:
         response = self.request("GET", f"/__caddy_test/counter/{name}")
